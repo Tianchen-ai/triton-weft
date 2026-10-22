@@ -33,10 +33,11 @@ public:
         Value lhs = product.getLhs(), rhs = product.getRhs();
         Value accumulator = add->getOperand(1 - operand);
         Type result = add.getResult().getType();
-        auto vector = dyn_cast<riscv::ValueType>(result);
-        const bool scalarAccumulator = vector &&
-            accumulator.getType() == vector.getElementType();
-        if (accumulator.getType() != result && !scalarAccumulator) continue;
+        // A scalar addend already has a direct RVV .vf add/subtract form.
+        // Splat + FMA does not remove an instruction and adds a live vector
+        // accumulator, so retain the original pair in that case. Explicit
+        // source FMA operations are not rewritten by this contraction pass.
+        if (accumulator.getType() != result) continue;
         const StringRef kind = add.getKind() == "add" ? "add" :
             operand == 0 ? "subtract_accumulator" : "subtract_product";
         auto instruction = riscv::pointwiseFMAInstruction(lhs.getType(), rhs.getType(), result, kind);
@@ -58,13 +59,6 @@ public:
           return;
         }
         b.setInsertionPoint(add);
-        if (scalarAccumulator) {
-          auto splat = riscv::RVVSplatOp::create(b, add.getLoc(), vector, accumulator,
-              leaf(b, "rvv", "splat", "rvv.splat", "rvv.splat", 0,
-                   vector.getLayout().getRegisterGroups()));
-          copyOrigin(add, splat);
-          accumulator = splat.getResult();
-        }
         auto fused = riscv::FMAOp::create(b, add.getLoc(), result, lhs, rhs, accumulator,
             leaf(b, isa<riscv::ValueType>(result) ? "rvv" : "scalar", "fma", instruction, instruction,
                  issueRegisterGroups(lhs) + issueRegisterGroups(rhs) + issueRegisterGroups(accumulator),

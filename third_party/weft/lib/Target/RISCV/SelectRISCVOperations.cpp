@@ -437,12 +437,22 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
       mlir::Value vector = product.getLhs();
       mlir::Value scalar = product.getRhs();
       if (!mlir::isa<riscv::ValueType>(vector.getType())) std::swap(vector, scalar);
-      auto direct = mlir::dyn_cast<riscv::ValueType>(vector.getType());
-      auto instruction = direct ? riscv::pointwiseIntegerMACInstruction(
-          kernel.getTarget(), direct, scalar.getType(), result) : llvm::StringRef();
-      if (instruction != "rvv.vmacc.vx") {
-        vector = exactIntegerExtensionInput(product.getLhs());
-        scalar = exactIntegerExtensionInput(product.getRhs());
+      auto narrowVector = exactIntegerExtensionInput(vector);
+      auto narrowScalar = exactIntegerExtensionInput(scalar);
+      if (narrowVector && narrowScalar) {
+        auto narrowType = mlir::dyn_cast<riscv::ValueType>(narrowVector.getType());
+        auto narrowElement = narrowType ? mlir::dyn_cast<mlir::IntegerType>(narrowType.getElementType())
+                                        : mlir::IntegerType();
+        auto narrowScale = mlir::dyn_cast<mlir::IntegerType>(narrowScalar.getType());
+        auto widening = narrowElement && narrowScale &&
+            narrowElement.getSignedness() == narrowScale.getSignedness() &&
+            narrowScale.getWidth() <= narrowElement.getWidth()
+            ? riscv::pointwiseIntegerMACInstruction(kernel.getTarget(), narrowType, narrowElement, result)
+            : llvm::StringRef();
+        if (widening == "rvv.vwmacc.vx" || widening == "rvv.vwmaccu.vx") {
+          vector = narrowVector;
+          scalar = narrowScalar;
+        }
       }
       if (vector && scalar && !mlir::isa<riscv::ValueType>(vector.getType()))
         std::swap(vector, scalar);
@@ -451,7 +461,7 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
       auto element = input ? mlir::dyn_cast<mlir::IntegerType>(input.getElementType()) : mlir::IntegerType();
       if (!input || !element || !scale || scale.isSignless() ||
           scale.getSignedness() != element.getSignedness() || scale.getWidth() > element.getWidth()) continue;
-      instruction = riscv::pointwiseIntegerMACInstruction(kernel.getTarget(), input, element, result);
+      auto instruction = riscv::pointwiseIntegerMACInstruction(kernel.getTarget(), input, element, result);
       if (instruction != "rvv.vmacc.vx" && instruction != "rvv.vwmacc.vx" &&
           instruction != "rvv.vwmaccu.vx") continue;
       bool ordered = true;

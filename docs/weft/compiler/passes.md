@@ -918,6 +918,9 @@ tail passthrough 的 full-step leaf；其它 step 保留未更新 lane。整块�
 这项融合不在前期反复运行的 operation-family selection 中执行。地址分析需要看见
 `base * width + lane` 以及分段坐标的显式关系；过早形成不可分的 MAC 会隐藏连续访存证明，
 迫使后端保留逐元素 gather。访存形态确定后，仍存活的索引与普通数值表达式共用该 MAC 选择。
+vector/scalar 乘法的两端若来自同 signedness 的精确扩展，先检查 widening MAC 的完整
+坐标与目标合法性；不能因为扩展后的同宽 MAC 也合法就先选它，留下冗余向量 widen。
+没有合法 widening 关系时，同宽 MAC 继续按原输入选择，不改变显式窄化或累加精度。
 
 ### `FinalizeRISCVLeaves`
 
@@ -1097,8 +1100,9 @@ validity 保持相同。不穿过改变类型的数值操作，不移动任何�
 两次运算的精度必须相同，不能绕过 cast/widen/narrow、跨 region 或 write/未知 effect。
 当前支持 f32/f64 scalar，以及同布局 RVV vector/vector、vector/scalar；其它
 形状继续使用原有两条运算。选择不依赖 kernel、量化格式或扩展名称。
-同精度的 scalar addend 通过显式 `rvv_splat` 进入向量 accumulator；broadcast 的 SSA
-和寄存器开销可见，不藏入 FMA leaf 或跳过资源分析。
+向量结果的 scalar addend 保留原有 multiply 与 `.vf` add/subtract；新建 splat 再做 FMA
+没有减少指令数，却增加了向量 accumulator 的存活与读写。已有向量 accumulator 的
+融合继续进行；作者显式写出的 `fma` 不由这个隐式 contraction pass 改写。
 独立的 `fma` 保存 typed operands 和 exact leaf，资源 pass 重新核算实际活跃值；
 它沿用原 pointwise 的逐 part 活动长度，没有 closed FMA issue 的调度屏障或 loop-unroll 限制。
 
