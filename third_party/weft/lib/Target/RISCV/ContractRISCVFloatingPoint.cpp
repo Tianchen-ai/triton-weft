@@ -1,6 +1,7 @@
 #include "RISCVPhysicalSupport.h"
 #include "Weft/Dialect/RISCV/IR/FMAIssue.h"
 #include "Weft/Target/RISCVPasses.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 
 using namespace mlir;
@@ -33,11 +34,20 @@ public:
         Value lhs = product.getLhs(), rhs = product.getRhs();
         Value accumulator = add->getOperand(1 - operand);
         Type result = add.getResult().getType();
-        // A scalar addend already has a direct RVV .vf add/subtract form.
-        // Splat + FMA does not remove an instruction and adds a live vector
-        // accumulator, so retain the original pair in that case. Explicit
-        // source FMA operations are not rewritten by this contraction pass.
-        if (accumulator.getType() != result) continue;
+        auto vector = dyn_cast<riscv::ValueType>(result);
+        const bool scalarAccumulator = vector && accumulator.getType() == vector.getElementType();
+        bool reusableSplat = false;
+        if (scalarAccumulator) {
+          for (Operation *parent = add->getParentOp(); parent; parent = parent->getParentOp())
+            if (auto loop = dyn_cast<LoopLikeOpInterface>(parent)) {
+              reusableSplat = loop.isDefinedOutsideOfLoop(accumulator);
+              break;
+            }
+        }
+        // A changing scalar addend already has a direct .vf add/subtract form;
+        // splat + FMA saves no instruction. An invariant addend can amortize
+        // its broadcast across loop iterations, so keep that fusion available.
+        if (accumulator.getType() != result && !reusableSplat) continue;
         const StringRef kind = add.getKind() == "add" ? "add" :
             operand == 0 ? "subtract_accumulator" : "subtract_product";
         auto instruction = riscv::pointwiseFMAInstruction(lhs.getType(), rhs.getType(), result, kind);
@@ -59,6 +69,13 @@ public:
           return;
         }
         b.setInsertionPoint(add);
+        if (scalarAccumulator) {
+          auto splat = riscv::RVVSplatOp::create(b, add.getLoc(), vector, accumulator,
+              leaf(b, "rvv", "splat", "rvv.splat", "rvv.splat", 0,
+                   vector.getLayout().getRegisterGroups()));
+          copyOrigin(add, splat);
+          accumulator = splat.getResult();
+        }
         auto fused = riscv::FMAOp::create(b, add.getLoc(), result, lhs, rhs, accumulator,
             leaf(b, isa<riscv::ValueType>(result) ? "rvv" : "scalar", "fma", instruction, instruction,
                  issueRegisterGroups(lhs) + issueRegisterGroups(rhs) + issueRegisterGroups(accumulator),
