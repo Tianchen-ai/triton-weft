@@ -591,14 +591,22 @@ class dtype(base_type):
             return builder.get_void_ty()
         elif self.name == 'int1':
             return builder.get_int1_ty()
-        elif self.name in ('int8', 'uint8'):
+        elif self.name == 'int8':
             return builder.get_int8_ty()
-        elif self.name in ('int16', 'uint16'):
+        elif self.name == 'uint8':
+            return builder.get_uint8_ty()
+        elif self.name == 'int16':
             return builder.get_int16_ty()
-        elif self.name in ('int32', 'uint32'):
+        elif self.name == 'uint16':
+            return builder.get_uint16_ty()
+        elif self.name == 'int32':
             return builder.get_int32_ty()
-        elif self.name in ('int64', 'uint64'):
+        elif self.name == 'uint32':
+            return builder.get_uint32_ty()
+        elif self.name == 'int64':
             return builder.get_int64_ty()
+        elif self.name == 'uint64':
+            return builder.get_uint64_ty()
         elif self.name == 'fp8e5':
             return builder.get_fp8e5_ty()
         elif self.name == 'fp8e5b16':
@@ -1978,9 +1986,12 @@ def num_programs(axis, _semantic=None):
 
 
 @builtin
-def arange(start, end, _semantic=None):
+def arange(start, end, _semantic=None, *, dtype=None, axis=None):
     start = _unwrap_if_constexpr(start)
     end = _unwrap_if_constexpr(end)
+    dtype, axis = _unwrap_if_constexpr(dtype), _unwrap_if_constexpr(axis)
+    if dtype is not None or axis is not None:
+        return _semantic.logical_arange(start, end, dtype, axis)
     return _semantic.arange(start, end)
 
 
@@ -2261,7 +2272,7 @@ def item(input, _semantic=None, _generator=None):
 
 @_tensor_member_fn
 @builtin
-def reshape(input, *shape, can_reorder=False, _semantic=None, _generator=None):
+def reshape(input, *shape_args, can_reorder=False, shape=None, axes=None, order=None, _semantic=None, _generator=None):
     """
     Returns a tensor with the same number of elements as input but with the
     provided shape.
@@ -2276,7 +2287,14 @@ def reshape(input, *shape, can_reorder=False, _semantic=None, _generator=None):
         reshape(x, (32, 32))
         reshape(x, 32, 32)
     """
-    shape = _shape_check_impl(_unwrap_iterable(shape))
+    if shape is not None and shape_args:
+        raise TypeError("reshape shape was supplied twice")
+    shape = shape if shape is not None else _unwrap_iterable(shape_args)
+    if axes is not None or order is not None:
+        if axes is None or order is None:
+            raise ValueError("named reshape requires both axes and order")
+        return _semantic.named_reshape(input, shape, axes, order)
+    shape = _shape_check_impl(shape)
     if len(shape) == 0:
         return _unsplat(input, _semantic=_semantic, _generator=_generator)
     return _semantic.reshape(input, shape, can_reorder)
@@ -2353,7 +2371,7 @@ def cast(input, dtype: dtype, fp_downcast_rounding: Optional[str] = None, bitcas
 
 @builtin
 def dot(input, other, acc=None, input_precision=None, allow_tf32=None, max_num_imprecise_acc=None, out_dtype=None,
-        _semantic=None):
+        _semantic=None, *, over=None, acc_dtype=None):
     """
     Returns the matrix product of two blocks.
 
@@ -2381,12 +2399,18 @@ def dot(input, other, acc=None, input_precision=None, allow_tf32=None, max_num_i
       Only one of :code:`input_precision` and :code:`allow_tf32` can be
       specified (i.e. at least one must be :code:`None`).
     """
+    over, acc_dtype = _unwrap_if_constexpr(over), _unwrap_if_constexpr(acc_dtype)
+    if over is not None:
+        if acc is not None or out_dtype is not None or input_precision is not None or allow_tf32 is not None:
+            raise ValueError("named dot uses over/acc_dtype; positional dot uses acc/out_dtype/input_precision")
+        return _semantic.named_dot(input, other, over, acc_dtype)
+    if acc_dtype is not None:
+        raise ValueError("acc_dtype belongs to named dot; use out_dtype for positional dot")
     assert input_precision is None or allow_tf32 is None, "Only one of input_precision and allow_tf32 can be specified"
     if input_precision is None:
         supports_tf32 = "tf32" in _semantic.builder.options.allowed_dot_input_precisions
         input_precision = knobs.language.fp32_default or ("tf32" if (supports_tf32 and
                                                                      (allow_tf32 or allow_tf32 is None)) else "ieee")
-
     input_precision = _unwrap_if_constexpr(input_precision)
     out_dtype = _unwrap_if_constexpr(out_dtype)
     max_num_imprecise_acc = _unwrap_if_constexpr(max_num_imprecise_acc)
@@ -2922,10 +2946,8 @@ def minimum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _semantic=None):
 
     .. seealso:: :class:`tl.PropagateNan`
     """
-    x = _semantic.to_tensor(x)
-    y = _semantic.to_tensor(y)
-    x = _promote_bfloat16_to_float32(x, _semantic=_semantic)
-    y = _promote_bfloat16_to_float32(y, _semantic=_semantic)
+    x = _unwrap_if_constexpr(x)
+    y = _unwrap_if_constexpr(y)
     propagate_nan = _unwrap_if_constexpr(propagate_nan)
     return _semantic.minimum(x, y, propagate_nan)
 
@@ -2944,10 +2966,8 @@ def maximum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _semantic=None):
 
     .. seealso:: :class:`tl.PropagateNan`
     """
-    x = _semantic.to_tensor(x)
-    y = _semantic.to_tensor(y)
-    x = _promote_bfloat16_to_float32(x, _semantic=_semantic)
-    y = _promote_bfloat16_to_float32(y, _semantic=_semantic)
+    x = _unwrap_if_constexpr(x)
+    y = _unwrap_if_constexpr(y)
     propagate_nan = _unwrap_if_constexpr(propagate_nan)
     return _semantic.maximum(x, y, propagate_nan)
 
@@ -3030,7 +3050,7 @@ def _insertion_guard(builder):
 
 @_tensor_member_fn
 @builtin
-def reduce(input, axis, combine_fn, keep_dims=False, _semantic=None, _generator=None):
+def reduce(input, axis=None, combine_fn=None, keep_dims=False, _semantic=None, _generator=None, *, op=None):
     """Applies the combine_fn to all elements in :code:`input` tensors along the provided :code:`axis`
 
     :param input: the input tensor, or tuple of tensors
@@ -3043,6 +3063,12 @@ def reduce(input, axis, combine_fn, keep_dims=False, _semantic=None, _generator=
     :type keep_dims: bool
 
     """
+    if op is not None:
+        if combine_fn is not None or _unwrap_if_constexpr(keep_dims):
+            raise ValueError("named reduction uses op and named axis without combine_fn/keep_dims")
+        return _semantic.named_reduce(input, _unwrap_if_constexpr(axis), _unwrap_if_constexpr(op))
+    if combine_fn is None:
+        return _semantic.logical_reduce(input, _unwrap_if_constexpr(axis), _unwrap_if_constexpr(keep_dims))
     if isinstance(input, tensor):
         return reduce((input, ), axis, combine_fn, keep_dims=keep_dims, _semantic=_semantic, _generator=_generator)[0]
 

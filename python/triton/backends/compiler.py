@@ -18,6 +18,16 @@ class Language(Enum):
     """The input language being compiled by the backend."""
     TRITON = 0
     GLUON = 1
+    WEFT = 2
+
+
+@dataclass(frozen=True)
+class CPUTarget:
+    backend: str
+    arch: str
+    march: str
+    abi: str
+    vlen_bits: int
 
 
 class BaseBackend(metaclass=ABCMeta):
@@ -44,6 +54,11 @@ class BaseBackend(metaclass=ABCMeta):
         This function may contain target-specific heuristics and check the legality of the provided options
         """
         raise NotImplementedError
+
+    @staticmethod
+    def merge_options(options: dict, source_options: dict) -> dict:
+        """Combine caller configuration with constraints carried by the source."""
+        return {**options, **source_options}
 
     @abstractmethod
     def add_stages(self, stages: dict, options: object) -> None:

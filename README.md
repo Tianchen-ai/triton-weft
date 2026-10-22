@@ -1,318 +1,143 @@
+# Triton–Weft
 
-| **`Documentation`** | **`Nightly Wheels`** |
-|-------------------- | -------------------- |
-| [![Documentation](https://github.com/triton-lang/triton/actions/workflows/documentation.yml/badge.svg)](https://triton-lang.org/) | [![Wheels](https://github.com/triton-lang/triton/actions/workflows/wheels.yml/badge.svg)](https://github.com/triton-lang/triton/actions/workflows/wheels.yml) |
+[中文](README.zh-CN.md) · [Handbook](https://tianchen-ai.github.io/Weft/) ·
+[Examples](third_party/weft/doc/getting-started/examples.md) ·
+[Weft Bench](https://github.com/Tianchen-ai/Weft-Bench)
 
-# Triton Conference 2025
+This source tree extends Triton 3.8.0 with `@triton.jit(model="weft")` for
+structured, finite-width CPU programs. The shared Python frontend produces
+Canonical Weft IR; the RISC-V physical pipeline emits intrinsic C and local
+assembly for RVV and supported matrix extensions. JIT, autotuning, caching,
+native artifacts and the Python package remain part of Triton.
 
-![Triton Banner](https://github.com/user-attachments/assets/b4b6972a-857c-417f-bf2c-f16f38a358c0)
+Write familiar Triton tensor code for RISC-V CPUs, then use optional Encoding,
+Level and finite-width operations when packed storage and data reuse need to be
+part of the program. The compiler selects RVV operations and supported IME
+matrix fragments while preserving those numerical and storage contracts.
+Applications can launch CPU tensors directly or deploy compiled libraries into
+an existing C/C++ thread pool, including llama.cpp.
 
-The 3rd Triton Developer Conference took place on October 21, 2025 at the Microsoft Silicon Valley Campus in Mountain View, California.
+The standard Triton GPU compilation routes are retained. Native x86/AMX and
+TileLang integration are future backend/frontend work.
 
-### Conference Materials
+![Triton–Weft compilation and application paths](third_party/weft/doc/assets/architecture.svg)
 
-Conference recordings and materials are now available online:
+## Build and install
 
-- **Conference Videos:** [YouTube Playlist](https://www.youtube.com/playlist?list=PLc_vA1r0qoiQqCdWFDUDqI90oY5EjfGuO)
-- **Conference Slides:** [Google Drive Folder](https://drive.google.com/drive/folders/1KB6tD3UM1J0_eUp-F-JSlGrargLBawIr)
+Build this checkout in a dedicated Python environment. A normal upstream
+`pip install triton` does not include the Weft extension.
 
-For previous conference materials, see:
-- [2024 Conference Materials](docs/meetups/dev_conference_2024.md)
-- [2023 Conference Materials](docs/meetups/dev-meetup-2023.md)
-
-# Triton
-
-This is the development repository of Triton, a language and compiler for writing highly efficient custom Deep-Learning primitives. The aim of Triton is to provide an open-source environment to write fast code at higher productivity than CUDA, but also with higher flexibility than other existing DSLs.
-
-The foundations of this project are described in the following MAPL2019 publication: [Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations](http://www.eecs.harvard.edu/~htk/publication/2019-mapl-tillet-kung-cox.pdf). Please consider citing this work if you use Triton!
-
-The [official documentation](https://triton-lang.org) contains installation instructions and tutorials.  See also these third-party [Triton puzzles](https://github.com/srush/Triton-Puzzles), which can all be run using the Triton interpreter -- no GPU required.
-
-# Quick Installation
-
-You can install the latest stable release of Triton from pip:
-
-```shell
-pip install triton
+```sh
+python -m venv /path/to/environment
+/path/to/environment/bin/python -m pip install -r python/requirements.txt
+CC=/path/to/matched-llvm-sdk/bin/clang \
+CXX=/path/to/matched-llvm-sdk/bin/clang++ \
+LLVM_SYSPATH=/path/to/matched-llvm-sdk \
+TRITON_WEFT_CLANG_ROOT=/path/to/native-clang-23 \
+TRITON_WEFT_OPENMP_LIBRARY=/path/to/libomp.so \
+TRITON_WEFT_OPENMP_INCLUDE_DIR=/path/to/openmp-headers \
+TRITON_BUILD_DIR=/path/to/build \
+TRITON_BUILD_PROTON=OFF \
+/path/to/environment/bin/python -m pip install --no-build-isolation .
 ```
 
-Binary wheels are available for CPython 3.10-3.14.
+Use the LLVM revision in [cmake/llvm-info.json](cmake/llvm-info.json).
+The [installation guide](third_party/weft/doc/getting-started/installation.md)
+covers bundled Clang/OpenMP, RISC-V native wheels, cross compilation and the
+PyTorch source integration. Install one Triton distribution per environment.
 
-# Install from source
-
-```shell
-git clone https://github.com/triton-lang/triton.git
-cd triton
-
-pip install -r python/requirements.txt # build-time dependencies
-pip install -e .
-```
-
-Or with a virtualenv:
-
-```shell
-git clone https://github.com/triton-lang/triton.git
-cd triton
-
-python -m venv .venv --prompt triton
-source .venv/bin/activate
-
-pip install -r python/requirements.txt # build-time dependencies
-pip install -e .
-```
-
-# Building with a custom LLVM
-
-Triton uses LLVM to generate code for GPUs and CPUs.  Normally, the Triton build
-downloads a prebuilt LLVM, but you can also build and use LLVM from source.
-
-LLVM does not have a stable API, so the Triton build will not work at an
-arbitrary LLVM version.
-
-For convenience, use the following command to build LLVM and install Triton with the custom LLVM:
-
-```shell
-make dev-install-llvm
-```
-
-<details>
-<summary>
-Alternatively, follow these steps to build LLVM from source manually.
-</summary>
-
-1. Find the version of LLVM that Triton builds against. Check the `llvm_hash`
-field in `cmake/llvm-info.json` to see the current version. For example, if it
-says:
-       "llvm_hash": "49af6502c6dcb4a7f7520178bd14df396f78240c"
-
-   This means that the version of Triton you have builds against
-   [LLVM](https://github.com/llvm/llvm-project) 49af6502.
-
-2. `git checkout` LLVM at this revision.  Optionally, make additional
-   modifications to LLVM.
-
-3. [Build LLVM](https://llvm.org/docs/CMake.html).  For example, you might run:
-
-       $ cd $HOME/llvm-project  # your clone of LLVM.
-       $ mkdir build
-       $ cd build
-       $ cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON ../llvm -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld;clang" -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU"
-       $ ninja
-
-4. Grab a snack, this will take a while.
-
-5. Build Triton as above, but set the following environment variables:
-
-       # Modify as appropriate to point to your LLVM build.
-       $ export LLVM_BUILD_DIR=$HOME/llvm-project/build
-
-       $ cd <triton install>
-       $ LLVM_INCLUDE_DIRS=$LLVM_BUILD_DIR/include \
-         LLVM_LIBRARY_DIR=$LLVM_BUILD_DIR/lib \
-         LLVM_SYSPATH=$LLVM_BUILD_DIR \
-         pip install -e .
-
-</details>
-
-# Tips for building
-
-- Set `TRITON_BUILD_WITH_CLANG_LLD=true` as an environment variable to use clang
-  and lld.  lld in particular results in faster builds.
-
-- Set `TRITON_BUILD_WITH_CCACHE=true` to build with ccache.
-
-- Set `TRITON_HOME=/some/path` to change the location of the `.triton`
-  directory where Triton's cache is located and downloads are stored
-  during the build. By default, this is the user's home directory. It
-  can be changed anytime.
-
-- If you're running out of memory when building Triton, specify the `MAX_JOBS`
-  environment variable (to the `pip install -e .` command) to limit the
-  number of jobs.
-
-- Pass `--no-build-isolation` to `pip install` to make nop builds faster.
-  Without this, every invocation of `pip install` uses a different symlink to
-  cmake, and this forces ninja to rebuild most of the `.a` files.
-
-- The build system creates a `compile_commands.json` file under the Triton repo
-  directory. This file is used by VSCode IntelliSense and clangd to provide
-  code completion and other features for C++ code.
-
-  If IntelliSense does not work, you can try the following steps:
-
-    - Do a local build. Run command `pip install -e .`.
-    - Get the full path to the `compile_commands.json` file produced by the build:
-      `find ./build -name 'compile_commands.json' | xargs readlink -f`.
-      You might get a full path similar to `/Users/{username}/triton/build/cmake.macosx-11.1-arm64-cpython-3.12/compile_commands.json`.
-    - In VSCode, install the
-      [C/C++
-      extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools),
-      then open the command palette (`Shift + Command + P` on Mac, or `Shift +
-      Ctrl + P` on Windows/Linux) and open `C/C++: Edit Configurations (UI)`.
-    - Open "Advanced Settings" and paste the full path to
-      `compile_commands.json` into the "Compile Commands" textbox.
-
-# Running tests
-
-There currently isn't a turnkey way to run all the Triton tests, but you can
-follow the following recipe:
-
-```shell
-# One-time setup.  Note this will reinstall local Triton because torch
-# overwrites it with the public version.
-$ make dev-install
-
-# To run all tests (requires a GPU)
-$ make test
-
-# Or, to run tests without a gpu
-$ make test-nogpu
-```
-
-# Tips for hacking
-
-For detailed instructions on how to debug Triton's frontend, please refer to this [tutorial](https://triton-lang.org/main/programming-guide/chapter-3/debugging.html). The following includes additional tips for hacking on Triton's backend.
-
-**Configuration knobs**
-
-See [`python/triton/knobs.py`](python/triton/knobs.py) for the full list of configuration knobs. You can set those knobs directly in python or use environment variables to control them. Below are some of the environment variables you can specify (see `knobs.py` for the full list):
-
-- `MLIR_ENABLE_DUMP=1` dumps the IR before every MLIR pass Triton runs, for all
-   kernels. Use `MLIR_ENABLE_DUMP=kernelName` to dump for a specific kernel only.
-  - Triton cache can interfere with the dump. In cases where `MLIR_ENABLE_DUMP=1` does not work, try cleaning your triton cache: `rm -r ~/.triton/cache/*`.
-- `MLIR_DUMP_PATH` specifies where `MLIR_ENABLE_DUMP` will dump to. If unset will dump to stderr.
-- `LLVM_IR_ENABLE_DUMP=1` dumps the IR before every pass run over the LLVM IR.
-- `TRITON_REPRODUCER_PATH=<reproducer_path>` will generate an MLIR reproducer file
-  at `<reproducer_path>` before each MLIR compiler stage. If any of the stages fail,
-  `<reproducer_path>` will be a local MLIR reproducer captured right before the failing pass.
-- `TRITON_INTERPRET=1` uses the Triton interpreter instead of running on the
-  GPU.  You can insert Python breakpoints in your kernel code!
-- `TRITON_ENABLE_LLVM_DEBUG=1` passes `-debug` to LLVM, printing a lot of
-  debugging information to stdout.  If this is too noisy, run with just
-  `TRITON_LLVM_DEBUG_ONLY` instead to limit the output.
-  - An alternative way to reduce output noisiness is running with
-  `LLVM_IR_ENABLE_DUMP=1`, extract the IR before the LLVM pass of interest, and
-  then run LLVM's `opt` standalone, perhaps passing `-debug-only=foo` on the
-  command line.
-
-- `TRITON_LLVM_DEBUG_ONLY=<comma-separated>` is the equivalent of LLVM's
-  `-debug-only` command-line option. This limits the LLVM debug output to
-  specific pass or component names (which are specified using `#define
-  DEBUG_TYPE` throughout LLVM and Triton) in order to allow the debug output to
-  be less noisy. `TRITON_LLVM_DEBUG_ONLY` allows for one or more comma
-  separated values to be specified (eg
-  `TRITON_LLVM_DEBUG_ONLY="tritongpu-remove-layout-conversions"` or
-  `TRITON_LLVM_DEBUG_ONLY="tritongpu-remove-layout-conversions,regalloc"`).
-- `TRITON_ENABLE_ASAN=1` invokes the LLVM address sanitizer for
-  memory leak and out of bounds access detection. Currently only supported on the AMD
-  backend. This must be run using the ASAN libraries documented [here](https://rocm.docs.amd.com/projects/llvm-project/en/latest/conceptual/using-gpu-sanitizer.html).
-  - When enabling the address sanitizer it is recommended to disable various memory caching strategies
-  both within the ROCm stack and PyTorch. This will give the address sanitizer the best chance at finding the
-  memory fault where it originates. See this [test](https://github.com/triton-lang/triton/blob/main/third_party/amd/python/test/test_address_sanitizer.py) for more details.
-
-- `USE_IR_LOC={ttir,ttgir}` reparses the IR such that the location information
-  will be the line number of the IR file with that particular extension,
-  instead of line number of the python file. This can provide a direct mapping
-  from the IR to llir/ptx. When used with performance tools, it can provide a
-  breakdown on IR instructions.
-- `TRITON_PRINT_AUTOTUNING=1` prints out the best autotuning config and total time
-  spent for each kernel after autotuning is complete.
-- `DISABLE_LLVM_OPT` will disable llvm optimizations for make_llir and make_ptx
-  if its value is true when parsing as Bool. Otherwise, it will be parsed as a list
-  of flags to disable llvm optimizations. One usage case is
-  `DISABLE_LLVM_OPT="disable-lsr"`
-  Loop strength reduction is known to cause up to 10% performance changes for
-  certain kernels with register pressure.
-- `TRITON_ALWAYS_COMPILE=1` forces to compile kernels regardless of cache hit.
-- `MLIR_ENABLE_TIMING` dumps the timing information for each MLIR pass.
-- `LLVM_ENABLE_TIMING` dumps the timing information for each LLVM pass.
-- `TRITON_DEFAULT_FP_FUSION` overrides the default behavior of allowing fp fusion (mul+add->fma).
-- `MLIR_ENABLE_DIAGNOSTICS=<comma-separated>` controls diagnostic emission in MLIR.
-  Options are: `warnings`, `remarks`, `stacktraces`, `operations`.
-  Use comma-separated values to customize output. For example,
-  `MLIR_ENABLE_DIAGNOSTICS=remarks,operations` enables remarks and IR operations,
-  while `MLIR_ENABLE_DIAGNOSTICS=warnings,stacktraces` enables warnings with
-  stacktraces. By default, only errors are shown. Setting `warnings` includes
-  errors and warnings; `remarks` includes errors, warnings, and remarks.
-- `MLIR_ENABLE_REMARK` is deprecated. Please use `MLIR_ENABLE_DIAGNOSTICS=remarks`.
-- `TRITON_KERNEL_DUMP` enables the dumping of the IR from each compilation stage and the final ptx/amdgcn.
-- `TRITON_DUMP_DIR` specifies the directory to save the dumped IR and ptx/amdgcn when `TRITON_KERNEL_DUMP` is set to 1.
-- `TRITON_KERNEL_OVERRIDE` enables the override of the compiled kernel with a user-specified IR/ptx/amdgcn at the beginning of each compilation stage.
-- `TRITON_OVERRIDE_DIR` specifies the directory from which to load the IR/ptx/amdgcn files when `TRITON_KERNEL_OVERRIDE` is set to 1.
-- `TRITON_F32_DEFAULT` sets the default input precision of `tl.dot` when using 32-bit floats, which can be either `ieee`, `tf32`, or `tf32x3`.
-- `TRITON_FRONT_END_DEBUGGING=1` disables exception wrapping when an error occurs in the compiler frontend, allowing the full stack trace to be seen.
-- `TRITON_DISABLE_LINE_INFO=1` removes all line information from the module.
-- `PTXAS_OPTIONS` passes additional command-line options to the PTX assembler `ptxas` (only on NVIDIA).
-- `LLVM_EXTRACT_DI_LOCAL_VARIABLES` emit full debug info, allowing for eval of values in gpu debuggers (ie cuda-gdb, rocm-gdb etc)
-- `TRITON_DEFAULT_BACKEND=<backend>` optionally sets the default backend used by Triton when
-  constructing the active driver (i.e., `triton.runtime.driver.active`).
-
-> [!NOTE]
-> Some of these environment variables don't have a knob in `knobs.py`-- those are only relevant to the C++ layer(s), hence they don't exist in the python layer.
-
-**Kernel Override Steps**
-
-```bash
-export TRITON_ALWAYS_COMPILE=1
-export TRITON_KERNEL_DUMP=1
-export TRITON_DUMP_DIR=<dump_dir>
-export TRITON_KERNEL_OVERRIDE=1
-export TRITON_OVERRIDE_DIR=<override_dir>
-# Step 1: Run the kernel once to dump kernel's IRs and ptx/amdgcn in $TRITON_DUMP_DIR
-# Step 2: Copy $TRITON_DUMP_DIR/<kernel_hash> to $TRITON_OVERRIDE_DIR
-# Step 3: Delete the stages that you do not want to override and modify the stage you do want to override
-# Step 4: Run the kernel again to see the overridden result
-```
-
-**Compiler Pipeline Inspection Steps**
-To introspect the pipeline `add_stages`, before running your kernels, simply set
-the add_stages_inspection_hook like so:
+## Write, compile and run
 
 ```python
-def inspect_stages(_self, stages, options, language, capability):
-    # inspect or modify add_stages here
-triton.knobs.runtime.add_stages_inspection_hook = inspect_stages
+import numpy as np
+import triton
+import triton.language as tl
+
+@triton.jit(model="weft")
+def affine(X, Y, N, scale, B: tl.constexpr):
+    offsets = tl.program_id(0) * B + tl.arange(0, B)
+    active = offsets < N
+    x = tl.load(X + offsets, mask=active, other=0.0)
+    tl.store(Y + offsets, x * scale, mask=active)
+
+x = np.arange(131, dtype=np.float32)
+y = np.empty_like(x)
+affine[(triton.cdiv(x.size, 64),)](x, y, x.size, 1.25, B=64, num_cpu_threads=2)
+print(y[:8])
 ```
-Examples of how to use this for out of tree plugin passes is [here](lib/Plugins/README.md)
-# Changelog
 
-Version 2.0 is out! New features include:
+Save the kernel in a Python file and run it on a supported RISC-V host.
+Grid size and OpenMP thread count are independent. Masked-off lanes do not
+access memory. Standard `tl.dot(a, b, acc)`, reductions, inclusive scans and
+pointer atomics use Triton's language entry points; explicit View/Encoding/Level
+constructs add the Weft programming model.
 
-- Many, many bug fixes
-- Performance improvements
-- Backend rewritten to use MLIR
-- Support for kernels that contain back-to-back matmuls (e.g., flash attention)
+See the [runnable quickstart](third_party/weft/doc/getting-started/quickstart.md)
+for a complete kernel. `CompiledKernel.asm` exposes `weftir`, `riscvir`, `c`
+and `so`; `CompiledKernel.export` and `triton.Package.create` provide native
+artifacts for Python, C/C++ and llama.cpp. CPU tensors use the same JIT launch.
 
-# Contributing
+The [example guide](third_party/weft/doc/getting-started/examples.md) covers
+pointwise code, row softmax, matmul, scan, histogram, autotuning, native export,
+PyTorch and the existing quantized/model programs. For example:
 
-Community contributions are more than welcome, whether it be to fix bugs or to add new features at [github](https://github.com/triton-lang/triton/). For more detailed instructions, please visit our [contributor's guide](CONTRIBUTING.md).
+```sh
+PYTHONPATH=third_party/weft python -m examples.triton_basics --operation softmax
+PYTHONPATH=third_party/weft python -m examples.triton_basics --operation histogram
+PYTHONPATH=third_party/weft python -m examples.autotune_export /path/to/new/artifact
+```
 
-# Compatibility
+## Documentation
 
-Supported Platforms:
+- [Weft language and compiler handbook](third_party/weft/doc/index.md)
+- [Encoding, View and storage](third_party/weft/doc/dsl/encoding-and-artifacts.md)
+- [Level and value lifetimes](third_party/weft/doc/dsl/values-and-levels.md)
+- [JIT, autotune and runtime](third_party/weft/doc/compiler/runtime.md)
+- [PyTorch and application integration](third_party/weft/doc/integrations/overview.md)
+- [Native SDK and llama.cpp](third_party/weft/doc/compiler/native-sdk.md)
+- [Target extension contracts](third_party/weft/doc/development/extensions.md)
+- [Contributing](CONTRIBUTING.md)
 
-- Linux
+Correctness and performance measurements use the independent Weft Bench;
+this repository contains the compiler, runtime and application examples.
 
-Supported Hardware:
+PyTorch graph integration uses the supported Triton HOP/Inductor interfaces
+described in the installation guide. Install its source seam once with
+`python -m triton.tools.pytorch`; kernels still use ordinary Triton launches and
+`torch.compile(..., options={"cpu_backend": "triton"})`.
 
-- NVIDIA GPUs (Compute Capability 8.0+)
-- AMD GPUs (ROCm 6.2+)
-- Under development: CPUs
+## Measured application performance
 
-# Development Container (Dev Container)
+![llama.cpp prefill and decode speedup on K1 and SG2044](third_party/weft/doc/assets/llama-performance.svg)
 
-**Dev Containers** for the Triton project are available from
-the [triton-dev-containers repository](https://github.com/redhat-et/triton-dev-containers).
+These are measured **normal llama.cpp → native replacement package** comparisons,
+with prefill and decode timed separately. They are not extrapolated from operator
+microbenchmarks. DeepSeek 8B decode on K1 reaches **1.514×**; SG2044 Llama2 decode
+is **1.005×**, showing where the current replacement set adds little benefit.
 
-### Key Benefits:
-- **Consistency**: All developers can work with the same development
-  environment, ensuring uniform behavior across different systems.
-- **Isolation**: The container prevents potential conflicts with software
-  installed on your local machine.
-- **Portability**: Easily share the development environment with team members,
-  minimizing onboarding time and setup issues.
+The workloads use Llama2 7B Q4_0 and DeepSeek-R1-Distill-Llama 8B Q4_K_M:
+128 prompt tokens for prefill; 32 generated tokens at depth 512 for decode;
+8 threads on K1 and 64 on SG2044; median of 3 samples. Native libraries are
+compiled and loaded before timing. Replacement counters confirm the invoked
+roles. Separate 16-token fixed-prompt checks compare the full-vocabulary logits at the
+last prefill token and two teacher-forced decode steps with `atol=rtol=1e-3`.
+The fixed llama.cpp build uses Clang 18; exported Weft kernels use Clang 23.
+These application gains include that toolchain choice.
 
-### How to Use the Dev Container:
+Results describe these exported artifacts, models and workloads, not every
+RISC-V machine or model. The independent [Bench project](https://github.com/Tianchen-ai/Weft-Bench)
+owns workload definitions, normal GGML/llama.cpp baselines and reproduction.
+Native operator, grid launch, Python call and model timings remain separate.
 
-For detailed instructions on how to use the dev containers, please see
-the [dev container user guide](https://github.com/redhat-et/triton-dev-containers/blob/main/.devcontainer/devcontainer.md).
+## Upstream and licensing
+
+[Triton](https://github.com/triton-lang/triton/tree/v3.8.0) supplies the shared
+frontend, JIT, compiler infrastructure and GPU backends. Its
+[official documentation](https://triton-lang.org/) describes the standard model.
+The original research is [Triton: An Intermediate Language and Compiler for
+Tiled Neural Network Computations](https://doi.org/10.1145/3315508.3329973).
+
+Triton retains its MIT license; the Weft compiler and migrated modules retain
+Apache-2.0. [NOTICE](NOTICE) identifies component ownership and third-party
+licenses. The extension is maintained in this repository; upstream ownership
+and release procedures do not apply automatically.

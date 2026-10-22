@@ -53,8 +53,8 @@ class ASTSource:
 
     def __init__(self, fn, signature, constexprs=None, attrs=None) -> None:
         self.fn = fn
-        self.language = Language.TRITON
-        self.ext = "ttir"
+        self.language = Language.WEFT if fn.model == "weft" else Language.TRITON
+        self.ext = "weftir" if fn.model == "weft" else "ttir"
         self.name = fn.__name__
         self.signature = signature
         self.constants = dict()
@@ -76,11 +76,14 @@ class ASTSource:
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     def make_ir(self, target: GPUTarget, options, codegen_fns, module_map, context):
-        from .code_generator import ast_to_ttir
-        return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
+        from .code_generator import ast_to_ir
+        return ast_to_ir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
                            module_map=module_map)
 
     def parse_options(self):
+        if self.fn.model == "weft":
+            return {"meta": {self.fn.arg_names[path[0]]: value for path, value in self.constants.items()
+                             if len(path) == 1 and type(value) is int}}
         return dict()
 
 
@@ -229,8 +232,9 @@ def compile(src, target=None, options=None, _env_vars=None):
         timer = CompileTimer()
 
     if target is None:
-        target = driver.active.get_current_target()
-    assert isinstance(target, GPUTarget), "target must be of GPUTarget type"
+        target = driver.for_model(src.fn.model).get_current_target() if isinstance(src, ASTSource) else driver.active.get_current_target()
+    from triton.backends.compiler import CPUTarget
+    assert isinstance(target, (GPUTarget, CPUTarget)), "target must describe a CPU or GPU backend"
     backend = make_backend(target)
     ir_source = not isinstance(src, ASTSource)
     # create backend
@@ -240,7 +244,7 @@ def compile(src, target=None, options=None, _env_vars=None):
         src = IRSource(src, context, backend)
 
     extra_options = src.parse_options()
-    options = backend.parse_options(dict(options or dict(), **extra_options))
+    options = backend.parse_options(backend.merge_options(options or {}, extra_options))
     # create cache manager
     env_vars = get_cache_invalidating_env_vars() if _env_vars is None else _env_vars
     key = get_cache_key(src, backend, options, env_vars=env_vars)
@@ -286,6 +290,14 @@ def compile(src, target=None, options=None, _env_vars=None):
         **env_vars,
     }
     metadata["triton_version"] = __version__
+    if isinstance(src, ASTSource) and src.fn.model == "weft":
+        metadata["launch_args"] = src.fn.arg_names
+        from triton.runtime.weft.signature import encode_signature
+        import inspect
+        constants = {src.fn.arg_names[path[0]] for path in src.constants}
+        public_parameters = [parameter for name, parameter in src.fn.signature.parameters.items()
+                             if name not in constants]
+        metadata["public_signature"] = encode_signature(inspect.Signature(public_parameters))
     # run compilation pipeline  and populate metadata
     stages = dict()
     backend.add_stages(stages, options, src.language)
@@ -335,7 +347,7 @@ def compile(src, target=None, options=None, _env_vars=None):
             print(f"\nOverriding kernel with file {full_name}")
             next_module = parse(full_name, ext, context)
         # If TRITON_STORE_BINARY_ONLY is 1, only store cubin/hsaco/json
-        if (not store_only_binary) or (ext in ("cubin", "hsaco", "json")):
+        if (not store_only_binary) or (ext in (backend.binary_ext, "json")):
             metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
         if fn_dump_manager is not None:
             fn_dump_manager.put(next_module, ir_filename)
@@ -351,6 +363,8 @@ def compile(src, target=None, options=None, _env_vars=None):
         if compilation_listener:
             timer.stage_finished(ext)
     # write-back metadata
+    for name, path in metadata.get("runtime_files", {}).items():
+        metadata_group["__runtime__/" + name] = path
     metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename,
                                                              binary=False)
     fn_cache_manager.put_group(metadata_filename, metadata_group)
@@ -364,6 +378,10 @@ def compile(src, target=None, options=None, _env_vars=None):
 
 
 def make_backend(target: GPUTarget) -> BaseBackend:
+    from triton.backends.compiler import CPUTarget
+    if isinstance(target, CPUTarget) and target.backend == "weft":
+        from triton.backends.weft.compiler import WeftBackend
+        return WeftBackend(target)
     actives = [x.compiler for x in backends.values() if x.compiler.supports_target(target)]
     if len(actives) != 1:
         raise RuntimeError(
@@ -412,7 +430,8 @@ class CompiledKernel:
         metadata = json.loads(metadata_path.read_text())
         # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.
         target = metadata['target']
-        metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])
+        from triton.backends.compiler import CPUTarget
+        metadata['target'] = CPUTarget(**target) if target['backend'] == 'weft' else GPUTarget(**target)
         KernelMetadata = namedtuple('KernelMetadata', sorted(list(metadata.keys())))
         self.metadata = KernelMetadata(**metadata)
         backend = make_backend(self.metadata.target)
@@ -421,7 +440,8 @@ class CompiledKernel:
         self.hash = hash
         self.name = self.metadata.name
         # stores the text of each level of IR that was generated during compilation
-        asm_files = [Path(p) for c, p in metadata_group.items() if not c.endswith(".json")]
+        asm_files = [Path(p) for c, p in metadata_group.items()
+                     if not c.endswith(".json") and not c.startswith("__runtime__/")]
         binary_ext = backend.binary_ext
         self.asm = AsmDict({
             file.suffix[1:]: file.read_bytes() if file.suffix[1:] == binary_ext else file.read_text()
@@ -442,11 +462,22 @@ class CompiledKernel:
             if knobs.runtime.kernel_unload_hook is not None:
                 knobs.runtime.kernel_unload_hook(self.module, self.function, self.name, self.metadata_group, self.hash)
 
-            driver.active.utils.unload_module(self.module)
+            # A CPU launcher can outlive this CompiledKernel or be running
+            # with the GIL released. Its module owner releases the SDK handle
+            # after the last native callable drops it.
+            if self.metadata.target.backend != "weft":
+                self.driver.utils.unload_module(self.module)
             self.module = None
+
+    @functools.cached_property
+    def driver(self):
+        return driver.for_target(self.metadata.target)
 
     def _init_handles(self):
         if self.module is not None:
+            return
+        if self.metadata.target.backend == "weft":
+            self.driver.load_compiled(self)
             return
 
         def raise_(err):
@@ -490,6 +521,12 @@ class CompiledKernel:
             self._init_handles()
         return self._run
 
+    def export(self, directory):
+        if self.metadata.target.backend != "weft":
+            raise NotImplementedError("native CPU artifact export requires the Weft backend")
+        from triton.runtime.weft.artifact import export
+        return export(self, directory)
+
     def launch_metadata(self, grid, stream, *args):
         if knobs.runtime.launch_enter_hook is None:
             return None
@@ -504,12 +541,28 @@ class CompiledKernel:
     def __getitem__(self, grid):
         self._init_handles()
 
-        def runner(*args, stream=None):
+        def runner(*args, stream=None, **kwargs):
+            launch_grid = grid
+            if self.metadata.target.backend == "weft":
+                if not 1 <= len(grid) <= 3:
+                    raise ValueError("CPU grid requires one to three dimensions")
+                launch_grid = tuple(grid) + (1,) * (3 - len(grid))
+                bound = self._public_binder(*args, **kwargs)
+                args = tuple(bound[name] if name in bound else None
+                             for name in self.metadata.launch_args)
+            elif kwargs:
+                raise TypeError("compiled GPU kernels accept positional arguments")
             if stream is None:
-                device = driver.active.get_current_device()
-                stream = driver.active.get_current_stream(device)
-            launch_metadata = self.launch_metadata(grid, stream, *args)
-            self.run(grid[0], grid[1], grid[2], stream, self.function, self.packed_metadata, launch_metadata,
+                device = self.driver.get_current_device()
+                stream = self.driver.get_current_stream(device)
+            launch_metadata = self.launch_metadata(launch_grid, stream, *args)
+            self.run(launch_grid[0], launch_grid[1], launch_grid[2], stream, self.function, self.packed_metadata, launch_metadata,
                      knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *args)
 
         return runner
+
+    @functools.cached_property
+    def _public_binder(self):
+        from triton.runtime.weft.binding import SignatureBinder
+        from triton.runtime.weft.signature import decode_signature
+        return SignatureBinder(decode_signature(self.metadata.public_signature))

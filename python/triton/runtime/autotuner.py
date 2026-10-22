@@ -90,6 +90,10 @@ class Autotuner(KernelInterface):
             self.early_config_prune = prune_configs_by.get("early_config_prune", self.early_config_prune)
 
         self.fn = fn
+        self.jit_fn = fn
+        while not inspect.isfunction(self.jit_fn.fn):
+            self.jit_fn = self.jit_fn.fn
+        self.model = self.jit_fn.model if isinstance(self.jit_fn, JITFunction) else "triton"
         self.base_fn = fn
         while not inspect.isfunction(self.base_fn):
             self.base_fn = self.base_fn.fn
@@ -98,6 +102,9 @@ class Autotuner(KernelInterface):
         self.num_warmups = warmup
         self.num_reps = rep
         self.use_cuda_graph = use_cuda_graph
+        if self.model == "weft":
+            from ._model_registry import register
+            register(self)
 
         # If we got explicitly called via the old interface, raise a warning
         # and proceed with the old behavior.
@@ -127,7 +134,7 @@ class Autotuner(KernelInterface):
     @cached_property
     def do_bench(self):
         if self._do_bench is None:
-            return driver.active.get_benchmarker()
+            return driver.for_model(self.model).get_benchmarker()
         return self._do_bench
 
     def _bench(self, *args, config, **meta):
@@ -144,8 +151,41 @@ class Autotuner(KernelInterface):
             raise ValueError(f"Conflicting meta-parameters: {', '.join(conflicts)}."
                              " Make sure that you don't re-define auto-tuned symbols.")
         # augment meta-parameters with tunable ones
-        current = dict(meta, **config.all_kwargs())
+        current = dict(meta, **config.all_kwargs(model=self.model))
         full_nargs = {**self.nargs, **current}
+
+        if self.model == "weft":
+            from .weft.tuning_state import TrialCall, TuningState
+            from triton.compiler.errors import BackendCompilationError
+            warmup = {**current, "warmup": True}
+            try:
+                compiled = self.fn.run(*args, **warmup)
+            except BackendCompilationError as error:
+                if not error.candidate_rejected:
+                    raise
+                self.candidate_errors[config] = error
+                return [float("inf")] * 3
+            supplied = self.jit_fn.signature.bind_partial(
+                *args, **{name: value for name, value in current.items() if name in self.arg_names})
+            supplied.apply_defaults()
+            with TuningState(TrialCall(compiled, supplied.arguments)) as state:
+                trial = {**current, **supplied.arguments,
+                         **{name: value for name, value in state.values.items() if name in self.arg_names}}
+                trial["warmup"] = False
+
+                def private_kernel_call():
+                    state.reset()
+                    if config.pre_hook:
+                        config.pre_hook(trial)
+                    self.pre_hook(trial)
+                    try:
+                        self.fn.run(**trial)
+                    except Exception as error:
+                        self.post_hook(trial, exception=error)
+                        raise
+                    self.post_hook(trial, exception=None)
+
+                return self.do_bench(private_kernel_call, quantiles=(0.5, 0.2, 0.8))
 
         def kernel_call():
             if config.pre_hook:
@@ -187,7 +227,7 @@ class Autotuner(KernelInterface):
         env_vars = get_cache_invalidating_env_vars()
         cache_key = [
             triton_key(),
-            make_backend(driver.active.get_current_target()).hash(),
+            make_backend(driver.for_model(fn.model).get_current_target()).hash(),
             fn.cache_key,
             str(sorted(env_vars.items())),
             str(tuning_key),
@@ -224,6 +264,9 @@ class Autotuner(KernelInterface):
             for _, arg in _args.items():
                 if hasattr(arg, "dtype"):
                     key.append(str(arg.dtype))
+            if self.model == "weft":
+                from .weft.tuning_state import workload_key
+                key.append(workload_key(self.jit_fn, args, kwargs))
             key = tuple(key)
             if key not in self.cache:
                 used_cached_result = False
@@ -236,13 +279,19 @@ class Autotuner(KernelInterface):
                 else:
 
                     def benchmark():
+                        self.candidate_errors = {}
                         bench_start = time.time()
                         timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
                         bench_end = time.time()
                         self.bench_time = bench_end - bench_start
                         self.cache[key] = builtins.min(timings, key=timings.get)
-                        full_nargs = {**self.nargs, **kwargs, **self.cache[key].all_kwargs()}
-                        self.pre_hook(full_nargs, reset_only=True)
+                        if self.model == "weft" and timings[self.cache[key]][0] == float("inf"):
+                            self.cache.pop(key)
+                            raise RuntimeError("all Weft tuning candidates were rejected: " +
+                                               "\n".join(str(error) for error in self.candidate_errors.values()))
+                        full_nargs = {**self.nargs, **kwargs, **self.cache[key].all_kwargs(model=self.model)}
+                        if self.model != "weft":
+                            self.pre_hook(full_nargs, reset_only=True)
                         self.configs_timings = timings
 
                     if self.cache_results:
@@ -271,12 +320,12 @@ class Autotuner(KernelInterface):
             print(f"Triton autotuning for function {self.base_fn.__name__},\nwith key as {key},\n"
                   f"finished after {self.bench_time:.2f}s,\nbest config selected: {self.best_config};")
         if config.pre_hook is not None:
-            full_nargs = {**self.nargs, **kwargs, **config.all_kwargs()}
+            full_nargs = {**self.nargs, **kwargs, **config.all_kwargs(model=self.model)}
             config.pre_hook(full_nargs)
         ret = self.fn.run(
             *args,
             **kwargs,
-            **config.all_kwargs(),
+            **config.all_kwargs(model=self.model),
         )
         self.nargs = None
         return ret
@@ -301,7 +350,7 @@ class Autotuner(KernelInterface):
                     config: self.perf_model(
                         **self.nargs,
                         **kwargs,
-                        **config.all_kwargs(),
+                        **config.all_kwargs(model=self.model),
                     )
                     for config in pruned_configs
                 }
@@ -315,7 +364,7 @@ class Autotuner(KernelInterface):
             ret.append(self.fn.warmup(
                 *args,
                 **kwargs,
-                **autotune_config.all_kwargs(),
+                **autotune_config.all_kwargs(model=self.model),
             ))
         self.nargs = None
         return ret
@@ -344,7 +393,8 @@ class Config:
     :ivar ir_override: filename of a user-defined IR (*.{ttgir|llir|ptx|amdgcn}).
     """
 
-    def __init__(self, kwargs, num_warps=4, num_stages=3, num_ctas=1, maxnreg=None, pre_hook=None, ir_override=None):
+    def __init__(self, kwargs, num_warps=4, num_stages=3, num_ctas=1, maxnreg=None, pre_hook=None, ir_override=None,
+                 backend_options=None, num_cpu_threads=None):
         self.kwargs = kwargs
         self.num_warps = num_warps
         self.num_ctas = num_ctas
@@ -352,6 +402,8 @@ class Config:
         self.maxnreg = maxnreg
         self.pre_hook = pre_hook
         self.ir_override = ir_override
+        self.backend_options = None if backend_options is None else dict(backend_options)
+        self.num_cpu_threads = num_cpu_threads
 
     def __setstate__(self, state):
         self.kwargs = state.get("kwargs", {})
@@ -361,8 +413,15 @@ class Config:
         self.maxnreg = state.get("maxnreg", None)
         self.pre_hook = state.get("pre_hook", None)
         self.ir_override = state.get("ir_override", None)
+        self.backend_options = state.get("backend_options", None)
+        self.num_cpu_threads = state.get("num_cpu_threads", None)
 
-    def all_kwargs(self):
+    def all_kwargs(self, model=None):
+        if model == "weft" or self.backend_options is not None or self.num_cpu_threads is not None:
+            result = {**self.kwargs, "backend_options": dict(self.backend_options or {})}
+            if self.num_cpu_threads is not None:
+                result["num_cpu_threads"] = self.num_cpu_threads
+            return result
         return {
             **self.kwargs, **{
                 k: v
@@ -380,6 +439,10 @@ class Config:
         res = []
         for k, v in self.kwargs.items():
             res.append(f"{k}: {v}")
+        if self.backend_options is not None or self.num_cpu_threads is not None:
+            res.append(f"backend_options: {sorted((self.backend_options or {}).items())}")
+            res.append(f"num_cpu_threads: {self.num_cpu_threads}")
+            return ", ".join(res)
         res.append(f"num_warps: {self.num_warps}")
         res.append(f"num_ctas: {self.num_ctas}")
         res.append(f"num_stages: {self.num_stages}")
@@ -387,7 +450,13 @@ class Config:
         return ", ".join(res)
 
     def __hash__(self):
-        return hash((*self.all_kwargs().items(), self.pre_hook))
+        def freeze(value):
+            if isinstance(value, dict):
+                return tuple(sorted((key, freeze(item)) for key, item in value.items()))
+            if isinstance(value, (tuple, list)):
+                return tuple(freeze(item) for item in value)
+            return value
+        return hash((freeze(self.all_kwargs()), self.pre_hook))
 
     def __eq__(self, other):
         self_tuple = tuple((

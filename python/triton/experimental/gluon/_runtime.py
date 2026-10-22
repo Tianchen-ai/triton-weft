@@ -19,7 +19,7 @@ class GluonASTSource(ASTSource):
 
     def make_ir(self, target, options, codegen_fns, module_map, context):
         from triton.compiler.compiler import make_backend
-        from triton.compiler.code_generator import ast_to_ttir
+        from triton.compiler.code_generator import ast_to_ir
 
         builder = ir.builder(context)
         module = builder.create_module()
@@ -37,7 +37,7 @@ class GluonASTSource(ASTSource):
         if is_cuda and options.maxnreg is not None:
             module.set_attr("ttg.maxnreg", builder.get_int32_attr(options.maxnreg))
 
-        module = ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
+        module = ast_to_ir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
                              module_map=module_map, module=module)
         return module
 

@@ -24,6 +24,9 @@ from .errors import TritonError
 from .runtime._allocation import set_allocator
 
 from . import language
+from .language.weft.declarations import encoding, derive, overloads
+from .runtime.weft.artifact import load
+from .runtime.package import Package
 from . import testing
 from . import tools
 
@@ -37,6 +40,9 @@ __all__ = [
     "cdiv",
     "CompilationError",
     "compile",
+    "encoding",
+    "derive",
+    "overloads",
     "Config",
     "constexpr_function",
     "FutureKernel",
@@ -46,10 +52,12 @@ __all__ = [
     "JITFunction",
     "KernelInterface",
     "language",
+    "load",
     "MockTensor",
     "must_use_result",
     "next_power_of_2",
     "OutOfResources",
+    "Package",
     "reinterpret",
     "runtime",
     "set_allocator",

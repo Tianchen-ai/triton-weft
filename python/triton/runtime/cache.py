@@ -116,6 +116,8 @@ class FileCacheManager(CacheManager):
         temp_dir = os.path.join(self.cache_dir, f"tmp.pid_{pid}_{rnd_id}")
         os.makedirs(temp_dir, exist_ok=True)
         temp_path = os.path.join(temp_dir, filename)
+        os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
         mode = "wb" if binary else "w"
         with open(temp_path, mode) as f:
@@ -123,7 +125,7 @@ class FileCacheManager(CacheManager):
         # Replace is guaranteed to be atomic on POSIX systems if it succeeds
         # so filepath cannot see a partial write
         os.replace(temp_path, filepath)
-        os.removedirs(temp_dir)
+        os.removedirs(os.path.dirname(temp_path))
         return filepath
 
 

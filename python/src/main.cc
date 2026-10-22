@@ -46,6 +46,7 @@ void init_gluon_ir(pybind11::module &&m);
 void init_gsan_testing(pybind11::module &&m);
 void init_linear_layout(pybind11::module &&m);
 void init_native_specialize(pybind11::module &m);
+void init_weft(pybind11::module &&m);
 FOR_EACH_P(DECLARE_BACKEND, TRITON_BACKENDS_TUPLE)
 
 PYBIND11_MODULE(libtriton, m) {
@@ -60,5 +61,6 @@ PYBIND11_MODULE(libtriton, m) {
   init_gsan_testing(m.def_submodule("gsan_testing"));
   init_linear_layout(m.def_submodule("linear_layout"));
   init_gluon_ir(m.def_submodule("gluon_ir"));
+  init_weft(m.def_submodule("weft"));
   FOR_EACH_P(INIT_BACKEND, TRITON_BACKENDS_TUPLE)
 }

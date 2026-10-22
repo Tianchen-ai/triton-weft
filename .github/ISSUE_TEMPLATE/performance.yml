@@ -1,18 +1,14 @@
 name: Report a performance issue
-description: Report cases where triton is generating sub-optimal (but functionally correct) PTX/LLVM IR
+description: Report slow generated code or launch overhead
 labels: ["performance"]
 
 body:
 - type: markdown
   attributes:
     value: |
-      #### Disclaimer
-      The core triton team is small and has very limited capacity. We may not have time to look into your report.
-      For the best results, please:
-        - Avoid submitting duplicates. Search through [the existing and past issues](https://github.com/triton-lang/triton/issues?q=is%3Aissue+sort%3Acreated-desc+) first to see if it's been reported previously.
-        - Check if the issue persists with a build from the latest source.
-        - Provide all relevant information in the initial report, to prevent unnecessary back and forth discussion.
-        - If you can, try to diagnose and/or fix the issue yourself. We welcome high quality contributions.
+      Include the workload, target, reference implementation and timing scope.
+      Separate native kernel, complete launch and model measurements.
+      For Weft, link the relevant Bench output and generated IR/C when available.
 - type: textarea
   attributes:
     label: Describe the issue
@@ -36,9 +32,10 @@ body:
   attributes:
     label: Environment details
     description: |
-      Please include any relevant context about how you're running the reproducer e.g. which version of triton, and what GPU you are using.
+      Include the Triton build, Python, CPU or GPU, target ISA and compiler toolchain.
     placeholder: |
         Triton: ...
-        GPU: ...
+        Model and target: ...
+        Toolchain: ...
   validations:
     required: true

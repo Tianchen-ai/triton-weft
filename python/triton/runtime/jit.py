@@ -115,6 +115,25 @@ class DependenciesFinder(ast.NodeVisitor):
 
     def record_reference(self, val, var_dict=None, name=None):
         from ..language.core import constexpr
+        from ..language.weft.declarations import EncodingDefinition, DerivedEncodingDefinition, OverloadSet
+        if isinstance(val, EncodingDefinition):
+            self.hasher.update(val.source.text.encode("utf-8"))
+            for dependency in val.dependencies():
+                if isinstance(dependency, (bool, int, float, str, tuple)):
+                    self.hasher.update(repr(dependency).encode("utf-8"))
+                self.record_reference(dependency)
+            if var_dict is not None:
+                self.used_global_vals[(name, id(var_dict))] = (val, var_dict)
+            return
+        if isinstance(val, DerivedEncodingDefinition):
+            self._update_hash(val.jit)
+            if var_dict is not None:
+                self.used_global_vals[(name, id(var_dict))] = (val, var_dict)
+            return
+        if isinstance(val, OverloadSet):
+            for definition in val.definitions:
+                self._update_hash(definition)
+            return
         # Only keep track of "interesting" global variables, that non-evil users
         # might change.  Don't consider functions, modules, builtins, etc.  This
         # helps keep the list of vars we have to check small.
@@ -432,8 +451,21 @@ def create_function_from_signature(sig, kparams, backend):
             return f"*{name}"
         return name if param.default is inspect.Parameter.empty else f"{name}=default_{name}"
 
+    declarations = []
+    keyword_only = False
+    parameters = list(sig.parameters.items())
+    for i, (name, param) in enumerate(parameters):
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            keyword_only = True
+        if param.kind == inspect.Parameter.KEYWORD_ONLY and not keyword_only:
+            declarations.append("*")
+            keyword_only = True
+        declarations.append(arg((name, param)))
+        if param.kind == inspect.Parameter.POSITIONAL_ONLY and (
+                i + 1 == len(parameters) or parameters[i + 1][1].kind != inspect.Parameter.POSITIONAL_ONLY):
+            declarations.append("/")
     func_body = f"""
-def dynamic_func({", ".join(list(map(arg, sig.parameters.items())) + ["**options"])}):
+def dynamic_func({", ".join(declarations + ["**options"])}):
     params = {{{', '.join([f"'{name}': {name}" for name in sig.parameters.keys()])}}}
     specialization = [{','.join(specialization)}]
     return params, specialization, options
@@ -446,7 +478,7 @@ def dynamic_func({", ".join(list(map(arg, sig.parameters.items())) + ["**options
         if param.default is not inspect.Parameter.empty
     }
 
-    specialize_impl = native_specialize_impl
+    specialize_impl = getattr(backend, "specialize_argument", native_specialize_impl)
     func_namespace["specialize_impl"] = specialize_impl
     func_namespace["backend"] = backend
     func_namespace["JITCallable"] = JITCallable
@@ -523,7 +555,10 @@ class JITCallable:
             self.hash = f"recursion:{self._fn_name}"
             nonlocals = inspect.getclosurevars(self.fn).nonlocals
             dependencies_finder = DependenciesFinder(name=self._fn_name, globals=self.__globals__, nonlocals=nonlocals,
-                                                     src=self.src)
+                                                     src=self.src + repr((getattr(self, "model", "triton"),
+                                                                         getattr(self, "explicit_model", False),
+                                                                         getattr(self, "alias_groups", {}),
+                                                                         getattr(self, "strided", ()))))
             dependencies_finder.visit(self.parse())
             self.hash = dependencies_finder.ret + str(self.starting_line_number)
             self.used_global_vals = dict(sorted(dependencies_finder.used_global_vals.items()))
@@ -691,7 +726,7 @@ class JITFunction(JITCallable, KernelInterface[T]):
         Precompute as much as possible.
         """
         from ..compiler import CompiledKernel, compile, ASTSource, make_backend
-        target = driver.active.get_current_target()
+        target = driver.for_model(self.model).get_current_target()
         backend = make_backend(target)
         self.CompiledKernel = CompiledKernel
         self.compile = compile
@@ -701,7 +736,8 @@ class JITFunction(JITCallable, KernelInterface[T]):
 
     def _pack_args(self, backend, kwargs, bound_args, specialization, options):
         # options
-        options = backend.parse_options(kwargs)
+        option_values = {key: value for key, value in kwargs.items() if key not in self.arg_names} if self.model == "weft" else kwargs
+        options = backend.parse_options(option_values)
         # signature
         sigkeys = [x.name for x in self.params]
         sigvals = [x[0] for x in specialization]
@@ -711,7 +747,7 @@ class JITFunction(JITCallable, KernelInterface[T]):
         assert "device" not in kwargs, "device option is deprecated; current device will be used"
         assert "stream" not in kwargs, "stream option is deprecated; current stream will be used"
         for k in kwargs:
-            if k not in options.__dict__ and k not in sigkeys:
+            if k not in options.__dict__ and k not in sigkeys and k != "backend_options":
                 raise KeyError("Keyword argument %s was specified but unrecognised" % k)
         # constexprs
         constexprs = find_paths_if(sigvals, lambda _, val: val == "constexpr")
@@ -728,8 +764,9 @@ class JITFunction(JITCallable, KernelInterface[T]):
         kwargs["instrumentation_mode"] = knobs.compilation.instrumentation_mode
 
         # parse options
-        device = driver.active.get_current_device()
-        stream = driver.active.get_current_stream(device)
+        active_driver = driver.for_model(self.model)
+        device = active_driver.get_current_device()
+        stream = active_driver.get_current_stream(device)
 
         # Execute pre run hooks with args and kwargs
         for hook in self.pre_run_hooks:
@@ -784,7 +821,23 @@ class JITFunction(JITCallable, KernelInterface[T]):
         return self._fn_name if self._repr is None else self._repr(_)
 
     def __init__(self, fn, version=None, do_not_specialize=None, do_not_specialize_on_alignment=None, debug=None,
-                 noinline=None, repr=None, launch_metadata=None):
+                 noinline=None, repr=None, launch_metadata=None, model=None, alias_groups=None, strided=()):
+        self.explicit_model = model is not None
+        model = "triton" if model is None else model
+        if model not in ("triton", "weft"):
+            raise ValueError(f"unknown Triton programming model: {model}")
+        if model != "weft" and (alias_groups or strided):
+            raise ValueError("alias_groups and strided declarations require model='weft'")
+        groups = dict(alias_groups or {})
+        if any(not isinstance(k, str) or not k or not isinstance(v, str) or not v for k, v in groups.items()):
+            raise TypeError("alias_groups maps argument names to nonempty group names")
+        if isinstance(strided, str) or any(not isinstance(s, str) or not s.isidentifier() for s in strided):
+            raise TypeError("strided must be a sequence of View parameter names")
+        if len(set(strided)) != len(strided):
+            raise ValueError("strided parameter names must be unique")
+        self.model = model
+        self.alias_groups = groups
+        self.strided = tuple(strided)
         do_not_specialize = do_not_specialize if do_not_specialize else []
         do_not_specialize_on_alignment = do_not_specialize_on_alignment if do_not_specialize_on_alignment else []
 
@@ -820,11 +873,14 @@ class JITFunction(JITCallable, KernelInterface[T]):
 
         # Hooks that will be called prior to executing "run"
         self.pre_run_hooks = []
+        if self.model == "weft":
+            from ._model_registry import register
+            register(self)
 
     def preload(self, specialization_data):
         import json
         import triton.language as tl
-        device = driver.active.get_current_device()
+        device = driver.for_model(self.model).get_current_device()
         deserialized_obj = json.loads(specialization_data)
         if deserialized_obj['name'] != self._fn_name:
             raise RuntimeError(
@@ -946,6 +1002,9 @@ def jit(
     do_not_specialize_on_alignment: Optional[Iterable[int | str]] = None,
     debug: Optional[bool] = None,
     noinline: Optional[bool] = None,
+    model: Optional[str] = None,
+    alias_groups=None,
+    strided=(),
 ) -> Callable[[T], JITFunction[T]]:
     ...
 
@@ -960,6 +1019,9 @@ def jit(
     do_not_specialize_on_alignment: Optional[Iterable[int | str]] = None,
     debug: Optional[bool] = None,
     noinline: Optional[bool] = None,
+    model: Optional[str] = None,
+    alias_groups=None,
+    strided=(),
 ) -> KernelInterface[T]:
     """
     Decorator for JIT-compiling a function using the Triton compiler.
@@ -982,6 +1044,8 @@ def jit(
     def decorator(fn: T) -> JITFunction[T]:
         assert callable(fn)
         if knobs.runtime.interpret:
+            if model not in (None, "triton"):
+                raise NotImplementedError("the interpreter does not implement Weft storage and finite-width semantics")
             from .interpreter import InterpretedFunction
             return InterpretedFunction(fn, version=version, do_not_specialize=do_not_specialize,
                                        do_not_specialize_on_alignment=do_not_specialize_on_alignment, debug=debug,
@@ -996,6 +1060,9 @@ def jit(
                 noinline=noinline,
                 repr=repr,
                 launch_metadata=launch_metadata,
+                model=model,
+                alias_groups=alias_groups,
+                strided=strided,
             )
 
     if fn is not None:

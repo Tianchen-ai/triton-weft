@@ -203,6 +203,13 @@ class CMakeBuildPy(build_py):
 
     def run(self) -> None:
         self.run_command('build_ext')
+        if target_arch == "riscv64":
+            # A reused build directory may contain host-only CUDA/ROCm tools.
+            # These cannot execute in a RISC-V Python wheel.
+            for backend in ("nvidia", "amd"):
+                directory = Path(self.build_lib) / "triton/backends" / backend
+                if directory.exists():
+                    shutil.rmtree(directory)
         return super().run()
 
 
@@ -288,7 +295,9 @@ class CMakeBuild(build_ext):
             "-DTRITON_BUILD_PYTHON_MODULE=ON",
             "-DPython3_EXECUTABLE:FILEPATH=" + sys.executable,
             "-DPython3_INCLUDE_DIR=" + python_include_dir,
-            "-DTRITON_CODEGEN_BACKENDS=" + ';'.join([b.name for b in backends if not b.is_external]),
+            # Shared Gluon/IR bindings depend on these compiler libraries even
+            # when their host-specific Python drivers are not distributed.
+            "-DTRITON_CODEGEN_BACKENDS=nvidia;amd",
             "-DTRITON_PLUGIN_DIRS=" + ';'.join([b.src_dir for b in backends if b.is_external]),
             "-DTRITON_WHEEL_DIR=" + wheeldir,
             f"-DTRITON_CACHE_PATH={get_triton_cache_path()}",
@@ -340,6 +349,10 @@ class CMakeBuild(build_ext):
 
         # environment variables we will pass through to cmake
         passthrough_args = [
+            "TRITON_WEFT_CLANG_ROOT",
+            "TRITON_WEFT_OPENMP_LIBRARY",
+            "TRITON_WEFT_OPENMP_INCLUDE_DIR",
+            "TRITON_TARGET_PYTHON_INCLUDE_DIR",
             "TRITON_BUILD_PROTON",
             "TRITON_BUILD_WITH_CCACHE",
             "TRITON_PARALLEL_LINK_JOBS",
@@ -376,11 +389,16 @@ class CMakeBuild(build_ext):
         cmake_dir = get_cmake_dir()
         subprocess.check_call(["cmake", self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
         update_symlink(Path(self.base_dir) / "compile_commands.json", cmake_dir / "compile_commands.json")
-        subprocess.check_call(["cmake", "--build", "."] + build_args, cwd=cmake_dir)
-        subprocess.check_call(["cmake", "--build", ".", "--target", "mlir-doc"], cwd=cmake_dir)
+        targets = ["triton"]
+        if check_env_flag("TRITON_BUILD_PROTON", "ON"):
+            targets.append("proton")
+        subprocess.check_call(["cmake", "--build", ".", "--target", *targets] + build_args, cwd=cmake_dir)
 
 
-backends = [*BackendInstaller.copy(["nvidia", "amd"]), *BackendInstaller.copy_externals()]
+target_soabi = os.environ.get("TRITON_TARGET_PYTHON_SOABI", "")
+target_arch = "riscv64" if "-riscv64-" in target_soabi else platform.machine()
+builtin_backends = [] if target_arch == "riscv64" else ["nvidia", "amd"]
+backends = [*BackendInstaller.copy(builtin_backends), *BackendInstaller.copy_externals()]
 
 
 def get_package_dirs():
@@ -473,6 +491,22 @@ def add_links(external_only):
 
 class plugin_bdist_wheel(bdist_wheel):
 
+    def get_tag(self):
+        headers = os.environ.get("TRITON_TARGET_PYTHON_INCLUDE_DIR")
+        if not headers:
+            return super().get_tag()
+        soabi = os.environ.get("TRITON_TARGET_PYTHON_SOABI", "")
+        match = re.fullmatch(r"cpython-(3[0-9]+)([dt]*)-riscv64-.*", soabi)
+        if match is None or self.plat_name != "linux_riscv64":
+            raise ValueError("cross wheels require the target Python SOABI and --plat-name linux_riscv64")
+        patchlevel = (Path(headers) / "patchlevel.h").read_text()
+        major = re.search(r"#define\s+PY_MAJOR_VERSION\s+(\d+)", patchlevel)
+        minor = re.search(r"#define\s+PY_MINOR_VERSION\s+(\d+)", patchlevel)
+        if major is None or minor is None or major[1] + minor[1] != match[1]:
+            raise ValueError("target Python SOABI disagrees with the headers used to compile libtriton")
+        interpreter = "cp" + match[1]
+        return interpreter, interpreter + match[2], self.plat_name
+
     def run(self):
         add_links(external_only=True)
         super().run()
@@ -523,6 +557,7 @@ def get_entry_points():
             "proton = triton.profiler.proton:main",
         ]
     entry_points["triton.backends"] = [f"{b.name} = triton.backends.{b.name}" for b in backends]
+    entry_points["triton.backends"].append("weft = triton.backends.weft")
     return entry_points
 
 
@@ -586,7 +621,7 @@ setup(
     author_email="phil@openai.com",
     description="A language and compiler for custom Deep Learning operations",
     long_description="",
-    license="MIT",
+    license="MIT AND Apache-2.0",
     install_requires=[
         "importlib-metadata; python_version < '3.10'",
     ],

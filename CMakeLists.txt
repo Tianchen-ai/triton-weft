@@ -7,6 +7,19 @@ if(POLICY CMP0116)
 endif()
 
 project(triton CXX C)
+
+option(TRITON_WEFT_RUNTIME_ONLY "Build the deployable CPU runtime against a target LLVM SDK" OFF)
+if(TRITON_WEFT_RUNTIME_ONLY)
+  find_package(LLVM REQUIRED CONFIG)
+  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+  include(AddLLVM)
+  include_directories(${LLVM_INCLUDE_DIRS})
+  if(LLVM_ENABLE_ASSERTIONS)
+    add_compile_options(-UNDEBUG)
+  endif()
+  add_subdirectory(third_party/weft)
+  return()
+endif()
 include(CTest)
 include(GNUInstallDirs)
 
@@ -20,7 +33,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 option(TRITON_BUILD_PYTHON_MODULE "Build Python Triton bindings" OFF)
 option(TRITON_BUILD_PROTON "Build the Triton Proton profiler" ON)
-option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
+set(TRITON_WEFT_CLANG_ROOT "" CACHE PATH "Complete native Clang toolchain to bundle with Triton")
+set(TRITON_WEFT_OPENMP_LIBRARY "" CACHE FILEPATH "Native OpenMP runtime to bundle")
+set(TRITON_WEFT_OPENMP_INCLUDE_DIR "" CACHE PATH "OpenMP public headers")
+set(TRITON_TARGET_PYTHON_INCLUDE_DIR "" CACHE PATH "Target Python headers for cross-building the extension")
+option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" OFF)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 option(TRITON_OFFLINE_BUILD "Build without downloading dependencies" OFF)
 option(TRITON_EXT_ENABLED "Build with default visibility for Triton+LLVM symbol exposure to plugin extensions" OFF)
@@ -134,7 +151,8 @@ execute_process(
 )
 include("${TRITON_THIRD_PARTY_CMAKE_VARS_FILE}")
 
-if(TRITON_BUILD_PYTHON_MODULE)
+if(TRITON_BUILD_PYTHON_MODULE AND "nvidia" IN_LIST TRITON_CODEGEN_BACKENDS
+   AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
   set_property(
     DIRECTORY
     APPEND
@@ -199,10 +217,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 if(TRITON_BUILD_UT)
-  # This is an aggregate target for all unit tests.
-  add_custom_target(TritonUnitTests)
-  set_target_properties(TritonUnitTests PROPERTIES FOLDER "Triton/Tests")
-  include(AddTritonUnitTest)
+  message(FATAL_ERROR "This distribution keeps compiler verification in the independent Weft Bench")
 endif()
 
 # Compiler flags
@@ -227,6 +242,12 @@ endif()
 
 # MLIR
 find_package(MLIR REQUIRED CONFIG PATHS ${MLIR_DIR})
+
+# LLVM headers expose assertion-dependent layouts (for example debug epochs).
+# Every embedded compiler component must use the SDK's assertion contract.
+if(LLVM_ENABLE_ASSERTIONS AND NOT MSVC)
+  add_compile_options(-UNDEBUG)
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
@@ -297,11 +318,13 @@ include_directories(${PROJECT_BINARY_DIR}/third_party) # Tablegen'd files
 
 add_subdirectory(include)
 add_subdirectory(lib)
+add_subdirectory(third_party/weft)
 
 # TODO: Figure out which target is sufficient to fix errors; triton is
 # apparently not enough. Currently set linking libstdc++fs for all targets
 # to support some old version GCC compilers like 8.3.0.
-if (NOT WIN32 AND NOT APPLE AND NOT BSD)
+if (NOT WIN32 AND NOT APPLE AND NOT BSD AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "9")
   link_libraries(stdc++fs)
 endif()
 
@@ -314,8 +337,21 @@ if(TRITON_BUILD_PYTHON_MODULE)
   set(PYTHON_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/python/src)
   include_directories(${PYTHON_SRC_PATH})
 
-  # Python Interpreter is used to run lit tests
-  find_package(Python3 REQUIRED COMPONENTS Development.Module Interpreter)
+  # Build helpers run on the host; Python.h belongs to the extension's target.
+  if(TRITON_TARGET_PYTHON_INCLUDE_DIR)
+    if(NOT EXISTS "${TRITON_TARGET_PYTHON_INCLUDE_DIR}/Python.h")
+      message(FATAL_ERROR "TRITON_TARGET_PYTHON_INCLUDE_DIR is missing Python.h")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_library(TritonTargetPython INTERFACE)
+    target_include_directories(TritonTargetPython INTERFACE "${TRITON_TARGET_PYTHON_INCLUDE_DIR}")
+    add_library(Python3::Module ALIAS TritonTargetPython)
+    set(TRITON_PYTHON_MODULE_TARGET TritonTargetPython)
+    set(PYBIND11_NOPYTHON ON)
+  else()
+    find_package(Python3 REQUIRED COMPONENTS Development.Module Interpreter)
+    set(TRITON_PYTHON_MODULE_TARGET Python3::Module)
+  endif()
   find_package(pybind11 CONFIG REQUIRED HINTS "${Python3_SITELIB}")
 
   foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
@@ -377,7 +413,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
     LLVMAMDGPUCodeGen
     LLVMAMDGPUAsmParser
 
-    Python3::Module
+    ${TRITON_PYTHON_MODULE_TARGET}
     pybind11::headers
   )
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR # Linux arm64
@@ -392,6 +428,8 @@ if(TRITON_BUILD_PYTHON_MODULE)
           LLVMX86CodeGen
           LLVMX86AsmParser
       )
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    list(APPEND TRITON_LIBRARIES LLVMRISCVCodeGen LLVMRISCVAsmParser)
   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le")
       list(APPEND TRITON_LIBRARIES
         LLVMPowerPCAsmParser
@@ -402,11 +440,8 @@ if(TRITON_BUILD_PYTHON_MODULE)
   endif()
 
   # Define triton library
-  string(JOIN "," TRITON_BACKENDS_TUPLE ${TRITON_CODEGEN_BACKENDS})
-
-  if (DEFINED TRITON_PLUGIN_NAMES)
-    string(JOIN "," TRITON_BACKENDS_TUPLE ${TRITON_BACKENDS_TUPLE} ${TRITON_PLUGIN_NAMES})
-  endif()
+  set(TRITON_BACKEND_NAMES ${TRITON_CODEGEN_BACKENDS} ${TRITON_PLUGIN_NAMES})
+  list(JOIN TRITON_BACKEND_NAMES "," TRITON_BACKENDS_TUPLE)
 
   message(STATUS "Triton backends tuple: ${TRITON_BACKENDS_TUPLE}")
 
@@ -420,10 +455,16 @@ if(TRITON_BUILD_PYTHON_MODULE)
                   ${PYTHON_SRC_PATH}/passes.cc
                   ${PYTHON_SRC_PATH}/interpreter.cc
                   ${PYTHON_SRC_PATH}/llvm.cc
-                  ${PYTHON_SRC_PATH}/specialize.cc)
+                  ${PYTHON_SRC_PATH}/specialize.cc
+                  ${PYTHON_SRC_PATH}/weft.cc
+                  ${PYTHON_SRC_PATH}/weft_runtime.cc)
 
   # Link triton with its dependencies
-  target_link_libraries(triton PRIVATE ${TRITON_LIBRARIES})
+  target_link_libraries(triton PRIVATE ${TRITON_LIBRARIES} WeftRISCVTarget WeftX86Target)
+  target_include_directories(triton PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/weft/include
+    ${CMAKE_CURRENT_BINARY_DIR}/third_party/weft/include)
+  add_dependencies(triton WeftRuntime)
 
   # Do not propagate libraries that libtriton depends on. This ensures that
   # targets that link against libtriton do not accidentally link in their own
@@ -434,7 +475,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
     target_link_libraries(triton PRIVATE ${CMAKE_DL_LIBS})
     set_target_properties(triton PROPERTIES SUFFIX ".pyd")
     set_target_properties(triton PROPERTIES PREFIX "lib")
-  else()
+  elseif(LLVM_ENABLE_ZLIB)
     target_link_libraries(triton PRIVATE z)
   endif()
   target_link_options(triton PRIVATE ${LLVM_LDFLAGS})
@@ -503,17 +544,6 @@ find_package(Threads REQUIRED)
 
 add_subdirectory(third_party/f2reduce)
 add_subdirectory(bin)
-add_subdirectory(test)
-
-if(TRITON_BUILD_UT)
-  add_subdirectory(unittest)
-  # This target runs all the unit tests.
-  add_custom_target(check-triton-unit-tests
-    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS TritonUnitTests
-    USES_TERMINAL
-  )
-endif()
 
 ################################################################################
 # Header installation

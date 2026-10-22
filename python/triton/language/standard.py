@@ -536,8 +536,25 @@ def flip(x, dim=None):
     return x
 
 
+@core.builtin
+def interleave(a, b=None, *, rows=None, field_chunks=None, _semantic=None, _generator=None):
+    """Interleave two tensors along the last dimension.
+
+    In an Encoding builder, ``interleave(view, rows=..., field_chunks=...)``
+    declares a persistent artifact layout instead.
+    """
+    if rows is not None or field_chunks is not None:
+        if b is not None:
+            raise ValueError("artifact interleave accepts one View and explicit rows")
+        return _semantic.derived_interleave(a, core._unwrap_if_constexpr(rows),
+                                            core._unwrap_if_constexpr(field_chunks))
+    if b is None:
+        raise TypeError("tensor interleave requires two inputs")
+    return _generator.call_JitFunction(_interleave_values, [a, b], {})
+
+
 @jit
-def interleave(a, b):
+def _interleave_values(a, b):
     """
     Interleaves the values of two tensors along their last dimension. The two tensors must have the same shape.
     Equivalent to `tl.join(a, b).reshape(a.shape[:-1] + [2 * a.shape[-1]])`

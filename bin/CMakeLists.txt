@@ -5,11 +5,7 @@ add_executable(triton-opt triton-opt.cpp)
 target_compile_options(triton-opt PRIVATE ${TRITON_DISABLE_EH_RTTI_FLAGS})
 target_link_libraries(triton-opt PRIVATE
   ${triton_libs}
-  # tests
-  TritonTestAnalysis
-  TritonTestDialect
-  TritonAMDGPUTestAnalysis
-  TritonTestProton
+  WeftRISCVTarget
   # MLIR core
   MLIROptLib
   MLIRPass
@@ -26,11 +22,7 @@ target_compile_options(triton-reduce PRIVATE ${TRITON_DISABLE_EH_RTTI_FLAGS})
 
 target_link_libraries(triton-reduce PRIVATE
   ${triton_libs}
-  # tests
-  TritonTestAnalysis
-  TritonTestDialect
-  TritonAMDGPUTestAnalysis
-  TritonTestProton
+  WeftRISCVTarget
   # MLIR core
   MLIRReduceLib
   MLIRPass
@@ -46,11 +38,7 @@ add_executable(triton-lsp triton-lsp.cpp)
 target_compile_options(triton-lsp PRIVATE ${TRITON_DISABLE_EH_RTTI_FLAGS})
 target_link_libraries(triton-lsp PRIVATE
   ${triton_libs}
-  # tests
-  TritonTestAnalysis
-  TritonTestDialect
-  TritonAMDGPUTestAnalysis
-  TritonTestProton
+  WeftRISCVTarget
   # MLIR core
   MLIRLspServerLib
   MLIRPass
@@ -81,14 +69,15 @@ add_executable(triton-tensor-layout triton-tensor-layout.cpp)
 target_compile_options(triton-tensor-layout PRIVATE ${TRITON_DISABLE_EH_RTTI_FLAGS})
 target_link_libraries(triton-tensor-layout PRIVATE
   ${triton_libs}
-  TritonTestAnalysis
-  TritonTestDialect
-  TritonTestProton
-  TritonAMDGPUTestAnalysis
+  WeftRISCVTarget
   MLIRRegisterAllDialects
   MLIRRegisterAllPasses
   MLIRTransforms
 )
+
+foreach(tool triton-opt triton-reduce triton-lsp triton-tensor-layout)
+  target_compile_features(${tool} PRIVATE cxx_std_20)
+endforeach()
 
 install(TARGETS
   triton-opt

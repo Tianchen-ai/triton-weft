@@ -24,6 +24,10 @@ class IncompatibleTypeErrorImpl(Exception):
 
 
 class TritonSemantic(Generic[TensorTy]):
+    def has_returned_in_current_block(self):
+        return False
+
+    supports_noinline_tensors = False
     tensor: Type[TensorTy] = tl.tensor
     lang = tl
 
@@ -31,6 +35,16 @@ class TritonSemantic(Generic[TensorTy]):
 
     def __init__(self, builder):
         self.builder = builder
+
+    def normalize_join_value(self, value, reference):
+        """Preserve the frontend type protocol at an SSA join without casting."""
+        return value
+
+    def is_control_livein(self, value):
+        return True
+
+    def finish_loop_induction(self, placeholder):
+        pass
 
 # ===----------------------------------------------------------------------===##
 # Programming Model
@@ -174,7 +188,7 @@ class TritonSemantic(Generic[TensorTy]):
 
     def binary_op_type_checking_impl(self, lhs: TensorTy | numbers.Number, rhs: TensorTy | numbers.Number,
                                      allow_lhs_ptr=False, allow_rhs_ptr=False, arithmetic_check=True,
-                                     div_or_mod=False) -> Tuple[TensorTy, TensorTy]:
+                                     div_or_mod=False, *, broadcast=True) -> Tuple[TensorTy, TensorTy]:
         lhs_is_scalar = isinstance(lhs, numbers.Number)
         rhs_is_scalar = isinstance(rhs, numbers.Number)
         if lhs_is_scalar:
@@ -206,7 +220,8 @@ class TritonSemantic(Generic[TensorTy]):
             rhs = self.scalar_constant(rhs_scalar, dtype=ret_sca_ty) if rhs_is_scalar else self.cast(rhs, ret_sca_ty)
 
         # implicit broadcasting
-        lhs, rhs = self.broadcast_impl_value(lhs, rhs)
+        if broadcast:
+            lhs, rhs = self.broadcast_impl_value(lhs, rhs)
         return lhs, rhs
 
     def binary_op_sanitize_overflow_impl(self, lhs: TensorTy, rhs: TensorTy, binary_op: callable):
@@ -364,6 +379,9 @@ class TritonSemantic(Generic[TensorTy]):
 ##############
 
     def minimum(self, x: TensorTy, y: TensorTy, propagate_nan: tl.PropagateNan):
+        x, y = self.to_tensor(x), self.to_tensor(y)
+        x = self.cast(x, tl.float32) if x.dtype.is_bf16() else x
+        y = self.cast(y, tl.float32) if y.dtype.is_bf16() else y
         x, y = self.binary_op_type_checking_impl(x, y)
         dtype = x.dtype
         if dtype.is_floating():
@@ -381,6 +399,9 @@ class TritonSemantic(Generic[TensorTy]):
             raise TypeError(f"Unexpected dtype {dtype}")
 
     def maximum(self, x: TensorTy, y: TensorTy, propagate_nan: tl.PropagateNan):
+        x, y = self.to_tensor(x), self.to_tensor(y)
+        x = self.cast(x, tl.float32) if x.dtype.is_bf16() else x
+        y = self.cast(y, tl.float32) if y.dtype.is_bf16() else y
         x, y = self.binary_op_type_checking_impl(x, y)
         dtype = x.dtype
         if dtype.is_floating():
@@ -1680,6 +1701,9 @@ class TritonSemantic(Generic[TensorTy]):
 
         return tuple(
             self.wrap_tensor(reduce_op.get_result(i), inputs[i].type.scalar, ret_shape) for i in range(len(inputs)))
+
+    def logical_reduce(self, input, axis, keep_dims):
+        raise TypeError("positional reduction requires combine_fn")
 
 # ===----------------------------------------------------------------------===
 #                               Associative Scan

@@ -26,6 +26,18 @@ class DriverConfig:
     def __init__(self) -> None:
         self._default: DriverBase | None = None
         self._active: DriverBase | None = None
+        self._model_drivers = {}
+
+    def for_model(self, model):
+        if model == "weft":
+            if model not in self._model_drivers:
+                from triton.backends.weft.driver import WeftDriver
+                self._model_drivers[model] = WeftDriver()
+            return self._model_drivers[model]
+        return self.active
+
+    def for_target(self, target):
+        return self.for_model("weft" if target.backend == "weft" else "triton")
 
     @property
     def default(self) -> DriverBase:

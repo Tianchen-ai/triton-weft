@@ -49,3 +49,16 @@ class CompileTimeAssertionFailure(CompilationError):
 
 class UnsupportedLanguageConstruct(CompilationError):
     pass
+
+
+class BackendCompilationError(TritonError):
+    def __init__(self, report):
+        self.report = report
+        self.candidate_rejected = report["category"] in ("unsupported", "resource-limit")
+        messages = "\n".join(f"{item['location']}: {item['message']}" for item in report["diagnostics"])
+        super().__init__(f"{report['stage']} / {report['pass']} ({report['category']}):\n{messages}")
+
+    def __reduce__(self):
+        # Framework compilation may cross a worker-process boundary. Rebuild
+        # from the structured report, not Exception's formatted string args.
+        return type(self), (self.report,)

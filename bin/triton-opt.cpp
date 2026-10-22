@@ -7,5 +7,5 @@ int main(int argc, char **argv) {
   registerTritonDialects(registry);
 
   return mlir::asMainReturnCode(mlir::MlirOptMain(
-      argc, argv, "Triton (GPU) optimizer driver\n", registry));
+      argc, argv, "Triton optimizer driver (standard and Weft models)\n", registry));
 }

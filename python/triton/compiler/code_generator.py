@@ -287,10 +287,24 @@ class CodeGenerator(ast.NodeVisitor):
 
     def __init__(self, context, prototype, gscope, function_name, jit_fn: JITFunction, *, options, codegen_fns,
                  module_map, is_gluon, module=None, is_kernel=False, function_types: Optional[Dict] = None,
-                 noinline=False, caller_context=None, file_name: Optional[str] = None, begin_line=0, begin_col=1):
+                 noinline=False, caller_context=None, file_name: Optional[str] = None, begin_line=0, begin_col=1,
+                 source=None):
         self.context = context
+        self.model = jit_fn.model
+        self.weft = None
         self.is_gluon = is_gluon
-        if is_gluon:
+        if self.model == "weft":
+            from .weft.semantic import WeftSemantic
+            from .weft.frontend import CanonicalSemantic
+            self.jit_fn = jit_fn
+            self.lscope = {}
+            self.local_defs = {}
+            self.cur_node = None
+            self.weft = WeftSemantic(self, jit_fn, source.constants)
+            self.weft.signature = source.signature
+            self.builder = self.weft.builder
+            self.semantic = CanonicalSemantic(self.weft)
+        elif is_gluon:
             from triton.experimental.gluon.language._semantic import GluonSemantic
             self.builder = gluon_ir.GluonOpBuilder(context, options.arch)
             self.semantic = GluonSemantic(self.builder)
@@ -382,6 +396,13 @@ class CodeGenerator(ast.NodeVisitor):
 
         def local_lookup(name: str, absent):
             # this needs to be re-fetched from `self` every time, because it gets switched occasionally
+            if self.weft is not None and name not in self.lscope:
+                from .weft.values import wrap
+                if name in self.weft._birth_unavailable:
+                    raise NameError(self.weft._birth_unavailable[name])
+                for bindings in (self.weft._shape_symbols, self.weft._auto_symbols, self.weft.static_env):
+                    if name in bindings:
+                        return wrap(bindings[name])
             return self.lscope.get(name, absent)
 
         def global_lookup(name: str, absent):
@@ -480,11 +501,12 @@ class CodeGenerator(ast.NodeVisitor):
         names = []
 
         for name, live_val in liveins.items():
-            if name in ignore:
+            if name in ignore or not self.semantic.is_control_livein(live_val):
                 continue
 
             if _is_triton_value(live_val):
-                loop_val = self.lscope[name]
+                loop_val = self.semantic.normalize_join_value(self.lscope[name], live_val)
+                self.lscope[name] = loop_val
                 self._verify_loop_carried_variable(name, loop_val, live_val)
 
                 live_handles = flatten_values_to_ir([live_val])
@@ -513,8 +535,71 @@ class CodeGenerator(ast.NodeVisitor):
             self.visit(stmt)
             # Stop parsing as soon as we hit a `return` statement; everything
             # after this is dead code.
-            if isinstance(stmt, ast.Return):
+            if (isinstance(stmt, ast.Return) or getattr(stmt, "_weft_helper_return", False)
+                    or self.semantic.has_returned_in_current_block()):
                 break
+
+    def visit_structured_void_body(self, stmts):
+        """Keep early kernel exits in structured control for region builders."""
+        self.visit_compound_statement(self._structured_return_statements(stmts))
+
+    def visit_structured_inline_body(self, stmts):
+        """Inline source returns using the ordinary structured SSA builder.
+
+        Move each continuation into paths that have not returned. The synthetic
+        assignment retains the return's constexpr/tuple type; terminal branches
+        join only that result, using the same return rules as outlined helpers.
+        No caller-visible local or effect may escape another return path.
+        """
+        result_name = "$inline_return"
+        self.visit_compound_statement(self._structured_return_statements(stmts, result_name))
+        return self.lscope[result_name]
+
+    def _structured_return_statements(self, stmts, result_name=None):
+        # This normalizes only exits; expressions, scopes, effects and SSA joins
+        # still use the shared visitor. The same normalization serves kernels
+        # and inline helpers, without introducing a second frontend or IR.
+        checker = ContainsReturnChecker(self.gscope)
+
+        def return_assignment(statement):
+            if result_name is None:
+                if statement.value is not None and not (
+                        isinstance(statement.value, ast.Constant) and statement.value.value is None):
+                    raise self._unsupported(statement, "a kernel cannot return a value")
+                return []
+            assignment = ast.copy_location(ast.Assign(
+                targets=[ast.copy_location(ast.Name(id=result_name, ctx=ast.Store()), statement)],
+                value=statement.value), statement)
+            assignment._inline_return = result_name
+            return [assignment]
+
+        def continuation(statements):
+            result = []
+            for position, statement in enumerate(statements):
+                if isinstance(statement, ast.Return):
+                    result.extend(return_assignment(statement))
+                    return result
+                if isinstance(statement, ast.If) and checker.visit(statement):
+                    remaining = statements[position + 1:]
+                    branch = ast.copy_location(ast.If(
+                        test=statement.test,
+                        body=continuation(statement.body + remaining),
+                        orelse=continuation(statement.orelse + remaining)), statement)
+                    branch._inline_return = result_name
+                    result.append(branch)
+                    return result
+                if checker.visit(statement):
+                    context = "inline helper" if result_name is not None else "kernel"
+                    raise self._unsupported(statement, f"{context} returns inside loops or context managers are unsupported")
+                result.append(statement)
+            # Falling off the function returns None, including on just one side
+            # of a conditional. It must participate in return-type checking.
+            if result_name is not None:
+                implicit = ast.copy_location(ast.Return(value=None), statements[-1] if statements else self.cur_node)
+                result.extend(return_assignment(implicit))
+            return result
+
+        return continuation(list(stmts))
 
     def visit_Module(self, node):
         ast.NodeVisitor.generic_visit(self, node)
@@ -524,6 +609,17 @@ class CodeGenerator(ast.NodeVisitor):
         assert ctx is None
         elts = language.tuple([self.visit(elt) for elt in node.elts])
         return elts
+
+    def visit_Dict(self, node):
+        result = {}
+        for key_node, value_node in zip(node.keys, node.values):
+            if key_node is None:
+                raise self._unsupported(node, "dictionary expansion is not supported in a kernel")
+            key, value = self.visit(key_node), self.visit(value_node)
+            if not isinstance(key, constexpr) or not isinstance(value, constexpr):
+                raise self._unsupported(node, "kernel dictionaries must contain compile-time keys and values")
+            result[key.value] = value.value
+        return constexpr(result)
 
     def visit_ListComp(self, node: ast.ListComp):
         if len(node.generators) != 1:
@@ -553,9 +649,11 @@ class CodeGenerator(ast.NodeVisitor):
         post_ret_block = self.builder.create_block()
         self.builder.set_insertion_point_to_end(post_ret_block)
 
-    def decide_return_type(self):
-        assert len(self.return_vals) == len(self.return_ips)
-        if not self.return_vals:
+    def decide_return_type(self, return_vals=None):
+        if return_vals is None:
+            assert len(self.return_vals) == len(self.return_ips)
+            return_vals = self.return_vals
+        if not return_vals:
             return language.constexpr_type(None)
 
         tl = language.core
@@ -569,19 +667,22 @@ class CodeGenerator(ast.NodeVisitor):
             if isinstance(a, tl.tuple_type):
                 _check(isinstance(b, tl.tuple_type), lambda: error_msg(a, b))
                 _check(a.fields == b.fields, lambda: error_msg(a, b))
+                _check(len(a.types) == len(b.types), lambda: error_msg(a, b))
                 return tl.tuple_type([common_type(ai, bi) for ai, bi in zip(a, b)], fields=a.fields)
             if isinstance(a, tl.constexpr_type):
                 if a == b:
                     return a
+                _check(a != tl.constexpr_type(None) and b != tl.constexpr_type(None), lambda: error_msg(a, b))
                 a = self.semantic.to_tensor_type(a)
                 b = self.semantic.to_tensor_type(b)
             elif isinstance(b, tl.constexpr_type):
+                _check(b != tl.constexpr_type(None), lambda: error_msg(a, b))
                 a = self.semantic.to_tensor_type(a)
                 b = self.semantic.to_tensor_type(b)
             _check(a == b, lambda: error_msg(a, b))
             return a
 
-        return_types = [x.type for x in self.return_vals]
+        return_types = [x.type for x in return_vals]
         return functools.reduce(common_type, return_types)
 
     def cast_to(self, value, ty):
@@ -626,6 +727,8 @@ class CodeGenerator(ast.NodeVisitor):
         self.builder.ret([self.builder.create_poison(ty) for ty in self.prototype.return_types_ir(self.builder)])
 
     def visit_FunctionDef(self, node):
+        if self.weft is not None:
+            return self.weft.compile(node)
         if self.fn:
             raise self._unsupported(
                 node, "nested function definitions are not allowed inside a @triton.jit kernel. "
@@ -722,13 +825,21 @@ class CodeGenerator(ast.NodeVisitor):
         if isinstance(target, ast.Attribute):
             raise NotImplementedError("Attribute assignment is not supported in triton")
         assert isinstance(target, ast.Name)
+        if self.weft is not None and target.id in self.weft.immutable_names:
+            raise self._unsupported(target, f"staged value {target.id!r} is read-only in descendant code")
         self.set_value(self.visit(target), value)
 
     def visit_Assign(self, node):
+        if getattr(node, "_inline_return", None) is not None:
+            value = self.visit(node.value)
+            self.set_value(node._inline_return, language.constexpr(None) if value is None else value)
+            return
         # construct values to assign
         def _sanitize_value(value):
             if isinstance(value, language.tuple):
                 return _apply_to_tuple_values(value, _sanitize_value)
+            if self.weft is not None:
+                value = self.semantic.value_context(value)
             native_nontensor_types = (language.dtype, language.tuple)
             value = _unwrap_if_constexpr(value)
             if value is not None and \
@@ -793,6 +904,8 @@ class CodeGenerator(ast.NodeVisitor):
         return language.tuple(args)
 
     def _apply_binary_method(self, node, method_name, lhs, rhs):
+        if self.weft is not None:
+            lhs, rhs = self.semantic.value_context(lhs), self.semantic.value_context(rhs)
         # TODO: raise something meaningful if getattr fails below, esp for reverse method
         if _is_triton_tensor(lhs):
             return getattr(lhs, method_name)(rhs, _semantic=self.semantic)
@@ -813,7 +926,7 @@ class CodeGenerator(ast.NodeVisitor):
         method_name = self._method_name_for_bin_op.get(type(node.op))
         if method_name is None:
             raise self._unsupported(node,
-                                    "AST binary operator '{}' is not (currently) implemented.".format(node.op.__name__))
+                                    "AST binary operator '{}' is not (currently) implemented.".format(type(node.op).__name__))
         return self._apply_binary_method(node, method_name, lhs, rhs)
 
     _method_name_for_bin_op: Dict[Type[ast.operator], str] = {
@@ -852,12 +965,23 @@ class CodeGenerator(ast.NodeVisitor):
             else_block = self.builder.get_insertion_block()
             else_vals = self.lscope.copy()
 
+        if getattr(node, "_inline_return", None) is not None:
+            name = node._inline_return
+            then_val, else_val = then_defs[name], else_defs[name]
+            else_val = self.semantic.normalize_join_value(else_val, then_val)
+            return_type = self.decide_return_type([then_val, else_val])
+            self.builder.set_insertion_point_to_end(then_block)
+            then_val = self.cast_to(then_val, return_type)
+            self.builder.set_insertion_point_to_end(else_block)
+            else_val = self.cast_to(else_val, return_type)
+            return {name: then_val}, {name: else_val}, then_block, else_block, [name]
+
         # update block arguments
         names = []
         # variables in livein whose value is updated in `if`
         for name, value in liveins.items():
             # livein variable changed value in either then or else
-            if not _is_triton_value(value):
+            if not _is_triton_value(value) or not self.semantic.is_control_livein(value):
                 continue
             then_handles = flatten_values_to_ir([then_vals[name]])
             else_handles = flatten_values_to_ir([else_vals[name]])
@@ -868,6 +992,7 @@ class CodeGenerator(ast.NodeVisitor):
             else_defs[name] = else_vals[name]
             # check type
             for defs, block_name in [(then_defs, 'then'), (else_defs, 'else')]:
+                defs[name] = self.semantic.normalize_join_value(defs[name], value)
                 type_equal = type(defs[name]) == type(value)  # noqa: E721
                 assert type_equal and defs[name].type == value.type, \
                     f'initial value for `{name}` is of type {value}, '\
@@ -879,8 +1004,14 @@ class CodeGenerator(ast.NodeVisitor):
             if name in names:
                 continue
             then_val = then_defs[name]
+            # A loop induction placeholder is not a definition outside its
+            # loop. Do not manufacture a branch result from a dead local name;
+            # an actual escaped use still receives the model's diagnostic.
+            if not self.semantic.is_control_livein(then_val) or not self.semantic.is_control_livein(else_defs[name]):
+                continue
             then_ty = then_val.type
-            else_val = else_defs[name]
+            else_val = self.semantic.normalize_join_value(else_defs[name], then_val)
+            else_defs[name] = else_val
             else_ty = else_val.type
             type_equal = type(then_val) == type(else_val)  # noqa: E721
             assert type_equal and then_ty == else_ty, \
@@ -1021,19 +1152,25 @@ class CodeGenerator(ast.NodeVisitor):
                     f'Ternary expression with dynamic condition has inconsistent types {then_val.type} and {else_val.type}'
                 ret_type = then_val.type
 
-                ret_type_ir = [ret_type.to_ir(self.builder)] if ret_type != language.void else []
+                ret_type_ir = []
+                if ret_type != language.void:
+                    ret_type._flatten_ir_types(self.builder, ret_type_ir)
                 if_op = self.builder.create_if_op(ret_type_ir, cond.handle, True)
                 then_block.merge_block_before(if_op.get_then_block())
                 if ret_type_ir:
                     self.builder.set_insertion_point_to_end(if_op.get_then_block())
-                    self.builder.create_yield_op([then_val.handle])
+                    handles = []
+                    then_val._flatten_ir(handles)
+                    self.builder.create_yield_op(handles)
 
                 self.builder.set_insertion_point_to_end(if_op.get_then_block())
                 else_block.merge_block_before(if_op.get_else_block())
                 if ret_type_ir:
                     self.builder.set_insertion_point_to_end(if_op.get_else_block())
-                    self.builder.create_yield_op([else_val.handle])
-                return language.core.tensor(if_op.get_result(0), ret_type) if ret_type_ir else None
+                    handles = []
+                    else_val._flatten_ir(handles)
+                    self.builder.create_yield_op(handles)
+                return ret_type._unflatten_ir([if_op.get_result(i) for i in range(len(ret_type_ir))], 0)[0] if ret_type_ir else None
         else:
             cond = _unwrap_if_constexpr(cond)
 
@@ -1049,6 +1186,12 @@ class CodeGenerator(ast.NodeVisitor):
                 return self.visit(node.orelse)
 
     def visit_With(self, node):
+        if self.weft is not None:
+            from triton.language.weft.builtins import LevelConstructor
+            if len(node.items) == 1 and isinstance(node.items[0].context_expr, ast.Call):
+                constructor = self.visit(node.items[0].context_expr.func)
+                if isinstance(constructor, LevelConstructor):
+                    return self.weft._compile_level(node)
         # Lower `with` statements by constructing context managers and calling their enter/exit hooks
         # Instantiate each context manager with builder injection
         cm_list = []
@@ -1087,7 +1230,7 @@ class CodeGenerator(ast.NodeVisitor):
         method_name = self._method_name_for_comp_op.get(type(node.ops[0]))
         if method_name is None:
             raise self._unsupported(
-                node, "AST comparison operator '{}' is not (currently) implemented.".format(node.ops[0].__name__))
+                node, "AST comparison operator '{}' is not (currently) implemented.".format(type(node.ops[0]).__name__))
         return self._apply_binary_method(node, method_name, lhs, rhs)
 
     _method_name_for_comp_op: Dict[Type[ast.cmpop], str] = {
@@ -1098,7 +1241,7 @@ class CodeGenerator(ast.NodeVisitor):
         operand = self.visit(node.operand)
         fn = self._method_name_for_unary_op.get(type(node.op))
         if fn is None:
-            raise self._unsupported(node, f"AST unary operator '{node.op.__name__}' is not (currently) implemented.")
+            raise self._unsupported(node, f"AST unary operator '{type(node.op).__name__}' is not (currently) implemented.")
         if _is_triton_tensor(operand):
             return getattr(operand, fn)(_semantic=self.semantic)
         try:
@@ -1187,12 +1330,19 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_Subscript_Load(self, node):
         assert isinstance(node.ctx, ast.Load)
         lhs = self.visit(node.value)
+        if self.weft is not None:
+            from .weft.values import LogicalObject, LogicalType, wrap
+            if isinstance(lhs, LogicalObject) or isinstance(getattr(lhs, "type", None), LogicalType):
+                return wrap(self.weft._compile_subscript(node, lhs.handle))
         slices = self.visit(node.slice)
         if _is_triton_value(lhs):
             return self.call_Method(node, lhs.__getitem__, lhs, [slices], {})
         return lhs[slices]
 
     def visit_Subscript_Store(self, node, value):
+        if self.weft is not None:
+            from .weft.values import unwrap
+            return self.weft._bind_target(node, unwrap(value))
         raise NotImplementedError("__setitem__ is not supported in triton")
 
     def visit_Subscript(self, node):
@@ -1320,6 +1470,7 @@ class CodeGenerator(ast.NodeVisitor):
             # update induction variable with actual value, and replace all uses
             self.builder.set_insertion_point_to_start(for_op_body)
             iv = for_op.get_induction_var()
+            iv = self.builder.create_int_cast(iv, iv_ir_type, iv_is_signed)
             if negative_step:
                 iv = self.builder.create_sub(ub, iv)
                 iv = self.builder.create_add(iv, lb)
@@ -1333,6 +1484,8 @@ class CodeGenerator(ast.NodeVisitor):
         for name, val in zip(names, result_values):
             self.set_value(name, val)
             self._maybe_set_loc_to_name(val, name)
+
+        self.semantic.finish_loop_induction(iv_placeholder)
 
         for stmt in node.orelse:
             assert False, "Don't know what to do with else after for"
@@ -1356,6 +1509,10 @@ class CodeGenerator(ast.NodeVisitor):
         return language.core.device_assert(test, msg, _semantic=self.semantic)
 
     def call_JitFunction(self, fn: JITFunction, args, kwargs, caller_context=None):
+        if self.weft is not None:
+            return self.semantic.call_helper(fn, args, kwargs)
+        if fn.model != self.model:
+            raise TypeError(f"cannot call a {fn.model} helper from the {self.model} programming model")
         bound_args = fn.signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
         args = bound_args.arguments
@@ -1408,7 +1565,8 @@ class CodeGenerator(ast.NodeVisitor):
             raise CompilationError(self.jit_fn.src, node, " ".join(error_message))
 
         if isinstance(fn, JITFunction):
-            _check_fn_args(node, fn, args)
+            if not self.semantic.supports_noinline_tensors:
+                _check_fn_args(node, fn, args)
             return self.call_JitFunction(fn, args, kws)
         if (hasattr(fn, '__self__') and _is_triton_value(fn.__self__)) or language.core.is_builtin(fn) or isinstance(
                 fn, ConstexprFunction):
@@ -1454,6 +1612,10 @@ class CodeGenerator(ast.NodeVisitor):
 
     def visit_Call(self, node):
         fn = _unwrap_if_constexpr(self.visit(node.func))
+        if self.weft is not None:
+            handled, result = self.semantic.intrinsic_call(node, fn)
+            if handled:
+                return result
         if not isinstance(fn, BoundJITMethod):
             static_implementation = self.statically_implemented_functions.get(fn)
             if static_implementation is not None:
@@ -1482,7 +1644,7 @@ class CodeGenerator(ast.NodeVisitor):
         method_name = self._method_name_for_bool_op.get(type(node.op))
         if method_name is None:
             raise self._unsupported(
-                node, "AST boolean operator '{}' is not (currently) implemented.".format(node.op.__name__))
+                node, "AST boolean operator '{}' is not (currently) implemented.".format(type(node.op).__name__))
 
         nontrivial_values = []
 
@@ -1545,6 +1707,11 @@ class CodeGenerator(ast.NodeVisitor):
 
     def visit_Attribute(self, node):
         lhs = self.visit(node.value)
+        if self.weft is not None:
+            from .weft.values import LogicalObject, LogicalTensor, wrap
+            from .weft.types import EncodingType, element_type
+            if isinstance(lhs, (LogicalObject, LogicalTensor)) and isinstance(element_type(lhs.handle.type), EncodingType):
+                return wrap(self.weft._compile_field(node, lhs.handle))
         if isinstance(lhs, ModuleType):
             # follow module_map until reaching fixed-point:
             while (name := lhs.__name__) in self.builder.module_map:
@@ -1554,6 +1721,8 @@ class CodeGenerator(ast.NodeVisitor):
         return self.get_Attribute(lhs, node.attr)
 
     def visit_Expr(self, node):
+        if getattr(node, "_weft_helper_return", False):
+            return self.semantic.helper_return(node)
         node.value._is_unused = True
         ast.NodeVisitor.generic_visit(self, node)
 
@@ -1659,7 +1828,15 @@ class CodeGenerator(ast.NodeVisitor):
     }
 
 
-def ast_to_ttir(fn, src, context, options, codegen_fns, module_map, module=None):
+def ast_to_ir(fn, src, context, options, codegen_fns, module_map, module=None):
+    if fn.model == "weft":
+        generator = CodeGenerator(context, None, fn.get_capture_scope(), fn.__name__, fn,
+                                  options=options, codegen_fns=codegen_fns, module_map=module_map,
+                                  is_gluon=False, module=module, is_kernel=True, source=src,
+                                  file_name=fn.file_name, begin_line=fn.def_file_line_number,
+                                  begin_col=fn.def_file_col_number)
+        generator.visit(fn.parse())
+        return generator.module
     arg_types = [None] * len(fn.arg_names)
 
     for k, v in src.signature.items():

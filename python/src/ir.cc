@@ -1014,6 +1014,24 @@ void init_triton_ir(py::module &&m) {
            [](TritonOpBuilder &self) -> Type {
              return self.getBuilder().getI64Type();
            })
+      // The shared frontend preserves the source signedness in its builder
+      // protocol. TTIR still represents it through operations on signless types.
+      .def("get_uint8_ty",
+           [](TritonOpBuilder &self) -> Type {
+             return self.getBuilder().getI8Type();
+           })
+      .def("get_uint16_ty",
+           [](TritonOpBuilder &self) -> Type {
+             return self.getBuilder().getType<IntegerType>(16);
+           })
+      .def("get_uint32_ty",
+           [](TritonOpBuilder &self) -> Type {
+             return self.getBuilder().getI32Type();
+           })
+      .def("get_uint64_ty",
+           [](TritonOpBuilder &self) -> Type {
+             return self.getBuilder().getI64Type();
+           })
       .def("get_int128_ty",
            [](TritonOpBuilder &self) -> Type {
              return self.getBuilder().getIntegerType(128);
