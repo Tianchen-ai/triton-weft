@@ -1189,6 +1189,15 @@ target budget，不给每个对象平均分配配额。嵌套循环每轮结束�
 summary 保存由这些 guards 保证的上界。静态存储保留量取词法作用域的同时存活峰值，
 包含对齐余量；私有 storage alias 不得从其分配作用域逃逸。缺少闭合上界时拒绝生成 C VLA。
 
+### `AlignRISCVLocalStorage`
+
+根据已经选择的连续 RVV 访存宽度，提高静态 `physical-share` 私有缓冲区的对齐。
+有显式 cache 模型时以 cache line 为上限；没有 cache 模型时使用目标 VLEN 的字节宽度，
+不把缺少 cache 参数解释为只能使用 scalar 对齐。实际选择不超过访问宽度，且必须是
+二次幂。作者对象、外部 workspace、动态容量和 spill slot 保留各自的存储合同。
+每次提高对齐前重新计算同时存活的局部字节数与 padding；存在动态对象、寄存器超限或
+栈预算不足时不进行这一可选优化。对齐写入 `LocalType`，emitter 只输出其 `_Alignas`。
+
 ### `VerifyFinalRISCV`
 
 terminal eligibility 与 required-leaf 由 `RISCVOps.td` 的 `WeftRISCVTerminal` /

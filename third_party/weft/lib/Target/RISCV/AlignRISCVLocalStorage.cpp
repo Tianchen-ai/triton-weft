@@ -26,7 +26,7 @@ std::optional<int64_t> vectorAccessBytes(Operation *operation) {
   return width > 0 ? std::optional<int64_t>(width) : std::nullopt;
 }
 
-llvm::DenseMap<Value, int64_t> requests(riscv::KernelOp kernel, int64_t lineBytes) {
+llvm::DenseMap<Value, int64_t> requests(riscv::KernelOp kernel, int64_t alignmentLimit) {
   llvm::DenseMap<Value, int64_t> result;
   kernel.walk([&](Operation *operation) {
     auto memory = dyn_cast<MemoryEffectOpInterface>(operation);
@@ -34,7 +34,7 @@ llvm::DenseMap<Value, int64_t> requests(riscv::KernelOp kernel, int64_t lineByte
     if (!memory || !access || (access.getForm() != "unit" && access.getForm() != "segment")) return;
     auto width = vectorAccessBytes(operation);
     if (!width) return;
-    int64_t alignment = std::min(*width, lineBytes);
+    int64_t alignment = std::min(*width, alignmentLimit);
     // Only whole power-of-two physical spans have an alignment contract here.
     // This does not reinterpret a non-power-of-two active tail as a full VL.
     if (alignment < 16 || (alignment & (alignment - 1))) return;
@@ -54,7 +54,7 @@ llvm::DenseMap<Value, int64_t> requests(riscv::KernelOp kernel, int64_t lineByte
         // external workspaces, artifact bytes, spills and dynamic capacities
         // retain their independently selected placement contracts.
         if (type.getPurpose() != "pack" || type.getSchema() != "physical-share" ||
-            type.getSizeBytes() < lineBytes || alignment <= type.getAlignment()) continue;
+            type.getSizeBytes() < alignmentLimit || alignment <= type.getAlignment()) continue;
         auto found = result.find(root);
         if (found == result.end()) result.try_emplace(root, alignment);
         else found->second = std::max(found->second, alignment);
@@ -74,7 +74,10 @@ public:
     bool invalid = false;
     getOperation().walk([&](riscv::KernelOp kernel) {
       auto cache = dyn_cast<riscv::DataCacheAttr>(kernel.getTarget().getDataCache());
-      if (!cache) return;
+      // Vector transfer alignment is useful even when no cache model was
+      // supplied. VLEN is a verified target fact; do not invent a cache line.
+      const int64_t alignmentLimit = cache ? cache.getLineBytes()
+                                          : kernel.getTarget().getVlenBits() / 8;
       if (kernel.getResourcesMaterialized()) {
         kernel.emitError("local alignment selection requires open physical resources");
         invalid = true;
@@ -94,7 +97,7 @@ public:
       // set already fits; alignment is not allowed to force a new rejection.
       auto pressure = physicalRegisterPressure(kernel);
       if (!pressure || pressure->total() > kernel.getTarget().getVectorRegisters()) return;
-      auto proposed = requests(kernel, cache.getLineBytes());
+      auto proposed = requests(kernel, alignmentLimit);
       if (proposed.empty()) return;
       llvm::DenseMap<Value, int64_t> selected;
       SmallVector<riscv::LocalAllocOp> allocations;
