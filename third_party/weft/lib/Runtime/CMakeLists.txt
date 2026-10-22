@@ -8,4 +8,5 @@ target_include_directories(WeftRuntime SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_options(WeftRuntime PRIVATE -fexceptions -fvisibility=hidden -Wall -Wextra -Werror)
 target_link_options(WeftRuntime PRIVATE "LINKER:--exclude-libs,ALL")
 set_target_properties(WeftRuntime PROPERTIES OUTPUT_NAME weft_runtime
-  EXPORT_NAME Runtime INSTALL_RPATH "$ORIGIN" INSTALL_RPATH_USE_LINK_PATH FALSE)
+  EXPORT_NAME Runtime BUILD_WITH_INSTALL_RPATH TRUE
+  INSTALL_RPATH "$ORIGIN" INSTALL_RPATH_USE_LINK_PATH FALSE)

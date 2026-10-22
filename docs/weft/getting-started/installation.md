@@ -7,12 +7,12 @@ triton 模块的发行包。Weft 编译核心位于 third_party/weft，没有需
 
 ```sh
 python -m venv .venv
-.venv/bin/python -m pip install --index-url https://tianchen-ai.github.io/triton-weft/wheels/ 'triton==3.8.0+weft.1'
+.venv/bin/python -m pip install --index-url https://tianchen-ai.github.io/triton-weft/wheels/ 'triton==3.8.0+weft.2'
 .venv/bin/python -m pip install numpy
 ```
 
 只安装这一份 `triton`，不要再安装上游同名 wheel 覆盖它。发行资产位于
-[GitHub Releases](https://github.com/Tianchen-ai/triton-weft/releases/tag/v3.8.0-weft.1)。
+[GitHub Releases](https://github.com/Tianchen-ai/triton-weft/releases/tag/v3.8.0-weft.2)。
 首批 wheel 使用 Linux 原生平台标签：x86 CPython 3.10，以及 RISC-V CPython 3.11、3.12、3.14，
 分别面向本项目已使用的 x86、SG2044、K1 和 K3 环境。它们不是通用 manylinux 声明；
 系统 libc、C++ runtime、ABI 和实际 ISA 必须满足 Release 中声明的要求。

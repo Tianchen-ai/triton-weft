@@ -1,6 +1,7 @@
 name: Build Triton and Weft
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 permissions:
