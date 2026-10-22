@@ -132,6 +132,9 @@ triton.Package.create 将已选择的 CompiledKernel 组成具名集合，见 [n
 
 eager CPU Tensor 使用普通 Triton 调用。Canonical interface 分析不访问存储、不发现设备，
 也不进行 native 编译，提供参数读写、alias、shape 和 stride 合同。
+对于 packed View，接口同时给出作者 Encoding 的 record bytes、逻辑元素数、alignment
+以及显式 interleave 的 byte spans。调用方可在首次 JIT 前准备准确的存储；这些信息来自
+Canonical 声明，不是从已编译 artifact 反推，也不包含目标指令或资源选择。
 torch.compile 必须由 PyTorch 的 Triton HOP 显式接入该模型接口并保持模型启动方式；
 只识别 JITFunction，或在 TTIR 分析失败后假定所有参数可写，都不构成支持。
 框架接入不提供另一套 Weft dispatcher 注册 API，不承担 Inductor 的整个 CPU 图编译。

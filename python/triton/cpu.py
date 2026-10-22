@@ -158,4 +158,4 @@ def _validate_execution(profile, facts):
         missing = set(wanted_isa) - set(actual["isa_extensions"])
     if missing:
         raise RuntimeError(f"selected CPUs lack target ISA features or versions: {sorted(missing)}")
-    return expected
+    return observed

@@ -1,5 +1,6 @@
 #include "Weft/Dialect/Kernel/IR/KernelInterface.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
+#include "Weft/Dialect/Kernel/IR/EncodingStorage.h"
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/STLExtras.h"
@@ -123,11 +124,29 @@ FailureOr<std::string> weft::kernel::describeKernelInterface(ModuleOp module) {
       }
       auto shape = argumentShape(kernel, view);
       if (failed(shape)) return failure();
-      arguments.push_back(llvm::json::Object{
+      llvm::json::Object record{
           {"name", name}, {"kind", "view"},
           {"dtype", encoding.getKind() == "dense" ? encoding.getFamily() : ""},
           {"encoding", encoding.getLayoutIdentity()}, {"shape", std::move(*shape)},
-          {"access", access}, {"alias_set", kernel.getArgAliasSets()[index]}, {"strided", strided}});
+          {"access", access}, {"alias_set", kernel.getArgAliasSets()[index]}, {"strided", strided}};
+      if (encoding.getKind() != "dense") {
+        auto storage = encodingStorage(module, encoding);
+        if (failed(storage)) {
+          kernel.emitError("invocation Encoding has no closed storage declaration");
+          return failure();
+        }
+        record["storage_bytes"] = storage->bytes();
+        record["record_elements"] = storage->elements();
+        record["alignment"] = storage->base.getAlignment();
+        record["interleave_rows"] = storage->rows > 1 ? storage->rows : 0;
+        llvm::json::Array spans;
+        for (const auto &span : storage->spans)
+          spans.push_back(llvm::json::Object{{"offset", span.byteOffset},
+              {"bytes", span.byteCount}, {"chunk", span.chunkBytes}});
+        record["storage_layout"] = llvm::json::Object{
+            {"base_encoding", storage->base.getSymName()}, {"spans", std::move(spans)}};
+      }
+      arguments.push_back(std::move(record));
     } else {
       auto dtype = scalarName(argument.getType(), kernel);
       if (failed(dtype)) return failure();

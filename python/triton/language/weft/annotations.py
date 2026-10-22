@@ -97,14 +97,19 @@ class View:
         from .declarations import EncodingDefinition, DerivedEncodingInstance
         from triton.compiler.weft.source import normalize_static
         encoding = normalize_static(encoding)
-        if isinstance(encoding, DType):
+        if isinstance(encoding, str):
+            # A caller can receive the identity from Canonical/native metadata
+            # without importing the author's declaration. The compiled argument
+            # contract still checks the exact identity, capacity and alignment.
+            identity = encoding
+        elif isinstance(encoding, DType):
             identity = "dense." + encoding.name
         elif isinstance(encoding, EncodingDefinition):
             identity = encoding.__name__
         elif isinstance(encoding, DerivedEncodingInstance):
             identity = encoding.family.__name__ + "[" + ",".join(map(str, encoding.parameters)) + "]"
         else:
-            raise TypeError("View encoding must be a declared dtype or Encoding")
+            raise TypeError("View encoding must be a dtype, declared Encoding or layout identity")
         return Buffer(storage, encoding=identity, shape=tuple(shape), strides=strides)
 
     @classmethod

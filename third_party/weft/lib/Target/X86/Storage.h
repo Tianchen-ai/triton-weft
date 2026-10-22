@@ -2,6 +2,7 @@
 #define WEFT_TARGET_X86_STORAGE_H
 
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
+#include "Weft/Dialect/Kernel/IR/EncodingStorage.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
 #include <optional>
@@ -13,13 +14,7 @@ namespace weft::x86 {
 struct Fragment {
   int64_t byte = 0, shift = 0, mask = 0, resultShift = 0, chunk = 1;
 };
-struct StorageLayout {
-  kernel::EncodingDeclOp base;
-  int64_t rows = 1;
-  llvm::SmallVector<kernel::FieldInterleaveSpan> spans;
-
-  int64_t bytes() { return base.getStorageBits() / 8; }
-  int64_t elements() { return base.getElements(); }
+struct StorageLayout : kernel::EncodingStorage {
   std::pair<int64_t, int64_t> address(int64_t byte) const {
     if (rows == 1) return {byte, 1};
     for (const auto &span : spans) {
@@ -104,32 +99,9 @@ struct StorageLayout {
 
 inline mlir::FailureOr<StorageLayout> storageLayout(mlir::ModuleOp module,
                                                    kernel::EncodingType encoding) {
-  StorageLayout result;
-  llvm::StringRef family = encoding.getFamily();
-  kernel::InterleaveOp interleave;
-  if (encoding.getKind() == "derived_instance") {
-    for (auto derive : module.getOps<kernel::DeriveOp>()) {
-      if (derive.getResultFamily() != family || derive.getLayoutIdentity() != encoding.getLayoutIdentity() ||
-          derive.getParameterValues() != encoding.getParameters().asArrayRef()) continue;
-      auto &body = derive.getBody().front();
-      if (body.getOperations().size() != 2 || !(interleave = mlir::dyn_cast<kernel::InterleaveOp>(body.front())))
-        return derive.emitError("x86 artifact layout requires the declared interleave program");
-      family = derive.getSourceFamily();
-      result.rows = interleave.getRows();
-      break;
-    }
-    if (!interleave) return mlir::failure();
-  }
-  for (auto declaration : module.getOps<kernel::EncodingDeclOp>())
-    if (declaration.getSymName() == family) result.base = declaration;
-  if (!result.base || result.base.getStorageBits() % 8) return mlir::failure();
-  if (interleave) {
-    auto spans = kernel::fieldInterleaveSpans(result.base.getStorageBits(), result.base.getFieldBitOffsets(),
-        result.base.getFieldStorageBits(), result.base.getPadding(), interleave.getFieldChunks());
-    if (mlir::failed(spans)) return mlir::failure();
-    result.spans = std::move(*spans);
-  }
-  return result;
+  auto storage = kernel::encodingStorage(module, encoding);
+  if (mlir::failed(storage)) return mlir::failure();
+  return StorageLayout{std::move(*storage)};
 }
 } // namespace weft::x86
 #endif
