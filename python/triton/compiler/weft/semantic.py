@@ -2114,7 +2114,7 @@ class WeftSemantic:
         return self._compile_contract(call, "reduce_dot")
 
     def _compile_contract(self, call: ast.Call, operation: str) -> Value:
-        args = self._arguments(call, ("a", "b"), {"over": None, "acc_dtype": None})
+        args = self._arguments(call, ("a", "b"), {"over": None, "acc_dtype": None, "engine": "auto"})
         lhs = self._expect_value(self._compile_expr(args["a"]), args["a"])
         rhs = self._expect_value(self._compile_expr(args["b"]), args["b"])
         over = self._eval_static(args["over"]) if isinstance(args["over"], ast.expr) else args["over"]
@@ -2148,7 +2148,8 @@ class WeftSemantic:
                     self._location(call),
                 )
         canonical_op = "outer_contract" if operation == "dot" else "contract"
-        return self._contract_value(call, lhs, rhs, reduction_axes, canonical_op, acc)
+        engine = self._eval_static(args["engine"]) if isinstance(args["engine"], ast.expr) else args["engine"]
+        return self._contract_value(call, lhs, rhs, reduction_axes, canonical_op, acc, engine)
 
     def _contract_value(
         self,
@@ -2158,7 +2159,10 @@ class WeftSemantic:
         reduction_axes: Sequence[int],
         operation: str,
         accumulator_dtype: DType | None,
+        engine: str = "auto",
     ) -> Value:
+        if engine not in ("auto", "matrix", "vector"):
+            raise FrontendError("contraction engine must be 'auto', 'matrix', or 'vector'", self._location(call))
         lhs_axes, rhs_axes = axes_of(lhs.type), axes_of(rhs.type)
         lhs_element = element_type(lhs.type)
         rhs_element = element_type(rhs.type)
@@ -2194,7 +2198,7 @@ class WeftSemantic:
                 self._location(call),
             )
         result_type = value_type(result_element, tuple(output_shape), tuple(output_axes))
-        attributes = {"over": _i64_array(reduction_axes)}
+        attributes = {"over": _i64_array(reduction_axes), "engine": json.dumps(engine)}
         if accumulator_dtype is not None:
             attributes["acc_type"] = emit_type(ScalarType(accumulator_dtype))
         return self._emit(

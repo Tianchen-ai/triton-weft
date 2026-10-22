@@ -53,7 +53,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r third_party/weft/requirements-docs.txt
-      - run: mkdocs build --strict -f third_party/weft/mkdocs.yml --site-dir ../../build/handbook
+      - run: mkdocs build --strict -f mkdocs.yml --site-dir build/handbook
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name != 'pull_request'
         with:

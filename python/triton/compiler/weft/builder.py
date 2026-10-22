@@ -184,6 +184,9 @@ class CanonicalBuilder(IRBuilder):
         return tuple(self.extension._axis_id(f"$position{-i}") for i in range(rank, 0, -1))
 
     def create_dot(self, lhs, rhs, acc, input_precision, max_num_imprecise_acc):
+        return self.create_dot_with_engine(lhs, rhs, acc, input_precision, max_num_imprecise_acc, "auto")
+
+    def create_dot_with_engine(self, lhs, rhs, acc, input_precision, max_num_imprecise_acc, engine):
         from triton._C.libtriton import ir
         if input_precision != ir.INPUT_PRECISION.IEEE:
             raise NotImplementedError("Weft dot requires IEEE input precision")
@@ -198,7 +201,7 @@ class CanonicalBuilder(IRBuilder):
         left = self.reshape_axes(lhs, left_shape, batch + (m, k))
         right = self.reshape_axes(rhs, right_shape, batch + (k, n))
         product = ext._contract_value(ext.generator.cur_node, left, right, (k,),
-                                      "contract" if batch else "outer_contract", element_type(acc.type).dtype)
+                                      "contract" if batch else "outer_contract", element_type(acc.type).dtype, engine)
         shape = left_shape[:-1] + right_shape[-1:]
         axes = self.positional_axes(len(shape))
         product = self.reshape_axes(product, shape, axes)

@@ -14,3 +14,4 @@
 #define __HIP_HAS_GET_PCH 1
 
 #endif
+

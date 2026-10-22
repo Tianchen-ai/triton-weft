@@ -1,4 +1,4 @@
-"""Named native artifacts for C/C++ consumers, including explicit GGML roles."""
+"""Named native artifacts and application-owned role bindings."""
 import json
 import os
 from pathlib import Path
@@ -39,7 +39,6 @@ class Package:
     @staticmethod
     def _validate(kernels, bindings):
         from triton.compiler import CompiledKernel
-        from triton.tools.llama_cpp import validate_vec_dot, validate_quantizer, validate_ime1, validate_ime2, validate_amx
         if not kernels or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", name) for name in kernels):
             raise ValueError("package requires named kernels using letters, digits, underscore or hyphen")
         for kernel in kernels.values():
@@ -47,16 +46,12 @@ class Package:
                 raise TypeError("native package entries must be CPU CompiledKernel objects")
         if len({(k.metadata.target.abi, k.metadata.target.vlen_bits) for k in kernels.values()}) != 1:
             raise ValueError("one native package must use a common execution ABI and VLEN")
-        validators = {"ggml.vec_dot": validate_vec_dot, "ggml.from_float": validate_quantizer,
-                      "ggml.ime1": validate_ime1, "ggml.ime2": validate_ime2, "ggml.amx": validate_amx}
         for group, mapping in bindings.items():
             if not isinstance(group, str) or not group or not isinstance(mapping, Mapping):
                 raise ValueError("bindings require named role-to-kernel mappings")
             for role, name in mapping.items():
                 if not isinstance(role, str) or not role or name not in kernels:
                     raise ValueError("binding role must name an existing package entry")
-                if group in validators:
-                    validators[group](kernels[name], role)
 
     @classmethod
     def create(cls, directory, kernels, *, bindings=None):

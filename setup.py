@@ -588,14 +588,15 @@ def get_git_version_suffix():
 
 
 def get_triton_version_suffix():
-    # Either "" or "+<githash>", "<githash>" itself does not contain any plus-characters.
+    # Release automation supplies an explicit downstream identity. Source builds
+    # retain the commit identity as well as the fork's name.
+    env_sfx = os.environ.get("TRITON_WHEEL_VERSION_SUFFIX")
+    if env_sfx is not None:
+        if not re.fullmatch(r"\+weft\.[0-9]+(?:\.[0-9A-Za-z]+)*", env_sfx):
+            raise ValueError("TRITON_WHEEL_VERSION_SUFFIX must be +weft.<release>")
+        return env_sfx
     git_sfx = get_git_version_suffix()
-    # Should start with "+" that will replaced with "-" if needed
-    env_sfx = os.environ.get("TRITON_WHEEL_VERSION_SUFFIX", "")
-    # version suffix can only contain one plus-character
-    if "+" in git_sfx and "+" in env_sfx:
-        env_sfx = env_sfx.replace("+", "-")
-    return git_sfx + env_sfx
+    return git_sfx + ".weft" if git_sfx else "+weft.dev"
 
 
 # keep it separate for easy substitution
@@ -649,7 +650,7 @@ setup(
     zip_safe=False,
     # for PyPI
     keywords=["Compiler", "Deep Learning"],
-    url="https://github.com/triton-lang/triton/",
+    url="https://github.com/Tianchen-ai/triton-weft/",
     python_requires=PYTHON_REQUIRES,
     classifiers=CLASSIFIERS,
 )

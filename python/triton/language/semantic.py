@@ -1448,7 +1448,7 @@ class TritonSemantic(Generic[TensorTy]):
         return getattr(ir.INPUT_PRECISION, input_precision)
 
     def dot(self, lhs: TensorTy, rhs: TensorTy, acc: TensorTy, input_precision: Optional[str],
-            max_num_imprecise_acc: int, out_dtype: tl.dtype | None) -> TensorTy:
+            max_num_imprecise_acc: int, out_dtype: tl.dtype | None, *, engine=None) -> TensorTy:
         assert lhs.type.is_block() and rhs.type.is_block(), "dot operands must be block tensors (not scalars)"
 
         if lhs.dtype.is_fp8() and rhs.dtype.is_fp8():
@@ -1544,6 +1544,11 @@ class TritonSemantic(Generic[TensorTy]):
             if lhs.dtype.is_fp8() and rhs.dtype.is_fp8() and max_num_imprecise_acc > K:
                 raise ValueError(f"max_num_imprecise_acc ({max_num_imprecise_acc}) must be <= K ({K})")
 
+        if engine is not None:
+            if not hasattr(self.builder, "create_dot_with_engine"):
+                raise NotImplementedError("explicit dot engine requires the Weft CPU programming model")
+            return self.tensor(self.builder.create_dot_with_engine(
+                lhs.handle, rhs.handle, acc_handle, input_precision, max_num_imprecise_acc, engine), ret_ty)
         return self.tensor(
             self.builder.create_dot(lhs.handle, rhs.handle, acc_handle, input_precision, max_num_imprecise_acc), ret_ty)
 

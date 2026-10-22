@@ -346,8 +346,9 @@ void init_weft(py::module_ &&m) {
     result["cpus"] = native.cpus;
     result["available_isa_extensions"] = native.availableFeatures;
     py::dict matrix;
-    if (std::find(native.availableFeatures.begin(), native.availableFeatures.end(), "amx-bf16") != native.availableFeatures.end())
-      matrix["amx-bf16"] = native.cpus;
+    for (auto name : {"amx-bf16", "amx-int8"})
+      if (std::find(native.availableFeatures.begin(), native.availableFeatures.end(), name) != native.availableFeatures.end())
+        matrix[name] = native.cpus;
     result["native_matrix_extensions"] = std::move(matrix);
     return result;
 #else
@@ -359,6 +360,7 @@ void init_weft(py::module_ &&m) {
     auto result = py::cast<py::dict>(json(std::move(facts)));
     result["cpus"] = native.cpus;
     result["native_matrix_extensions"] = native.matrixExtensions;
+    result["execution_isa_extensions"] = native.isaExtensions;
     return result;
 #endif
   });
@@ -396,6 +398,16 @@ void init_weft(py::module_ &&m) {
     compilation["target_resources"] = py::cast<py::dict>(json(weft::x86TargetJSON(target)))["register_file"];
     compilation["tuning_cpu"] = tuneCPU.empty() ? target.baseCPU() : tuneCPU;
     compilation["resource_estimate_scope"] = "physical array candidates with enclosing SSA residency; final register allocation and spills belong to LLVM";
+    py::list contractions;
+    if (auto entries = (*lowered)->getOperation()->getAttrOfType<mlir::ArrayAttr>("weft.x86.contractions")) {
+      for (auto entry : entries) {
+        py::dict decision;
+        for (auto attribute : mlir::cast<mlir::DictionaryAttr>(entry))
+          decision[py::str(attribute.getName().str())] = scheduleAttribute(attribute.getValue());
+        contractions.append(decision);
+      }
+    }
+    compilation["contractions"] = contractions;
     py::list schedules;
     py::list localStorage;
     int64_t forwardedArrays = 0;

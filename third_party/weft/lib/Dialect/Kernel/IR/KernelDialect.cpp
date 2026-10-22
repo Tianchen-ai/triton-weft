@@ -437,6 +437,9 @@ mlir::LogicalResult verifyContractLike(mlir::Operation *operation,
                                        llvm::ArrayRef<int64_t> over,
                                        std::optional<mlir::Type> accType,
                                        mlir::Type result) {
+  if (auto intent = operation->getAttrOfType<mlir::StringAttr>("engine"))
+    if (intent.getValue() != "auto" && intent.getValue() != "matrix" && intent.getValue() != "vector")
+      return operation->emitOpError("engine must be auto, matrix, or vector");
   if (!isLocalValue(lhs.getType()) || !isLocalValue(rhs.getType()) ||
       !isLocalValue(result))
     return operation->emitOpError("contraction operands must be local Values");

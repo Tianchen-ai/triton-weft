@@ -55,6 +55,9 @@ endfunction()
 add_subdirectory("${PROTON_COMMON_DIR}")
 add_subdirectory("${PROTON_SRC_DIR}")
 
+# ============ Add subdirectory with proton tests ============
+add_subdirectory(test)
+
 # ============ Discover any Triton backends registering Proton backends ============
 discover_proton_backends()
 

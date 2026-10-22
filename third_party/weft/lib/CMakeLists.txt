@@ -1,16 +1,16 @@
-add_subdirectory(Target/Extensions)
+add_subdirectory(Target/RISCV/Extensions)
 add_library(WeftRISCVContracts STATIC
   ${WEFT_RISCV_EXTENSION_CONTRACT_SOURCES}
-  Target/RISCVFragment.cpp
-  Target/RISCVExtensions.cpp
-  Target/RISCVDataCache.cpp
+  Target/RISCV/RISCVFragment.cpp
+  Target/RISCV/RISCVExtensions.cpp
+  Target/RISCV/RISCVDataCache.cpp
 )
 set_target_properties(WeftRISCVContracts PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(WeftRISCVContracts PRIVATE ${WEFT_RISCV_EXTENSION_REGISTRY_DIR})
 
 # Compiler and deployment share one ISA parser and native capability probe.
-add_library(WeftRISCVPlatform STATIC Target/RISCVTargetProfile.cpp Target/RISCVISA.cpp
-  Target/RISCVTargetCatalog.cpp Target/RISCVNativeTarget.cpp Target/RISCVNativeCache.cpp)
+add_library(WeftRISCVPlatform STATIC Target/RISCV/RISCVTargetProfile.cpp Target/RISCV/RISCVISA.cpp
+  Target/RISCV/RISCVTargetCatalog.cpp Target/RISCV/RISCVNativeTarget.cpp Target/RISCV/RISCVNativeCache.cpp)
 set_target_properties(WeftRISCVPlatform PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(WeftRISCVPlatform PUBLIC WeftRISCVContracts)
 if(LLVM_LINK_LLVM_DYLIB)

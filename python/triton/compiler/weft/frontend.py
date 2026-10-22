@@ -328,7 +328,7 @@ class CanonicalSemantic(TritonSemantic):
         operation = self.builder.block.operations[-1]
         self.helper_returns[-1].append((value, self.builder.block, operation))
 
-    def named_dot(self, lhs, rhs, over, acc_dtype):
+    def named_dot(self, lhs, rhs, over, acc_dtype, *, engine=None):
         over = unwrap(over)
         names = (over,) if isinstance(over, str) else tuple(over)
         axes = [self.extension._axis_ids[name.lower()] for name in names]
@@ -338,7 +338,8 @@ class CanonicalSemantic(TritonSemantic):
         if free_lhs & free_rhs:
             raise ValueError("named dot requires distinct free axes; use reduce_dot for a shared batch")
         dtype = normalize_static(acc_dtype) if acc_dtype is not None else None
-        return wrap(self.extension._contract_value(self.node, lhs.handle, rhs.handle, axes, "outer_contract", dtype))
+        return wrap(self.extension._contract_value(self.node, lhs.handle, rhs.handle, axes, "outer_contract", dtype,
+                                                   "auto" if engine is None else engine))
 
     def reduction(self, inputs, axis, region_builder_fn):
         if not inputs:

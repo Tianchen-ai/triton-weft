@@ -28,6 +28,7 @@ class CPUTarget:
     march: str
     abi: str
     vlen_bits: int
+    matrix_extension: str = "none"
 
 
 class BaseBackend(metaclass=ABCMeta):

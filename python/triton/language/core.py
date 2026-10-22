@@ -2371,7 +2371,7 @@ def cast(input, dtype: dtype, fp_downcast_rounding: Optional[str] = None, bitcas
 
 @builtin
 def dot(input, other, acc=None, input_precision=None, allow_tf32=None, max_num_imprecise_acc=None, out_dtype=None,
-        _semantic=None, *, over=None, acc_dtype=None):
+        _semantic=None, *, over=None, acc_dtype=None, engine=None):
     """
     Returns the matrix product of two blocks.
 
@@ -2400,10 +2400,13 @@ def dot(input, other, acc=None, input_precision=None, allow_tf32=None, max_num_i
       specified (i.e. at least one must be :code:`None`).
     """
     over, acc_dtype = _unwrap_if_constexpr(over), _unwrap_if_constexpr(acc_dtype)
+    engine = _unwrap_if_constexpr(engine)
+    if engine is not None and engine not in ("auto", "matrix", "vector"):
+        raise ValueError("dot engine must be 'auto', 'matrix', or 'vector'")
     if over is not None:
         if acc is not None or out_dtype is not None or input_precision is not None or allow_tf32 is not None:
             raise ValueError("named dot uses over/acc_dtype; positional dot uses acc/out_dtype/input_precision")
-        return _semantic.named_dot(input, other, over, acc_dtype)
+        return _semantic.named_dot(input, other, over, acc_dtype, engine=engine)
     if acc_dtype is not None:
         raise ValueError("acc_dtype belongs to named dot; use out_dtype for positional dot")
     assert input_precision is None or allow_tf32 is None, "Only one of input_precision and allow_tf32 can be specified"
@@ -2438,7 +2441,10 @@ def dot(input, other, acc=None, input_precision=None, allow_tf32=None, max_num_i
         if acc is not None:
             acc = _semantic.reshape(acc, [batch_size] + c_shape[-2:], can_reorder=False)
 
-    res = _semantic.dot(input, other, acc, input_precision, max_num_imprecise_acc, out_dtype)
+    if engine is None:
+        res = _semantic.dot(input, other, acc, input_precision, max_num_imprecise_acc, out_dtype)
+    else:
+        res = _semantic.dot(input, other, acc, input_precision, max_num_imprecise_acc, out_dtype, engine=engine)
 
     if rank >= 4:
         res = _semantic.reshape(res, c_shape, can_reorder=False)

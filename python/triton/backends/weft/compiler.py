@@ -42,7 +42,7 @@ class WeftOptions(CPUOptions):
     partial_combine_policy: str = "independent-multilevel"
     record_axis_policy: str = "within-record"
     max_widening_combine_groups: int = 2
-    matrix_extension: str = "none"
+    matrix_extension: str = "auto"
     required_extensions: tuple = ()
     local_tile_strategy: str = "target-default"
     private_stack_bytes: int = 65536
@@ -86,6 +86,8 @@ class WeftBackend(BaseBackend):
         if values.keys() - valid:
             raise ValueError(f"unknown Weft compilation options: {sorted(values.keys() - valid)}")
         values.update(physical)
+        if self.target.arch == "riscv64" and values.get("matrix_extension", "auto") == "auto":
+            values["matrix_extension"] = self.target.matrix_extension
         if self.target.arch == "x86_64":
             weft.x86_target_capabilities(self.target.march, self.target.abi, self.target.vlen_bits)
         values["toolchain"] = Toolchain.resolve(values.get("toolchain", {}), self.target).to_dict()

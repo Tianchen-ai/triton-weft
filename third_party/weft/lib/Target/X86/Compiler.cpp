@@ -8,6 +8,7 @@
 #include "IntegerReductions.h"
 #include "Lookups.h"
 #include "AMXContractions.h"
+#include "ContractionEngines.h"
 #include "Math.h"
 #include "IndexRelations.h"
 #include <numeric>
@@ -2528,27 +2529,23 @@ private:
     return success();
   }
   bool integerMatrixGeometry(Operation &op) {
-    if (!target.hasFeature("amx-int8") || !scalar(op.getResult(0).getType()).isInteger(32)) return false;
-    unsigned wideInputs = 0;
-    for (Value input : op.getOperands()) {
-      auto type = dyn_cast<IntegerType>(element(input.getType()));
-      if (!type || type.getWidth() > 16) return false;
-      wideInputs += type.getWidth() > 8;
-    }
-    if (wideInputs > 1) return false;
-    auto over = op.getAttrOfType<DenseI64ArrayAttr>("over").asArrayRef();
-    auto outputAxes = axes(op.getResult(0).getType());
-    auto leftAxes = axes(op.getOperand(0).getType()), rightAxes = axes(op.getOperand(1).getType());
-    auto left = shape(op.getOperand(0).getType()), right = shape(op.getOperand(1).getType());
-    return over.size() == 1 && leftAxes.size() == 2 && rightAxes.size() == 2 && outputAxes.size() == 2 &&
-        leftAxes[0] == outputAxes[0] && rightAxes[0] == outputAxes[1] &&
-        leftAxes[1] == over.front() && rightAxes[1] == over.front() &&
-        left[0] >= 8 && (left[0] <= 16 || left[0] % 16 == 0) &&
-        right[0] >= 8 && (right[0] <= 16 || right[0] % 16 == 0) &&
-        left[1] >= (wideInputs ? 128 : 16) && left[1] % 16 == 0 && left[1] == right[1];
+    return weft::x86::integerMatrixGeometry(op, target, shape(op.getOperand(0).getType()),
+                                           shape(op.getOperand(1).getType()));
+  }
+  FailureOr<weft::x86::ContractionEngine> selectContractionEngine(Operation &op, bool arrayResult) {
+    weft::x86::ContractionStorage storage{
+        isa<MemRefType>(mapped(op.getOperand(0)).getType()),
+        isa<MemRefType>(mapped(op.getOperand(1)).getType()),
+        isa<VectorType>(mapped(op.getOperand(1)).getType())};
+    auto selected = weft::x86::selectContractionEngine(op, target, storage, arrayResult,
+        shape(op.getOperand(0).getType()), shape(op.getOperand(1).getType()), shape(op.getResult(0).getType()));
+    if (succeeded(selected)) weft::x86::recordContractionEngine(module, op, *selected, arrayResult);
+    return selected;
   }
   LogicalResult contraction(Operation &op) {
-    if (!integerMatrixGeometry(op)) return simdContraction(op);
+    auto selected = selectContractionEngine(op, false);
+    if (failed(selected)) return failure();
+    if (*selected == weft::x86::ContractionEngine::Vector) return simdContraction(op);
     Location loc = op.getLoc();
     Value result = op.getResult(0);
     Type payloadType = physicalType(result.getType()), predicateType = physicalType(maskType(result.getType()));
@@ -2556,7 +2553,19 @@ private:
     // source reads, zero inactive saved lanes, and use the same closed tile
     // contraction on partial domains. Expanding a second arithmetic program
     // for the masked case creates enormous otherwise-cold SIMD expressions.
-    auto left = shape(op.getOperand(0).getType()), right = shape(op.getOperand(1).getType());
+    auto left = weft::x86::matrixOperandShape(op, 0, shape(op.getOperand(0).getType()));
+    auto right = weft::x86::matrixOperandShape(op, 1, shape(op.getOperand(1).getType()));
+    // Project each saved SSA operand into the selected matrix layout. The
+    // logical Canonical axes and the original masked reads remain unchanged.
+    auto matrixLayout = [&](unsigned side, Value value) -> Value {
+      if (!weft::x86::matrixReductionFirst(op, side)) return value;
+      auto dimensions = side == 0 ? left : right;
+      SmallVector<int64_t> order;
+      for (int64_t row = 0; row < dimensions[0]; ++row)
+        for (int64_t term = 0; term < dimensions[1]; ++term)
+          order.push_back(term * dimensions[0] + row);
+      return permute(loc, value, order, value.getType());
+    };
     auto rowMask = VectorType::get({left[1]}, b.getI1Type());
     SmallVector<Value> leftMasks, rightMasks;
     for (unsigned side = 0; side < 2; ++side) {
@@ -2565,7 +2574,7 @@ private:
       for (int64_t row = 0; row < shape[0]; ++row) {
         SmallVector<int64_t> indices(shape[1]);
         std::iota(indices.begin(), indices.end(), row * shape[1]);
-        rows.push_back(permute(loc, valid(op.getOperand(side), loc), indices, rowMask));
+        rows.push_back(permute(loc, matrixLayout(side, valid(op.getOperand(side), loc)), indices, rowMask));
       }
     }
     SmallVector<Value> outputMasks;
@@ -2580,6 +2589,7 @@ private:
     for (auto [position, input] : llvm::enumerate(op.getOperands())) {
       Value payload = mapped(input);
       payload = arith::SelectOp::create(b, loc, valid(input, loc), payload, zero(loc, payload.getType()));
+      payload = matrixLayout(position, payload);
       auto type = cast<VectorType>(payload.getType());
       unsigned width = type.getElementTypeBitWidth();
       if (width > 8) wideInput = position;
@@ -2591,7 +2601,8 @@ private:
       unsignedInputs.push_back(unsignedType(input.getType()));
     }
     auto leftStorage = [&](Value payload) {
-      auto storage = weft::x86::allocateArray(b, loc, b.getI8Type(), arrayExtents(op.getOperand(0), loc));
+      SmallVector<Value> dimensions{indexConstant(loc, left[0]), indexConstant(loc, left[1])};
+      auto storage = weft::x86::allocateArray(b, loc, b.getI8Type(), dimensions);
       vector::StoreOp::create(b, loc, payload, storage.data, indexConstant(loc, 0));
       return storage;
     };
@@ -4103,6 +4114,8 @@ private:
     return success();
   }
   LogicalResult arrayContraction(Operation &op) {
+    auto selected = selectContractionEngine(op, true);
+    if (failed(selected)) return failure();
     Location loc = op.getLoc(); Value result = op.getResult(0);
     auto outputShape = arrayExtents(result, loc);
     auto outputAxes = axes(result.getType());
@@ -4159,21 +4172,13 @@ private:
     };
     auto rightAxes = axes(op.getOperand(1).getType());
     auto leftStatic = shape(op.getOperand(0).getType()), rightStatic = shape(op.getOperand(1).getType());
-    bool amx = target.hasFeature("amx-bf16") && elementType.isF32() &&
-        element(op.getOperand(0).getType()).isBF16() && element(op.getOperand(1).getType()).isBF16() &&
-        leftAxes.size() == 2 && rightAxes.size() == 2 && outputAxes.size() == 2 && over.size() == 1 &&
-        leftAxes[0] == outputAxes[0] && rightAxes[0] == outputAxes[1] &&
-        leftAxes[1] == over.front() && rightAxes[1] == over.front() &&
-        leftStatic[0] > 0 && (leftStatic[0] <= 16 || leftStatic[0] % 16 == 0) &&
-        rightStatic[0] > 0 && (rightStatic[0] <= 16 || rightStatic[0] % 16 == 0) &&
-        leftStatic[1] >= 32 && leftStatic[1] % 32 == 0 && leftStatic[1] == rightStatic[1] &&
-        isa<MemRefType>(mapped(op.getOperand(0)).getType()) && isa<MemRefType>(mapped(op.getOperand(1)).getType());
-    bool fixedRightMatrix = integerMatrixGeometry(op) &&
+    bool amx = *selected == weft::x86::ContractionEngine::MatrixBFloat;
+    bool fixedRightMatrix = *selected == weft::x86::ContractionEngine::MatrixInteger &&
         scalar(op.getOperand(0).getType()).isInteger(8) &&
         isa<MemRefType>(mapped(op.getOperand(0)).getType()) &&
         isa<VectorType>(mapped(op.getOperand(1)).getType()) &&
         volume(shape(result.getType())) <= 4096;
-    bool integerMatrix = integerMatrixGeometry(op) &&
+    bool integerMatrix = *selected == weft::x86::ContractionEngine::MatrixInteger &&
         scalar(op.getOperand(0).getType()).isInteger(8) && scalar(op.getOperand(1).getType()).isInteger(8) &&
         isa<MemRefType>(mapped(op.getOperand(0)).getType()) && isa<MemRefType>(mapped(op.getOperand(1)).getType());
     if (integerMatrix || fixedRightMatrix) {
