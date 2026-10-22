@@ -88,6 +88,17 @@ weft_status weft_kernel_argument(const weft_kernel *kernel, size_t index,
   });
 }
 
+weft_status weft_kernel_uses_extension(const weft_kernel *kernel, const char *name,
+                                      bool *result, weft_error *error) {
+  if (result) *result = false;
+  return api(error, [&] {
+    require(kernel && name && *name && result, WEFT_INVALID_ARGUMENT,
+            "kernel, extension name and result are required");
+    const auto &extensions = kernel->value->usedExtensions;
+    *result = std::find(extensions.begin(), extensions.end(), name) != extensions.end();
+  });
+}
+
 weft_status weft_kernel_check_thread(const weft_kernel *kernel, weft_error *error) {
   return api(error, [&] {
     require(kernel, WEFT_INVALID_ARGUMENT, "kernel is null");

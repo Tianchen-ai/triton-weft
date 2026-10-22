@@ -153,6 +153,11 @@ public:
     check(weft_kernel_argument(value_, index, &result, &detail), detail);
     return result;
   }
+  bool uses_extension(const char *name) const {
+    weft_error detail{}; bool result = false;
+    check(weft_kernel_uses_extension(value_, name, &result, &detail), detail);
+    return result;
+  }
   call prepare(std::initializer_list<weft_value> values,
                std::initializer_list<weft_dimension> dimensions = {}) const {
     weft_error detail{}; weft_call *result;

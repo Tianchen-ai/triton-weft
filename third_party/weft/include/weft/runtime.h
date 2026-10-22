@@ -142,6 +142,9 @@ WEFT_API int weft_kernel_check_worker(const void *kernel, char *message, size_t 
 WEFT_API void weft_kernel_release(weft_kernel *kernel);
 WEFT_API weft_status weft_kernel_describe(const weft_kernel *kernel,
                                         weft_kernel_info *result, weft_error *error);
+/* Query artifact instruction requirements, not all ISA features allowed by its target. */
+WEFT_API weft_status weft_kernel_uses_extension(const weft_kernel *kernel, const char *name,
+                                               bool *result, weft_error *error);
 WEFT_API weft_status weft_kernel_argument(const weft_kernel *kernel, size_t index,
                                          weft_argument_info *result, weft_error *error);
 WEFT_API weft_status weft_kernel_check_thread(const weft_kernel *kernel, weft_error *error);

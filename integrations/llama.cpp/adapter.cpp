@@ -187,6 +187,7 @@ struct PackedIME {
   weft::kernel kernel;
   PackedDot function;
   PackedIME(weft::kernel value, bool affine, size_t rows) : kernel(std::move(value)) {
+    require(kernel.uses_extension("spacemit-ime1"), "IME1 binding requires an artifact using IME1");
     auto info = kernel.info();
     require(info.argument_count == 3 && info.dimension_count == 3 &&
             std::strcmp(info.dimensions[0], "N") == 0 && std::strcmp(info.dimensions[1], "K") == 0 &&
@@ -214,6 +215,7 @@ struct PackedIME2 {
   weft::kernel kernel;
   PackedDot function;
   PackedIME2(weft::kernel value, size_t rows) : kernel(std::move(value)) {
+    require(kernel.uses_extension("spacemit-ime2"), "IME2 binding requires an artifact using IME2");
     auto info = kernel.info();
     require(info.argument_count == 3 && info.dimension_count == 3 &&
             std::strcmp(info.dimensions[0], "N") == 0 && std::strcmp(info.dimensions[1], "K") == 0 &&
@@ -260,8 +262,9 @@ struct PackedAMX {
             std::strcmp(info.dimensions[0], "N") == 0 && std::strcmp(info.dimensions[1], "K") == 0 &&
             (!prefill || std::strcmp(info.dimensions[2], "M") == 0))),
             "AMX packed row tile requires W, Xq, Y and N,K[,M] dimensions");
-    tileState = std::strstr(info.march, "+amx-") != nullptr;
-    require(std::strncmp(info.march, "x86-64-", 7) == 0 && (prefill || !tileState),
+    tileState = kernel.uses_extension("amx-int8");
+    require(std::strncmp(info.march, "x86-64-", 7) == 0 && (prefill || !tileState) &&
+            !kernel.uses_extension("amx-bf16"),
             "AMX packed row tiles require x86 SIMD or an integer AMX prefill artifact");
     const char *encodings[] = {weightType == GGML_TYPE_Q6_K ? "AMXQ6_KRows[16]" : kBlock ? "AMXQ4_KRows[16]" : "AMXQ4_0Rows[16]",
                               kBlock ? "Q8_K" : "Q8_0", "dense.f32"};

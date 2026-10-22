@@ -217,6 +217,9 @@ prefill 也可使用声明了 AMX INT8 的产物，由生成的 kernel 管理自
 使用 AMX 的产物完成该 worker 遍历后，adapter 使同一线程的 GGML tile 配置缓存失效。
 后续未替换的 AMX 节点会重新加载原生配置；不在每个替换 tile 前后重复保存和恢复。
 纯 SIMD 产物不改变该缓存。混合替换因此保留正常 GGML 与产物各自的 tile 状态合同。
+这里通过 `kernel.uses_extension(...)` / `weft_kernel_uses_extension` 查询产物的
+`used_extensions`，不从目标 `march` 的可用特性推断。原生发现允许 AMX 的机器仍可生成
+纯 SIMD decode；它不需要 tile state。此查询说明产物的指令要求，不证明某个条件分支已执行。
 
 动态 prefill 还可显式接收第四个 View `Scales[M,K]`，使用
 `BlockScale32Rows[32]`：每 32 个逻辑元素对应一个 F32 字段，跨 32 行按
