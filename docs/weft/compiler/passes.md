@@ -48,6 +48,7 @@ ConvertWeftToRISCV
 → HoistRISCVLoopInvariants
 → SpecializeRISCVMemory
 → SelectRISCVOperations
+→ SelectRISCVIntegerMACs
 → FinalizeRISCVLeaves
 → SelectRISCVScalarLoadPrimes
 → MaterializeRISCVReadSnapshots
@@ -165,10 +166,8 @@ carrier/坐标，不重选 partial plan；新 leaf 及资源由原有 verifier/m
 独立 pointwise 乘法的两个 widening 来源位宽不同时，若一侧已经是结果宽度的一半，
 另一侧更窄且 signedness 相同，可先显式扩展较窄侧到共同精度，再选择原有 widening
 multiply。原结果精度、全部 axes 和 carrier factors 必须闭合，不移动或放宽任何窄化。
-单 use widening product 与同 block、同结果 type 的整数 add 可选择 `rvv_integer_mac`
-的 widening vector/vector leaf；这是逐 lane 模算术，既不消除轴也不引入 partial/reduction
-合同。读写或未知 effect 仍阻止合并，最终资源重新核算。
-这条关系不增加作者 reduction，不改变最后的归约位置；资源仍由后续 pass 重新闭合。
+逐元素整数乘加的最终融合由访存决策之后的 `SelectRISCVIntegerMACs` 执行；这里保留
+地址算术的乘法与加法关系，供连续窗口、stride 和窄整数 wrap 分析使用。
 
 两个单 use 的整数 `widen` 若直接供给同一个 add，且窄 operands 的 signedness/type 与完整
 物理坐标相同、宽 result 保持 signedness 并具有双 SEW/LMUL，可以选择局部
@@ -907,6 +906,18 @@ SEW/LMUL 的 VLMAX，才能选择 `.full` transfer。stride specialization 保�
 完整 issue 的归约 step 必须同时证明 input 为 full 且 active 等于常量 VL，才能选择无需
 tail passthrough 的 full-step leaf；其它 step 保留未更新 lane。整块证明来自实际 point
 及源循环的 lower/upper/step，不能用名义 shape 或期望的 benchmark 尺寸代替。
+
+### `SelectRISCVIntegerMACs`
+
+在 byte-window 分析与 memory specialization 之后、leaf finalization 之前，选择同 block、
+单 use 的整数 pointwise 乘加。普通 vector/scalar 模乘加可形成 `rvv.vmacc.vx`；精确 widening
+来源和同结果 type 的 add 可形成合法的 widening vector/vector 或 vector/scalar MAC。
+保留原 signedness、位宽、axes、active domain 和加法边界；读写、未知 effect 或 region
+阻止跨越，最终资源重新核算。不增加 reduction，也不改变最后的归约位置。
+
+这项融合不在前期反复运行的 operation-family selection 中执行。地址分析需要看见
+`base * width + lane` 以及分段坐标的显式关系；过早形成不可分的 MAC 会隐藏连续访存证明，
+迫使后端保留逐元素 gather。访存形态确定后，仍存活的索引与普通数值表达式共用该 MAC 选择。
 
 ### `FinalizeRISCVLeaves`
 

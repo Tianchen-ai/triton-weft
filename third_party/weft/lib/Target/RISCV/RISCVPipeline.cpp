@@ -152,7 +152,7 @@ enum class PassID {
   Hoist, Schedule, Pipeline, SCCP, Control, Fragments, ShareWindows,
   PartialTopology, PartialAccumulators, Unroll, PartialExtractions,
   DeadLayouts, ConsumerLayouts, ByteProjections, ReplicaLoads,
-  SpecializeMemory, DenseTransfers, FMAIssues, PointwiseFMA, IntegerPointwise, ScalarPackets, Leaves, ScalarPrimes, Snapshots, LeafResources,
+  SpecializeMemory, DenseTransfers, FMAIssues, PointwiseFMA, IntegerPointwise, IntegerMACs, ScalarPackets, Leaves, ScalarPrimes, Snapshots, LeafResources,
   LocalSupplies, CSE, FuseIssues, LocalAlignment, Resources, Verify, MarkLayout, ConsumeLayout, MarkContractions, ConsumeContractions,
   MarkPanelTransfers, ConsumePanelTransfers, Helpers,
 };
@@ -220,6 +220,7 @@ constexpr Entry suffix[] = {
     {PassID::Control, "leaf-selection"},
     {PassID::IntegerPointwise, "leaf-selection"},
     {PassID::Select, "leaf-selection"},
+    {PassID::IntegerMACs, "leaf-selection"},
     {PassID::Leaves, "leaf-selection"},
     {PassID::LocalSupplies, "leaf-selection"},
     {PassID::DenseTransfers, "leaf-selection"},
@@ -286,6 +287,7 @@ std::unique_ptr<Pass> makePass(PassID id, const RISCVCompilerOptions &options,
   case PassID::Atomics: return createMaterializeRISCVAtomicsPass();
   case PassID::Helpers: return createFinalizeRISCVHelpersPass();
   case PassID::Select: return createSelectRISCVOperationsPass();
+  case PassID::IntegerMACs: return createSelectRISCVIntegerMACsPass();
   case PassID::Layouts: return createPropagateRISCVLayoutsPass(options.lmulEighths);
   case PassID::LocalWindows: return createMaterializeRISCVLocalWindowsPass();
   case PassID::CanonicalizeLayouts: return createCanonicalizeRISCVLayoutsPass();

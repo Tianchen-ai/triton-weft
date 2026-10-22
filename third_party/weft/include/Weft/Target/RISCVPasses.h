@@ -19,6 +19,7 @@ std::unique_ptr<mlir::Pass> createMaterializeRISCVReductionsPass();
 std::unique_ptr<mlir::Pass> createMaterializeRISCVAtomicsPass();
 std::unique_ptr<mlir::Pass> createFinalizeRISCVHelpersPass();
 std::unique_ptr<mlir::Pass> createSelectRISCVOperationsPass();
+std::unique_ptr<mlir::Pass> createSelectRISCVIntegerMACsPass();
 std::unique_ptr<mlir::Pass>
 createPropagateRISCVLayoutsPass(int64_t lmulEighths);
 std::unique_ptr<mlir::Pass> createPlanRISCVMemoryPass();

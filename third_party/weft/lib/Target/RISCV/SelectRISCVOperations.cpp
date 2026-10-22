@@ -701,8 +701,6 @@ public:
     selectZeroSeedProducts(getOperation(), rewriter);
     selectWidenContractSteps(getOperation(), rewriter);
     selectWidenBinaries(getOperation(), rewriter);
-    selectWidenPointwiseMAC(getOperation(), rewriter);
-    selectScalarPointwiseMAC(getOperation(), rewriter);
     coalescePackedScaleSlices(getOperation(), rewriter);
     selectContiguousRegisterExtracts(getOperation(), rewriter);
     selectRegisterSlices(getOperation(), rewriter);
@@ -989,8 +987,30 @@ private:
   }
 };
 
+class SelectRISCVIntegerMACsPass
+    : public mlir::PassWrapper<SelectRISCVIntegerMACsPass,
+                               mlir::OperationPass<mlir::ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SelectRISCVIntegerMACsPass)
+  llvm::StringRef getArgument() const override {
+    return "weft-riscv-select-integer-macs";
+  }
+  llvm::StringRef getDescription() const override {
+    return "Select local integer MACs after memory address relations are materialized";
+  }
+  void runOnOperation() override {
+    mlir::IRRewriter rewriter(&getContext());
+    selectWidenPointwiseMAC(getOperation(), rewriter);
+    selectScalarPointwiseMAC(getOperation(), rewriter);
+  }
+};
+
 } // namespace
 
 std::unique_ptr<mlir::Pass> weft::createSelectRISCVOperationsPass() {
   return std::make_unique<SelectRISCVOperationsPass>();
+}
+
+std::unique_ptr<mlir::Pass> weft::createSelectRISCVIntegerMACsPass() {
+  return std::make_unique<SelectRISCVIntegerMACsPass>();
 }
