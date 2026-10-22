@@ -54,8 +54,8 @@ bool weft::x86::integerMatrixGeometry(Operation &op, const X86Target &target,
     wideInputs += type.getWidth() > 8;
   }
   auto lhs = matrixOperandShape(op, 0, left), rhs = matrixOperandShape(op, 1, right);
-  return wideInputs <= 1 && tileExtent(lhs[0], 8) && tileExtent(rhs[0], 8) &&
-         lhs[1] >= (wideInputs ? 128 : 16) && lhs[1] % 16 == 0 && lhs[1] == rhs[1];
+  return wideInputs <= 1 && tileExtent(lhs[0], 1) && tileExtent(rhs[0], 1) &&
+         lhs[1] >= 16 && lhs[1] % 16 == 0 && lhs[1] == rhs[1];
 }
 
 FailureOr<weft::x86::ContractionEngine> weft::x86::selectContractionEngine(

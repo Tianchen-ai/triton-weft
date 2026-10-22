@@ -85,9 +85,16 @@ def _register_ai_thread():
 def _probe(cpu, register):
     if register:
         _register_ai_thread()
-    os.sched_setaffinity(0, {cpu})
+    _bind_cpus({cpu})
     from ._C.libtriton import weft
     return weft.native_target()
+
+
+def _bind_cpus(selected):
+    os.sched_setaffinity(0, selected)
+    observed = os.sched_getaffinity(0)
+    if observed != selected:
+        raise RuntimeError(f"OS did not retain requested CPU set {sorted(selected)}; allowed set is {sorted(observed)}")
 
 
 def devices():
@@ -100,9 +107,20 @@ def devices():
     groups = {}
     unavailable = []
     registration = platform.machine() == "riscv64" and Path("/proc/set_ai_thread").exists()
-    for cpu in sorted(os.sched_getaffinity(0)):
+    current = set(os.sched_getaffinity(0))
+    candidates = set(current)
+    if registration:
+        result = subprocess.run([sys.executable, "-m", "triton.tools.cpu", "--inventory", "--register-ai"],
+                                text=True, capture_output=True)
+        if result.returncode:
+            unavailable.append({"startup": "register-ai-before-affinity", "error": result.stderr.strip(),
+                                "exit_code": result.returncode})
+        else:
+            candidates.update(json.loads(result.stdout))
+    for cpu in sorted(candidates):
         observations = []
-        for register in ((False, True) if registration else (False,)):
+        attempts = (False, True) if registration and cpu in current else (True,) if registration else (False,)
+        for register in attempts:
             result = subprocess.run([sys.executable, "-m", "triton.tools.cpu", "--probe", str(cpu),
                                      *( ["--register-ai"] if register else [])], text=True, capture_output=True)
             if result.returncode:
@@ -118,7 +136,7 @@ def devices():
             break
         else:
             unavailable.append({"cpu": cpu, "observations": observations})
-    return {"groups": list(groups.values()), "unavailable": unavailable}
+    return {"current_cpus": sorted(current), "groups": list(groups.values()), "unavailable": unavailable}
 
 
 def _validate_execution(profile, facts):

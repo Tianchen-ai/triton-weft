@@ -28,9 +28,15 @@ def main():
     parser.add_argument("--cpus")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--probe", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--inventory", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--register-ai", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("program", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.inventory:
+        if args.register_ai:
+            cpu._register_ai_thread()
+        print(json.dumps(sorted(os.sched_getaffinity(0))))
+        return
     if args.probe is not None:
         print(json.dumps(cpu._probe(args.probe, args.register_ai)))
         return
@@ -44,7 +50,7 @@ def main():
         cpu._register_ai_thread()
     if args.cpus:
         selected = _cpus(args.cpus)
-        os.sched_setaffinity(0, selected)
+        cpu._bind_cpus(selected)
     from triton._C.libtriton import weft
     facts = weft.native_target()
     selected_target = cpu._validate_execution(args.profile, facts)

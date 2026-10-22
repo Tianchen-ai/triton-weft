@@ -16,6 +16,17 @@ python -m venv .venv
 首批 wheel 使用 Linux 原生平台标签：x86 CPython 3.10，以及 RISC-V CPython 3.11、3.12、3.14，
 分别面向本项目已使用的 x86、SG2044、K1 和 K3 环境。它们不是通用 manylinux 声明；
 系统 libc、C++ runtime、ABI 和实际 ISA 必须满足 Release 中声明的要求。
+本次资产的动态符号要求如下（这是二进制要求，不代表已验证所有满足版本的发行版）：
+
+| wheel | Python ABI | libc | C++ runtime |
+|---|---|---|---|
+| Linux x86-64 | CPython 3.10 | glibc ≥ 2.34 | GLIBCXX_3.4.30、CXXABI_1.3.13 |
+| Linux RISC-V LP64D | CPython 3.11 / 3.12 / 3.14 | glibc ≥ 2.38 | GLIBCXX_3.4.30、CXXABI_1.3.13 |
+
+系统还需提供 libgcc；x86 wheel 需要 zlib，RISC-V wheel 需要 libatomic。
+JIT 使用系统 libc 开发文件、linker 和启动文件；这些不包含在 wheel 中。
+仅安装 wheel 不会令没有 RVV、IME 或 AMX 的核心获得对应能力，kernel 的执行要求由其
+artifact metadata 和当前执行核心共同检查。
 发行包含 Clang 23、resource headers、OpenMP、native runtime 和可选 integration。
 Linux 发行版可能需要先安装对应的 `python3-venv` 包，才能建立含 pip 的独立环境。
 

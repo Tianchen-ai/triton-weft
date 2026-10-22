@@ -29,6 +29,7 @@ from .runtime.weft.artifact import load
 from .runtime.package import Package
 from . import testing
 from . import tools
+from . import cpu
 
 must_use_result = language.core.must_use_result
 aggregate = language.core._aggregate
@@ -40,6 +41,7 @@ __all__ = [
     "cdiv",
     "CompilationError",
     "compile",
+    "cpu",
     "encoding",
     "derive",
     "overloads",
