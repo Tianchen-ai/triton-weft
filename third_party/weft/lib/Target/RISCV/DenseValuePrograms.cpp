@@ -369,6 +369,7 @@ private:
   }
 
   Value activeExtent(DenseProducerGraph &graph, size_t position) {
+    if (graph.renamedExtents[position]) return graph.renamedExtents[position];
     if (auto extent = riscv_internal::completePointExtent(graph.points[position]))
       return index(graph.root->getLoc(), *extent);
     return graph.points[position] ? graph.points[position].getActive() : domainExtents[position];

@@ -1369,7 +1369,8 @@ mlir::LogicalResult Emitter::compileRVVStreamContractStep(
 
 mlir::LogicalResult
 Emitter::compileRVVStreamFinalize(riscv::RVVStreamFinalizeOp operation) {
-  if (instructionOf(operation.getOperation()) != "rvv.stream-finalize")
+  const bool split = instructionOf(operation.getOperation()) == "rvv.stream-finalize.m1";
+  if (!split && instructionOf(operation.getOperation()) != "rvv.stream-finalize")
     return fail(operation, "RVV stream finalize has no exact selected leaf");
   Binding input = bindings.lookup(operation.getInput());
   if (input.kind != Binding::Kind::Vector || input.parts.empty())
@@ -1400,15 +1401,41 @@ Emitter::compileRVVStreamFinalize(riscv::RVVStreamFinalizeOp operation) {
     return fail(operation, "RVV stream finalize lost its verified scalar projection");
   for (int64_t index : *projection) {
     llvm::StringRef part = input.parts[index];
+    std::string reductionInput = part.str();
+    std::string reductionSuffix = vectorSuffix(operation.getInput());
+    int64_t reductionLanes = operation.getInput().getType().getLayout().getVl();
+    if (split) {
+      const int64_t groups = operation.getInput().getType().getLayout().getLmulEighths() / 8;
+      reductionLanes /= groups;
+      llvm::SmallVector<std::string> pieces;
+      for (int64_t group = 0; group < groups; ++group) {
+        std::string piece = fresh("stream_register");
+        line(reductionType + " " + piece + " = __riscv_vget_v_" + reductionSuffix +
+             "_" + suffix + "m1(" + part.str() + ", " + std::to_string(group) + ");");
+        pieces.push_back(std::move(piece));
+      }
+      while (pieces.size() > 1) {
+        llvm::SmallVector<std::string> next;
+        for (size_t i = 0; i < pieces.size(); i += 2) {
+          std::string sum = fresh("stream_register_sum");
+          line(reductionType + " " + sum + " = __riscv_vfadd_vv_" + suffix + "m1(" +
+               pieces[i] + ", " + pieces[i + 1] + ", " + std::to_string(reductionLanes) + ");");
+          next.push_back(std::move(sum));
+        }
+        pieces = std::move(next);
+      }
+      reductionInput = pieces.front();
+      reductionSuffix = suffix + "m1";
+    }
     std::string seed = fresh("stream_seed");
     line(reductionType + " " + seed +
          " = __riscv_" + std::string(floating ? "vfmv_v_f_" : "vmv_v_x_") +
          suffix + "m1(" + initial + ", 1);");
     std::string reduced = fresh("stream_reduced");
     line(reductionType + " " + reduced + " = __riscv_" + stem.str() + "_vs_" +
-         vectorSuffix(operation.getInput()) + "_" + suffix + "m1(" + part.str() + ", " +
+         reductionSuffix + "_" + suffix + "m1(" + reductionInput + ", " +
          seed + ", " +
-         std::to_string(operation.getInput().getType().getLayout().getVl()) +
+         std::to_string(reductionLanes) +
          ");");
     std::string scalarValue = fresh("stream_value");
     line(scalarType + " " + scalarValue +

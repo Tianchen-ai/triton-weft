@@ -159,6 +159,14 @@ form。没有合法局部结构时当前 module 失败。
 carrier/坐标，不重选 partial plan；新 leaf 及资源由原有 verifier/materializer 重新检查。
 该规则不处理独立乘积、tail carrier 或更宽的 partial，不将代数上少一项运算当作其成本结论。
 
+完整 f32 stream accumulator 的最终 add 归约可选择 `rvv.stream-finalize.m1`：
+按已选 m2/m4/m8 carrier 的完整寄存器分段构造平衡加法，再对一个 m1 归约。
+单对合并只增加一次 vector add；更深的树仅在每寄存器至少容纳 16 个 f32 lane 时选择，
+避免短向量上的多条合并指令抵消归约收益。这是有界 issue-work 策略，不是 CPU 周期模型。
+仅在所有分段都属于同一归约轴且完全初始化时合法；没有跨 source reduction 或改变
+累加精度。selector 写入确定 leaf，verifier 核对 VLEN、分段和临时驻留；terminal
+按所选 leaf 拼写寄存器提取和加法，资源 pass 继续核验完整程序。
+
 单轴 full-valid i16 loop carry 若仅沿同 block 的 byte widening product + add 链流向其
 对应 yield，可将整条链选择为已有 widening accumulate。每个 product 必须单 use、
 逐坐标同形；保留原 i16 加法边界和迭代顺序，不合并不同 carry，也不只改写链的前缀。
@@ -191,6 +199,10 @@ pass 将已有 physical radices 分配到结果各轴，并用 `RegisterCoordina
 每个 `(part, lane)` 的线性元素序号；只相等的总元素数不足以通过。reshape 本身保持
 SEW、LMUL、VL 与驻留数，consumer 需要其它分布时插入显式 `convert_layout`。
 该规则支持标准 `tl.sum` 的展平路径，不将 replica 数据误当成一个更宽 vector 的已有 lanes。
+完整轴置换在 lane radices 和顺序相同时，以代数证明 lane 映射，只枚举 register parts
+的置换；不因完整 tile 超过小型逐元素分析上限而拒绝可表示的转置。其余 lane 重排仍
+逐坐标验证，实际寄存器驻留继续由资源 pass 处理。
+
 control carry 的最终 type 必须先确定，再闭合其下游 reshape，避免后续循环结果调整
 使已经验证的 reshape 映射失效。
 
@@ -584,6 +596,9 @@ typed dense read、保持坐标的 conversion 和逐元素 use-def；跨越 regi
 整图选择和逐值物化共用单 operation 的 operands/results/scratch 驻留上界；若某个 operation
 超限，先闭合其 producer/consumer 窗口，不先把每个中间值分别快照到本地数组。
 fresh local allocation 不改变已存在的输入，允许纯读取供应跨越该分配；原 alias/effect 检查仍适用。
+普通 dense read 跨越写入时查询实际 storage origins；只写不相关私有对象不构成输入依赖。
+尾部轴经完整轴置换重命名后，从原读取及 pointwise use-def 追溯其支配的 active extent；
+所有尾部供应必须给出同一个范围，不以目标容量或另一个 Level 代替该范围。
 
 选择后立即形成真实 `scf.for`、physical point、load/compute/store 与必要的私有对象。
 同一窗口内部共享 SSA；窗口外的 consumer 通过完整快照共享数值，不能任意重算。

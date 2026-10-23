@@ -8,6 +8,7 @@
 #include "Weft/Dialect/RISCV/IR/Fragment.h"
 #include "Weft/Dialect/RISCV/IR/FMAIssue.h"
 #include "Weft/Dialect/RISCV/IR/Numerics.h"
+#include "Weft/Dialect/RISCV/IR/Stream.h"
 
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -697,6 +698,24 @@ void selectRegisterSlices(mlir::ModuleOp module, mlir::Builder &builder) {
   });
 }
 
+void selectRegisterFinalization(mlir::ModuleOp module, mlir::Builder &builder) {
+  module.walk([&](riscv::RVVStreamFinalizeOp finalize) {
+    auto kernel = finalize->getParentOfType<riscv::KernelOp>();
+    if (!kernel || kernel.getResourcesMaterialized() || finalize.getKind() != "add") return;
+    const int64_t parts = riscv::streamFinalizeRegisterParts(
+        kernel.getTarget(), finalize.getInput().getType(), finalize.getAxis());
+    if (!parts) return;
+    // A pair costs one vector add. Deeper trees add multiple issued operations;
+    // reserve them for wide registers where the shorter lane reduction can
+    // amortize that issue work. This is a width/shape policy, not a CPU name.
+    const int64_t registerLanes = kernel.getTarget().getVlenBits() / 32;
+    if (parts > 2 && registerLanes < 16) return;
+    finalize.setLeafAttr(riscv_internal::leaf(builder, "rvv", "stream-finalize",
+        "rvv.stream-finalize.m1", "rvv.stream-finalize.m1",
+        finalize.getInput().getType().getLayout().getRegisterGroups(), 0, parts / 2 + 1));
+  });
+}
+
 class SelectRISCVOperationsPass
     : public mlir::PassWrapper<SelectRISCVOperationsPass,
                                mlir::OperationPass<mlir::ModuleOp>> {
@@ -718,6 +737,7 @@ public:
     coalescePackedScaleSlices(getOperation(), rewriter);
     selectContiguousRegisterExtracts(getOperation(), rewriter);
     selectRegisterSlices(getOperation(), rewriter);
+    selectRegisterFinalization(getOperation(), rewriter);
     mlir::Builder builder(&getContext());
     bool failed = false;
     getOperation().walk([&](mlir::Operation *operation) {

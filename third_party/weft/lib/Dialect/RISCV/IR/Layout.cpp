@@ -215,12 +215,26 @@ std::optional<llvm::SmallVector<int64_t>> weft::riscv::reshapeCarrierParts(
       source.getReplicaGroup() != target.getReplicaGroup() ||
       source.getValidity() != target.getValidity()) return std::nullopt;
   auto from = RegisterCoordinates::get(source), to = RegisterCoordinates::get(target);
-  if (!from || !to || from->parts() != to->parts() || from->lanes() != to->lanes() ||
-      !boundedProduct({to->parts(), to->lanes()})) return std::nullopt;
+  if (!from || !to || from->parts() != to->parts() || from->lanes() != to->lanes())
+    return std::nullopt;
+  // With ungrouped replicas, lane coordinates are independent of the part.
+  // Equal per-axis lane radices in the same order prove the entire lane map;
+  // only the first lane is needed to derive each part's permutation.
+  bool identicalLanes = source.getReplicaGroup() == 1;
+  llvm::SmallVector<unsigned> sourceLaneOrder, targetLaneOrder;
+  for (auto [axis, lanes] : llvm::enumerate(source.getLaneFactors().asArrayRef()))
+    if (lanes != 1) sourceLaneOrder.push_back(axis);
+  for (auto [axis, position] : llvm::enumerate(*positions)) {
+    identicalLanes &= source.getLaneFactors()[position] == target.getLaneFactors()[axis];
+    if (target.getLaneFactors()[axis] != 1) targetLaneOrder.push_back(position);
+  }
+  identicalLanes &= sourceLaneOrder == targetLaneOrder;
+  const int64_t checkedLanes = identicalLanes ? 1 : to->lanes();
+  if (!boundedProduct({to->parts(), checkedLanes})) return std::nullopt;
   llvm::SmallVector<int64_t> parts;
   for (int64_t part = 0; part < to->parts(); ++part) {
     int64_t sourcePart = -1;
-    for (int64_t lane = 0; lane < to->lanes(); ++lane) {
+    for (int64_t lane = 0; lane < checkedLanes; ++lane) {
       auto point = to->logical(part, lane);
       if (!point) return std::nullopt;
       llvm::SmallVector<int64_t> mapped(point->size());

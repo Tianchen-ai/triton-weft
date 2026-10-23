@@ -27,5 +27,10 @@ struct StreamContractGeometry {
 std::optional<llvm::SmallVector<int64_t>> streamFinalizeParts(
     ValueType input, mlir::Type output, int64_t axis);
 
+// Number of complete m1 registers in each reduction carrier. A zero result
+// means that splitting would include inactive lanes or change axis identity.
+int64_t streamFinalizeRegisterParts(TargetAttr target, ValueType input,
+                                    int64_t axis);
+
 } // namespace weft::riscv
 #endif

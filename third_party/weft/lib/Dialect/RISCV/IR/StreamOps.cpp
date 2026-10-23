@@ -266,15 +266,32 @@ mlir::LogicalResult RVVStreamContractStepOp::verify() {
   return verifyLeafOperation(*this);
 }
 
+int64_t weft::riscv::streamFinalizeRegisterParts(TargetAttr target,
+                                                ValueType input, int64_t axis) {
+  auto geometry = StreamGeometry::get(input, axis);
+  auto layout = input.getLayout();
+  if (!target || !geometry || !input.getElementType().isF32() ||
+      layout.getValidity() != "full" || layout.getLmulEighths() < 16 ||
+      layout.getLmulEighths() > 64 || layout.getLmulEighths() % 8 ||
+      geometry->lanes != target.getVlenBits() * layout.getLmulEighths() / (32 * 8))
+    return 0;
+  return layout.getLmulEighths() / 8;
+}
+
 mlir::LogicalResult RVVStreamFinalizeOp::verify() {
   ValueType input = getInput().getType();
+  const bool split = getLeaf().getInstruction() == "rvv.stream-finalize.m1";
+  auto kernel = (*this)->getParentOfType<KernelOp>();
+  const int64_t parts = split && kernel ? streamFinalizeRegisterParts(kernel.getTarget(), input, getAxis()) : 0;
+  if (split && (getKind() != "add" || !parts))
+    return emitOpError("m1 stream finalize requires complete f32 reduction register segments");
   if (!legalCarrier(*this, input) || !streamFinalizeParts(input, getResult().getType(), getAxis()) ||
       (!input.getElementType().isF32() && !input.getElementType().isF64() &&
        !(input.getElementType().isInteger(32) && getKind() == "add")) ||
       (getKind() != "add" && getKind() != "max" && getKind() != "min") ||
-      !exactLeaf(getLeaf(), "rvv", "stream-finalize", "rvv.stream-finalize", "none", "exact") ||
+      !exactLeaf(getLeaf(), "rvv", "stream-finalize", split ? "rvv.stream-finalize.m1" : "rvv.stream-finalize", "none", "exact") ||
       getLeaf().getOperandGroups() != input.getLayout().getRegisterGroups() ||
-      getLeaf().getResultGroups() != 0 || getLeaf().getTemporaryGroups() != 1)
+      getLeaf().getResultGroups() != 0 || getLeaf().getTemporaryGroups() != (split ? parts / 2 + 1 : 1))
     return emitOpError("RVV stream finalize requires fully defined floating or i32-add reduction lanes and an exact scalar free-axis projection");
   return verifyLeafOperation(*this);
 }

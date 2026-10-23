@@ -39,7 +39,10 @@ DenseProducerGraph::DenseProducerGraph(ArrayRef<Operation *> sinks)
       auto type = dyn_cast<riscv::ValueType>(value.getType());
       if (type && domain && logicalBitWidth(type) > logicalBitWidth(domain)) domain = type;
     }
-  if (domain) points.resize(domain.getShape().size());
+  if (domain) {
+    points.resize(domain.getShape().size());
+    renamedExtents.resize(domain.getShape().size());
+  }
 }
 
 bool DenseProducerGraph::ownsConsumer(Operation *op) const {
@@ -258,6 +261,8 @@ bool DenseProducerGraph::preservesOrder() const {
       if (isa<riscv::LocalAllocOp>(next)) continue;
       if (llvm::is_contained(localReads, dyn_cast<riscv::ConvertLayoutOp>(op))) {
         if (riscv::mayWriteStorage(next, cast<riscv::ConvertLayoutOp>(op).getInput())) return false;
+      } else if (auto load = dyn_cast<riscv::LoadOp>(op)) {
+        if (riscv::mayWriteStorage(next, load.getRegion())) return false;
       } else if (!riscv::hasOnlyReadEffects(next, true)) return false;
     }
   }
@@ -411,6 +416,38 @@ bool DenseProducerGraph::analyze(bool required, bool allowGuards) {
         points[position] = origin;
       }
   failureReason = "active domain has no dominating extent";
+  DominanceInfo dominance(root->getParentOfType<riscv::KernelOp>());
+  std::function<Value(Value, int64_t, unsigned)> renamedExtent =
+      [&](Value value, int64_t axis, unsigned depth) -> Value {
+    auto type = dyn_cast<riscv::ValueType>(value.getType());
+    if (!type || depth > 32 || !llvm::is_contained(type.getAxisIds().asArrayRef(), axis)) return {};
+    auto *producer = value.getDefiningOp();
+    if (!producer) return {};
+    if (auto load = dyn_cast<riscv::LoadOp>(producer)) {
+      auto point = originPoint(load.getRegion(), axis);
+      return point && dominance.dominates(point.getActive(), root) ? point.getActive() : Value();
+    }
+    if (auto reshape = dyn_cast<riscv::ReshapeOp>(producer)) {
+      auto positions = riscv::reshapeAxisPositions(reshape.getInput().getType(), type, reshape.getOrder());
+      auto found = llvm::find(type.getAxisIds().asArrayRef(), axis);
+      if (!positions) return {};
+      return renamedExtent(reshape.getInput(), reshape.getInput().getType().getAxisIds()[
+          (*positions)[found - type.getAxisIds().asArrayRef().begin()]], depth + 1);
+    }
+    if (!(isDensePointwise(producer) || isa<riscv::ConvertLayoutOp, riscv::RegisterMaterializeOp>(producer))) return {};
+    Value extent;
+    for (Value operand : producer->getOperands()) {
+      auto input = dyn_cast<riscv::ValueType>(operand.getType());
+      if (!input || !llvm::is_contained(input.getAxisIds().asArrayRef(), axis) ||
+          input.getLayout().getValidity() == "full") continue;
+      auto position = llvm::find(input.getAxisIds().asArrayRef(), axis) - input.getAxisIds().asArrayRef().begin();
+      if (input.getShape()[position] == 1) continue;
+      Value candidate = renamedExtent(operand, axis, depth + 1);
+      if (!candidate || (extent && extent != candidate)) return {};
+      extent = candidate;
+    }
+    return extent;
+  };
   for (auto [position, axis] : llvm::enumerate(domain.getAxisIds().asArrayRef())) {
     if (points[position] || domain.getShape()[position] <= 1 || domain.getLayout().getValidity() != "tail") continue;
     for (Operation *scope = root; scope && scope->getBlock() && !points[position];
@@ -422,6 +459,15 @@ bool DenseProducerGraph::analyze(bool required, bool allowGuards) {
           break;
         }
     if (!points[position]) {
+      Value extent = renamedExtent(result, axis, 0);
+      if (extent) {
+        for (Value value : values)
+          if (cast<riscv::ValueType>(value.getType()).getLayout().getValidity() == "tail" &&
+              renamedExtent(value, axis, 0) != extent)
+            return false;
+        renamedExtents[position] = extent;
+        continue;
+      }
       // Tail validity applies to the whole layout. A separately introduced
       // fixed index axis can still be complete, even when a row axis is short.
       // Prove that fact through the typed suppliers instead of fabricating a

@@ -35,6 +35,7 @@ public:
   llvm::SmallVector<mlir::Operation *> sinks;
   llvm::SmallVector<mlir::Value> values;
   llvm::SmallVector<riscv::PhysicalPointOp> points;
+  llvm::SmallVector<mlir::Value> renamedExtents;
   riscv::PhysicalPointOp point;
   int64_t lanePosition = 0;
   int64_t width = 0;
