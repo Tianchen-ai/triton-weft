@@ -125,6 +125,11 @@ reverse 从较大坐标向较小坐标组合，仍以此前前缀为左参数。
 固定 selected-parts native ABI。返回值转换先由 layout pass 写入 IR；terminal 只按
 已选类型输出函数参数、返回槽和调用。noinline 保留为原生函数属性；内层返回只退出该函数。
 
+同一收尾 pass 为原生 kernel 入口写入 `native_entry_alignment=32`。这是有界的代码放置
+策略，最多增加 30 bytes 对齐填充，不是 VLEN 或 cache-line 大小声明。它避免入口仅按
+压缩指令的两字节要求放置、使相同指令随链接器布局产生不稳定的取指表现。
+final verifier 要求显式的合法二次幂对齐；C emitter 只输出已选 `aligned` 属性。
+
 布局选择同时核对一个 control edge 上全部 carry/result slots 的常驻寄存器占用，
 并保留更新 issue 的空间；不能用各 slot 单独放得下来证明它们可以同时存活。
 超出容量的 slot 集合使用现有 local 数值表示、显式 control transfer 与分段
@@ -262,6 +267,12 @@ pointwise、state 与 control handoff 的要求不一致时，pass 插入真实 
 storage proposal 当成 contraction carrier。
 
 ### `PlanRISCVMemory`
+
+完整的一维 byte entry 若只被纯 scalar-replica conversion 消费，memory pass 可把
+原位置的 vector load 与逐 lane extract 改为既有 regular-repeat scalar load（repeat=1）。
+byte offset 与元素 offset 在这里相同；字段必须自然、byte-aligned，输入不得有其它 consumer。
+选择只去掉向量中转与 slide，不移动读取、不改变坐标、元素位宽或后续数值结合。
+其它位宽、tail、跨轴或仍有向量消费者的 entry 保持原物理供应。
 
 读取 `MemDescType`、Encoding field mapping 和 value layout，为每条 memory edge写入
 `AccessAttr` 与 transfer leaf。dense access 得到 unit/strided/indexed；encoded field 得到
@@ -877,6 +888,12 @@ birth/lifetime和资源总量成为可验证的IR合同，terminal translator不
 该机制同时用于 Level-local 和显式 replica 的 scaled slot。多 K issue 合并进窄 accumulator
 必须有原有 `fused_streams_legal` 证明；sequential plan 保存单个 slot 的 issue 资源，scaled
 plan 保存完整 slot 集合与 scale/combine 资源，两者分别验证，不能以局部预算替代完整 live set。
+
+单 issue 的 reduced-scaled 集合超过寄存器预算时，planner 在原 slot 顺序上选择可整除的
+有界 chunk，把 direct/reduced/scale-combined set 类型与单 issue operand projection 一起冻结。
+materializer 按这些类型逐块生成 issue slice、widen product、reduction、scale combine，再以
+同宽 i32 merge 汇合完成的块；不要求所有宽乘积同时存活。slice 显式标出实际消费的 source part，
+资源 pass 可只 reload 需要的片段。整数尺度不跨浮点更新边界，完整 SSA 活跃集仍须通过最终预算检查。
 
 independent i16 partial tree 若没有同宽跨 stream 合并的合法证明，首层 pairwise combine
 必须 widening 到 i32，后续层保持 i32，再做最终 reduction；这同样适用于四路及更多

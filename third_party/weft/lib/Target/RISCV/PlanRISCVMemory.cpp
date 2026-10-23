@@ -2866,6 +2866,64 @@ public:
   }
 };
 
+void selectScalarEntrySupplies(mlir::ModuleOp module,
+                              mlir::IRRewriter &rewriter) {
+  llvm::SmallVector<riscv::ConvertLayoutOp> conversions;
+  module.walk([&](riscv::ConvertLayoutOp op) { conversions.push_back(op); });
+  for (auto conversion : conversions) {
+    auto entry = conversion.getInput().getDefiningOp<riscv::RVVIndexedEntryLoadOp>();
+    auto kernel = conversion->getParentOfType<riscv::KernelOp>();
+    if (!entry || !kernel || kernel.getResourcesMaterialized() ||
+        !entry.getResult().hasOneUse() ||
+        conversion.getConversion().getEffect() != "pure")
+      continue;
+    auto field = entry.getSource().getDefiningOp<riscv::FieldOp>();
+    auto result = conversion.getResult().getType();
+    auto layout = result.getLayout();
+    auto element = mlir::dyn_cast<mlir::IntegerType>(result.getElementType());
+    auto offsetType = entry.getEntryOffsets().getType();
+    auto offsetInteger = mlir::dyn_cast<mlir::IntegerType>(offsetType);
+    const auto ones = [](auto values) {
+      return llvm::all_of(values, [](int64_t factor) { return factor == 1; });
+    };
+    // Byte offsets are already element offsets for an i8 payload. Keep the
+    // selected memory read at its original position: only its carrier changes.
+    // A vector read followed exclusively by scalar extraction costs one load,
+    // N extracts and N-1 slides, while this supply needs N scalar byte loads.
+    if (!field || !element || element.getWidth() != 8 || element.isSignless() ||
+        (!offsetType.isIndex() && (!offsetInteger || !offsetInteger.isUnsigned())) ||
+        field.getAccess().getMapping() != "natural" ||
+        field.getAccess().getForm() != "unit" || field.getAccess().getBitOffset() % 8 ||
+        mlir::cast<riscv::ValueType>(field.getResult().getType()).getShape().size() != 1 ||
+        result.getShape().size() != 1 || result.getShape()[0] < 2 ||
+        result.getShape()[0] != entry.getPayloadExtent() ||
+        result.getAxisIds()[0] != entry.getPayloadAxis() ||
+        layout.getCarrier() != "scalar" || layout.getValidity() != "full" ||
+        layout.getReplicaFactors()[0] != result.getShape()[0] ||
+        !ones(layout.getTimeFactors().asArrayRef()) ||
+        !ones(layout.getLaneFactors().asArrayRef()) ||
+        !ones(layout.getFragmentFactors().asArrayRef()) ||
+        !ones(layout.getLocalFactors().asArrayRef()))
+      continue;
+    llvm::SmallVector<int64_t> partBases;
+    for (int64_t lane = 0; lane < result.getShape()[0]; ++lane)
+      partBases.push_back(lane);
+    rewriter.setInsertionPoint(entry);
+    auto scalar = riscv::RVVRegularRepeatScalarLoadOp::create(rewriter,
+        entry.getLoc(), result, field.getResult(), entry.getSourceAxis(),
+        entry.getPayloadAxis(), entry.getEntryOffsets(), result.getShape()[0], 1,
+        rewriter.getDenseI64ArrayAttr(partBases), field.getAccess(),
+        riscv_internal::leaf(rewriter, "scalar", "regular-repeat-scalar-load",
+            "scalar.regular-repeat-load", "scalar.regular-repeat-load", 0, 0,
+            0, 0, "none", "exact",
+            {static_cast<int64_t>(entry.getSourceAxis()),
+             static_cast<int64_t>(entry.getPayloadAxis()), result.getShape()[0], 1}));
+    riscv_internal::copyOrigin(entry, scalar);
+    rewriter.replaceOp(conversion, scalar.getResult());
+    rewriter.eraseOp(entry);
+  }
+}
+
 mlir::LogicalResult materializeLocalEntrySources(mlir::ModuleOp module,
                                                  mlir::IRRewriter &rewriter) {
   bool failed = false;
@@ -5230,6 +5288,8 @@ public:
                          builder.getStringAttr(access.getForm()));
     });
     failed |= mlir::failed(materializeLocalEntrySources(getOperation(), rewriter));
+    if (!failed)
+      selectScalarEntrySupplies(getOperation(), rewriter);
     if (failed)
       signalPassFailure();
   }

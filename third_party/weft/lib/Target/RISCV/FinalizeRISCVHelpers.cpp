@@ -13,8 +13,15 @@ class FinalizeRISCVHelpersPass
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FinalizeRISCVHelpersPass)
   StringRef getArgument() const override { return "weft-riscv-finalize-helpers"; }
-  StringRef getDescription() const override { return "Close native helper captures after physical resource selection"; }
+  StringRef getDescription() const override { return "Close native entry placement and helper captures after physical resource selection"; }
   void runOnOperation() override {
+    // Freeze the native entry placement before emission. A bounded 32-byte
+    // policy avoids inheriting arbitrary two-byte placement from the linker;
+    // it is independent of vector length and of the numerical program.
+    getOperation().walk([&](riscv::KernelOp kernel) {
+      kernel->setAttr("native_entry_alignment",
+                     IntegerAttr::get(IntegerType::get(&getContext(), 64), 32));
+    });
     getOperation().walk<WalkOrder::PostOrder>([&](riscv::HelperOp helper) {
       llvm::SetVector<Value> captures;
       getUsedValuesDefinedAbove(helper.getBody(), captures);

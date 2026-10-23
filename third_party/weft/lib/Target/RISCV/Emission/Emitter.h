@@ -231,7 +231,11 @@ public:
     mlir::FailureOr<std::string> arguments = functionArguments();
     if (mlir::failed(arguments))
       return mlir::failure();
-    line("void " + identifier(kernel.getSymName()) + "(" + *arguments + ") {");
+    auto alignment = kernel->getAttrOfType<mlir::IntegerAttr>("native_entry_alignment");
+    if (!alignment || !alignment.getType().isInteger(64))
+      return fail(kernel, "native entry has no selected code alignment");
+    line("__attribute__((aligned(" + std::to_string(alignment.getInt()) + "))) void " +
+         identifier(kernel.getSymName()) + "(" + *arguments + ") {");
     ++indent;
     for (auto [index, arg] : llvm::enumerate(kernel.getBody().front().getArguments()))
       if (hasStrideArguments(kernel.getStridedArgsAttr(), kernel.getArgNames()[index]))

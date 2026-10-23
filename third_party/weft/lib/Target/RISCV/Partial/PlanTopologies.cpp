@@ -483,7 +483,8 @@ public:
       // before materialization.  Fused and per-stream realizations share the
       // same carrier; they differ only in whether the carrier or the finalized
       // i32 value crosses an issue boundary.
-      const bool scaledIssues = kind == "reduced_scaled" && streams > 1;
+      const bool scaledIssues = kind == "reduced_scaled" &&
+          (streams > 1 || (kernel && resources > kernel.getTarget().getVectorRegisters()));
       const bool collectIssues = kind == "level_scaled" || scaledIssues;
       if (kind == "sequential_fused" || kind == "sequential_per_stream" ||
           collectIssues) {
@@ -686,6 +687,36 @@ public:
             builder.getContext(), reducedSlot, reductionAxis, combineArity,
             reducedSetType.getTermsPerSlot() * fanout,
             combineArity * reducedSlot.getLayout().getRegisterGroups());
+      }
+      // A complete scaled reduction need not retain every wide product at
+      // once. Freeze a smaller direct/reduced set when the all-slot set exceeds
+      // the target budget; each chunk contributes one completed i32 singleton.
+      // The materializer consumes these set types and the existing slot order.
+      if (kind == "reduced_scaled" && !sourcePlan && streams == 1 && kernel &&
+          directSetType && reducedSetType && scaleCombinedSetType &&
+          resources > kernel.getTarget().getVectorRegisters()) {
+        int64_t chunk = partialSlots;
+        const int64_t productGroups = partialSlot.getLayout().getRegisterGroups();
+        const int64_t reducedGroups = reducedSlot.getLayout().getRegisterGroups();
+        const int64_t budget = kernel.getTarget().getVectorRegisters();
+        while (chunk > 1) {
+          chunk /= 2;
+          if (partialSlots % chunk) continue;
+          auto issueGroups = checkedProduct({chunk, productGroups + reducedGroups});
+          const int64_t completedGroups = partialSlots / chunk;
+          if (!issueGroups || *issueGroups > budget - completedGroups - 2) continue;
+          directSetType = riscv::PartialSetType::get(builder.getContext(), partialSlot,
+              reductionAxis, chunk, partialSlot.getShape()[0], chunk * productGroups);
+          reducedSetType = riscv::PartialSetType::get(builder.getContext(), reducedSlot,
+              reductionAxis, chunk, partialSlot.getShape()[0], chunk * reducedGroups);
+          scaleCombinedSetType = riscv::PartialSetType::get(builder.getContext(), reducedSlot,
+              reductionAxis, 1, partialSlot.getShape()[0] * chunk, reducedGroups);
+          resources = *issueGroups + completedGroups + 2;
+          dot->setAttr("partial_topology", makePartialTopology(builder, dot, kind,
+              rootOperand, partialAxes, outputAxes, sourceSlots, partialSlots,
+              replicas, laneSplit, combineArity, resources));
+          break;
+        }
       }
       auto optionalType = [&](riscv::ValueType type) -> mlir::Type {
         return type ? mlir::Type(type)

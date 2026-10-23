@@ -1354,6 +1354,73 @@ public:
             riscv_internal::copyOrigin(dot, reduced);
             partials = combineReducedPartials(reduced.getResult());
           }
+        } else if (reduceBeforeScale && !multipleIssues && directSetType.getSlots() < slots) {
+          const int64_t chunk = directSetType.getSlots();
+          if (!issuePlan || issuePlan.getIssueCount() != 1 ||
+              chunk <= 0 || slots % chunk || reducedSetType.getSlots() != chunk ||
+              scaleCombinedSetType.getSlots() != 1 ||
+              directSetType.getTermsPerSlot() != reducedSetType.getTermsPerSlot() ||
+              scaleCombinedSetType.getTermsPerSlot() != chunk * reducedSetType.getTermsPerSlot()) {
+            dot.emitError("chunked scaled reduction has inconsistent frozen set geometry");
+            signalPassFailure();
+            return;
+          }
+          llvm::SmallVector<mlir::Value> completed;
+          for (int64_t first = 0; first < slots; first += chunk) {
+            llvm::SmallVector<int64_t> scales, order;
+            llvm::SmallVector<mlir::Value> products;
+            for (int64_t local = 0; local < chunk; ++local) {
+              const int64_t slot = dot.getPartialTopology().getSlotOrder()[first + local];
+              auto resultPart = composeReplicaPart(dotResult, outputAxes, outputPart, partialAxes, slot);
+              if (!resultPart) {
+                dot.emitError("chunked scaled reduction lost its output coordinate");
+                signalPassFailure();
+                return;
+              }
+              auto product = materializePlannedPartial(dot, issuePlan, *resultPart, rewriter);
+              if (mlir::failed(product)) {
+                signalPassFailure();
+                return;
+              }
+              products.push_back(*product);
+              scales.push_back(scaleReplicas[slot]);
+              order.push_back(local);
+            }
+            auto set = riscv::RVVPartialCollectOp::create(rewriter, reduce.getLoc(), directSetType,
+                products, ownerDomain(reduce),
+                nextPartialBirthId++, ownerDomain(reduce),
+                riscv_internal::leaf(rewriter, "rvv", "partial-collect", "rvv.partial-collect",
+                    "rvv.partial-collect", directSetType.getResourceGroups(), directSetType.getResourceGroups(), 0, 0,
+                    "none", "exact", {reductionAxis, chunk}));
+            riscv_internal::copyOrigin(dot, set);
+            auto reduced = riscv::RVVPartialReduceOp::create(rewriter, reduce.getLoc(),
+                reducedSetType, set.getResult(), riscv_internal::leaf(rewriter, "rvv",
+                    "partial-reduce", scalePlan.getReduceInstruction(), scalePlan.getReduceInstruction(),
+                    directSetType.getResourceGroups(), reducedSetType.getResourceGroups(),
+                    1, 0, "none", "exact", {reductionAxis, chunk}));
+            riscv_internal::copyOrigin(dot, reduced);
+            auto combined = riscv::RVVPartialScaleCombineOp::create(rewriter, reduce.getLoc(),
+                scaleCombinedSetType, reduced.getResult(), llvm::SmallVector<mlir::Value>(chunk, scalarScale),
+                rewriter.getDenseI64ArrayAttr(scales), rewriter.getDenseI64ArrayAttr(order),
+                rewriter.getDenseI64ArrayAttr(partialAxes), riscv_internal::leaf(rewriter, "rvv",
+                    "partial-scale-combine", "rvv.partial-scale-combine", "rvv.partial-scale-combine",
+                    reducedSetType.getResourceGroups(), scaleCombinedSetType.getResourceGroups(),
+                    1, 0, "none", "exact", {reductionAxis, chunk, 1, chunk}));
+            riscv_internal::copyOrigin(dot, combined);
+            completed.push_back(combined.getResult());
+          }
+          auto mergedType = riscv::PartialSetType::get(rewriter.getContext(),
+              scaleCombinedSetType.getPartialType(), reductionAxis, 1,
+              scaleCombinedSetType.getTermsPerSlot() * completed.size(),
+              scaleCombinedSetType.getResourceGroups());
+          const int64_t count = completed.size();
+          auto merged = riscv::RVVPartialMergeOp::create(rewriter, reduce.getLoc(), mergedType,
+              completed, "pairwise", riscv_internal::leaf(rewriter, "rvv", "partial-merge",
+                  "rvv.partial-merge", "rvv.partial-merge", count * mergedType.getResourceGroups(),
+                  mergedType.getResourceGroups(), 0, 0, "none", "exact",
+                  {reductionAxis, count, count, mergedType.getTermsPerSlot()}));
+          riscv_internal::copyOrigin(dot, merged);
+          partials = merged.getResult();
         } else if (reduceBeforeScale) {
           mlir::Value sourceSet;
           if (multipleIssues) {

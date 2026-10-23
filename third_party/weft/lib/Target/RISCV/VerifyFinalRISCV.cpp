@@ -180,6 +180,14 @@ public:
     bool failed = false;
     mlir::ModuleOp module = getOperation();
     module.walk([&](riscv::KernelOp kernel) {
+      auto alignment = kernel->getAttrOfType<mlir::IntegerAttr>("native_entry_alignment");
+      const int64_t bytes = alignment && alignment.getType().isInteger(64)
+                                ? alignment.getInt() : 0;
+      if (bytes < 2 || bytes > 4096 || (bytes & (bytes - 1))) {
+        kernel.emitError("native entry requires a selected power-of-two code alignment in [2, 4096]");
+        failed = true;
+        return;
+      }
       auto used = riscv::usedInstructionExtensions(kernel);
       if (mlir::failed(used)) {
         failed = true;

@@ -7023,8 +7023,24 @@ mlir::LogicalResult RVVWidenDotOp::verify() {
   auto combinePartialPlan =
       (*this)->getAttrOfType<PartialCombinePlanAttr>("partial_combine_plan");
   const bool topologyAssigned = topologyKind != "unassigned";
+  auto directSet = partialLayoutPlan ? mlir::dyn_cast<PartialSetType>(
+      partialLayoutPlan.getDirectSetType()) : PartialSetType();
+  const bool chunkedScaled = topologyKind == "reduced_scaled" && directSet &&
+      directSet.getSlots() < getPartialTopology().getPartialSlots();
+  bool chunkPlanClosed = true;
+  if (chunkedScaled) {
+    auto reducedSet = mlir::dyn_cast<PartialSetType>(partialLayoutPlan.getReducedSetType());
+    auto combinedSet = mlir::dyn_cast<PartialSetType>(partialLayoutPlan.getScaleCombinedSetType());
+    const int64_t slots = directSet.getSlots();
+    chunkPlanClosed = slots > 0 && getReductionStreams() == 1 &&
+        getPartialTopology().getLaneSplit() == 1 &&
+        getPartialTopology().getPartialSlots() % slots == 0 && reducedSet && combinedSet &&
+        reducedSet.getSlots() == slots && combinedSet.getSlots() == 1 &&
+        reducedSet.getTermsPerSlot() == directSet.getTermsPerSlot() &&
+        combinedSet.getTermsPerSlot() == slots * reducedSet.getTermsPerSlot();
+  }
   const bool scaledIssues =
-      topologyKind == "reduced_scaled" && getReductionStreams() > 1;
+      topologyKind == "reduced_scaled" && (getReductionStreams() > 1 || chunkedScaled);
   const bool collectsPartials = topologyKind == "level_scaled" || scaledIssues;
   const bool sequentialPlanRequired =
       getReductionStreams() > 0 &&
@@ -7039,7 +7055,7 @@ mlir::LogicalResult RVVWidenDotOp::verify() {
   bool layoutPlanClosed = !topologyAssigned;
   if (topologyAssigned) {
     if (partialLayoutPlan)
-      layoutPlanClosed =
+      layoutPlanClosed = chunkPlanClosed &&
           (topologyKind == "nested_scaled_stream") ==
               static_cast<bool>(nestedPartialPlan) &&
           sequentialPlanRequired ==
