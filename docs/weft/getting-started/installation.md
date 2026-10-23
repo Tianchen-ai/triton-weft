@@ -80,7 +80,10 @@ python -m pip wheel --no-build-isolation --no-deps . -w /path/to/wheels
 Clang 目录必须包含 bin/clang、LICENSE.TXT、完整 lib/clang/<version>/include，以及 wheel
 运行架构的 codegen：x86-64 wheel 要求 x86-64 与 immintrin.h，RISC-V wheel 要求 riscv64
 与 riscv_vector.h。交叉构建其它目标时，另行显式配置该目标的工具链和 sysroot。
-OpenMP headers 必须含 omp.h。构建会将 compiler、resource headers、runtime、
+OpenMP headers 必须含 omp.h，runtime 必须提供 Clang 23 的 dispatch ABI。
+配置阶段检查实际导出的 fork、static dispatch 和 dispatch deinit 接口，拒绝同名但过旧的
+libomp；这也防止模型集成在链接或进入新调度路径时才暴露版本不匹配。
+构建会将 compiler、resource headers、runtime、
 C/C++ headers、llama.cpp adapter 和许可材料放入同一 Triton wheel。
 
 wheel 是构建平台和 Python ABI 的本地产物，不默认承诺 manylinux 兼容。
