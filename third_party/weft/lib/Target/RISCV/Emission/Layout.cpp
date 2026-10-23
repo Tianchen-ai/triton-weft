@@ -430,7 +430,16 @@ std::optional<int64_t> Emitter::timeCoordinate(mlir::Value value, size_t part,
 
 std::string Emitter::partVL(mlir::Value value, size_t part) const {
   const int64_t laneAxis = laneAxisFor(value);
-  if (auto layout = layoutOf(value); layout && layout.getValidity() == "full")
+  mlir::Value fieldValue = value;
+  if (auto read = value.getDefiningOp<riscv::FieldReadOp>())
+    fieldValue = read.getInput();
+  auto field = riscv_internal::sourceField(fieldValue);
+  auto reshape = field ? field.getOwner().getDefiningOp<riscv::ReshapeOp>()
+                       : riscv::ReshapeOp();
+  const bool recordTail = reshape && reshape.getInput().getType().getShape().size() == 1 &&
+      reshape.getResult().getType().getShape().size() == 2 &&
+      laneAxis == reshape.getResult().getType().getAxisIds()[0];
+  if (auto layout = layoutOf(value); layout && layout.getValidity() == "full" && !recordTail)
     return std::to_string(physicalLanes(value));
   if (auto layout = layoutOf(value);
       layout && (layout.getReplicaGroup() > 1 ||

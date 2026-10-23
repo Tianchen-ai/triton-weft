@@ -934,9 +934,19 @@ Emitter::compileRVVLayeredStream(riscv::RVVLayeredStreamOp operation) {
       const std::string address = fieldStorageAddress(
           record, *field, std::to_string(byteOffset), rowOffset);
       std::string raw = fresh("layered_stream_raw");
-      line(type + " " + raw + " = __riscv_vle8_v_" + suffix +
-           "((const uint8_t *)(" + address + "), " +
-           partVL(operation.getResult(), part) + ");");
+      auto active = partActive(operation.getResult(), part);
+      if (!active)
+        return fail(operation, "layered stream has no active record coordinates");
+      const std::string load = "__riscv_vle8_v_" + suffix +
+          "((const uint8_t *)(" + address + "), " +
+          partVL(operation.getResult(), part) + ")";
+      if (*active == "1") {
+        line(type + " " + raw + " = " + load + ";");
+      } else {
+        line(type + " " + raw + " = __riscv_vmv_v_x_" + suffix + "(0, " +
+             partVL(operation.getResult(), part) + ");");
+        line("if (" + *active + ") " + raw + " = " + load + ";");
+      }
       loadedWindows.push_back(std::move(raw));
     }
     for (int64_t stream = 0; stream < streams; ++stream) {

@@ -10397,7 +10397,14 @@ mlir::LogicalResult RVVLayeredWindowOp::verify() {
 
 bool weft::riscv::hasContiguousLayeredStreamStorage(
     FieldOp field, ValueType result, LayeredStreamGeometryAttr geometry) {
-  auto load = field ? sourceLoad(field.getOwner()) : LoadOp();
+  mlir::Value owner = field ? field.getOwner() : mlir::Value();
+  while (owner) {
+    auto reshape = owner.getDefiningOp<ReshapeOp>();
+    if (!reshape)
+      break;
+    owner = reshape.getInput();
+  }
+  auto load = owner ? sourceLoad(owner) : LoadOp();
   if (!load || !geometry)
     return false;
   auto memory = load.getRegion().getType();

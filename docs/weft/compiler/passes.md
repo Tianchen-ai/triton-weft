@@ -721,6 +721,11 @@ time/lane carrier，显式生成 layered stream，再 repack 到消费 carrier�
 register gather 的整表读取不交给 emitter 解码；最终 leaf materialization 产生的
 field read 同样调用这套物化规则。字段范围、位序、读取位置及原数值类型保持不变。
 
+多 record 的直接字段读取先将 record 坐标保留为 register replica，仅将一个 storage
+layer 放入 lane，再显式 repack 到消费布局。连续 encoded axis 拆成 record/element
+两轴时保留原 byte address、record stride 与实际有效 record 数；尾部 record 的 raw
+读取受有效域控制，metadata 的 strided load 同样只读取实际存在的 record。
+
 fragment supply 使用同一 sharing owner：在完整 chunk/cohort、无 snapshot/干扰写入的前提下，
 将最多四次、无内部 birth/嵌套 control 的完整 layer issue 显式展开，保留 K issue 顺序与
 carry。只允许 pure/read 和已闭合 MMA 私有更新；不复制作者状态声明。随后每个 raw read

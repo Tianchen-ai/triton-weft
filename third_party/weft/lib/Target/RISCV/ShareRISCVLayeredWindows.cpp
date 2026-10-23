@@ -586,6 +586,75 @@ bool isLayeredStreamField(riscv::FieldOp field) {
   return hasStreamAxis;
 }
 
+bool materializeRecordLayeredField(mlir::IRRewriter &rewriter,
+                                  riscv::FieldOp field) {
+  auto result = mlir::dyn_cast<riscv::ValueType>(field.getResult().getType());
+  auto kernel = field->getParentOfType<riscv::KernelOp>();
+  auto element = result ? mlir::dyn_cast<mlir::IntegerType>(result.getElementType())
+                        : mlir::IntegerType();
+  auto access = field.getAccess();
+  auto facts = riscv_internal::fieldFacts(field);
+  if (!result || !kernel || !element || element.isSigned() ||
+      result.getShape().size() != 2 || facts.logicalRank != 1 ||
+      facts.scalarPerRecord || result.getLayout().getCarrier() != "rvv" ||
+      result.getLayout().getReplicaGroup() != 1 ||
+      access.getMapping() != "grouped_layered" || access.getForm() != "indexed" ||
+      access.getBitOffset() % 8 || access.getGroupSize() <= 0 ||
+      access.getLayerSize() <= 1 || access.getGroupSize() % access.getLayerSize() ||
+      element.getWidth() * (access.getGroupSize() / access.getLayerSize()) > 8)
+    return false;
+
+  const size_t axis = result.getShape().size() - 1;
+  const int64_t extent = result.getShape()[axis];
+  const int64_t lanes = std::gcd(access.getLayerSize(),
+                                kernel.getTarget().getVlenBits() / 8);
+  if (extent <= 0 || extent % access.getGroupSize() || lanes <= 1)
+    return false;
+  llvm::SmallVector<int64_t> time(result.getShape().size(), 1);
+  llvm::SmallVector<int64_t> lane(time), replica(time), ones(time);
+  int64_t replicas = 1;
+  for (size_t i = 0; i < axis; ++i) {
+    if (result.getShape()[i] <= 0 ||
+        !checkedMultiply(replicas, result.getShape()[i], replicas))
+      return false;
+    replica[i] = result.getShape()[i];
+  }
+  time[axis] = extent / lanes;
+  lane[axis] = lanes;
+  const int64_t lmul = std::max<int64_t>(1, lanes * 64 / kernel.getTarget().getVlenBits());
+  const int64_t groups = replicas * std::max<int64_t>(1, (lmul + 7) / 8);
+  if (groups > kernel.getTarget().getVectorRegisters())
+    return false;
+  auto layout = riscv::LayoutAttr::get(rewriter.getContext(), "rvv", result.getAxisIds(),
+      rewriter.getDenseI64ArrayAttr(time), rewriter.getDenseI64ArrayAttr(lane),
+      rewriter.getDenseI64ArrayAttr(replica), rewriter.getDenseI64ArrayAttr(ones),
+      rewriter.getDenseI64ArrayAttr(ones), 8, lmul, lanes, groups,
+      result.getLayout().getValidity());
+  auto supplied = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(result, layout));
+  auto geometry = buildLayeredStreamGeometry(rewriter, supplied, access, result.getAxisIds()[axis], 0);
+  if (!geometry || supplied == result || !riscv::supportsRVVLayout(kernel.getTarget(), layout) ||
+      !riscv::hasContiguousLayeredStreamStorage(field, supplied, *geometry) ||
+      !riscv::rvvLayoutRepackSlices(supplied, result))
+    return false;
+  rewriter.setInsertionPoint(field);
+  auto selectedField = mlir::cast<riscv::FieldOp>(rewriter.clone(*field));
+  selectedField.getResult().setType(supplied);
+  const bool tail = layout.getValidity() == "tail";
+  auto stream = riscv::RVVLayeredStreamOp::create(rewriter, field.getLoc(), supplied,
+      selectedField.getResult(), access, *geometry,
+      riscv_internal::leaf(rewriter, "rvv", "layered-stream", "rvv.layered-stream",
+          "rvv.layered-stream", 0, groups, std::max<int64_t>(1, (lmul + 7) / 8),
+          0, "none", tail ? "agnostic" : "exact"));
+  auto bridge = riscv::ConvertLayoutOp::create(rewriter, field.getLoc(), result, stream.getResult(),
+      riscv_internal::layoutConversion(rewriter, layout, result.getLayout()),
+      riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
+  riscv_internal::selectLaneRepack(rewriter, bridge);
+  riscv_internal::copyOrigin(field, stream);
+  riscv_internal::copyOrigin(field, bridge);
+  rewriter.replaceOp(field, bridge.getResult());
+  return true;
+}
+
 bool isProjectedLayeredExtract(
     riscv::ExtractOp extract, riscv::FieldOp &field,
     riscv::PhysicalPointOp &origin, int64_t &axis, int64_t &base,
@@ -2534,6 +2603,8 @@ public:
       if (hasTypedStorageMaterialization(field))
         continue;
       if (materializeInterleavedReplicaField(rewriter, field))
+        continue;
+      if (materializeRecordLayeredField(rewriter, field))
         continue;
       if (!isLayeredStreamField(field))
         continue;

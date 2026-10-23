@@ -958,6 +958,29 @@ mlir::LogicalResult Emitter::compileExtent(riscv::ExtentOp operation) {
 
 mlir::LogicalResult Emitter::compileReshape(riscv::ReshapeOp reshape) {
   Binding input = bindings.lookup(reshape.getInput());
+  if (input.kind == Binding::Kind::Record &&
+      reshape.getInput().getType().getShape() != reshape.getResult().getType().getShape()) {
+    auto before = reshape.getInput().getType();
+    auto after = reshape.getResult().getType();
+    if (before.getShape().size() != 1 || after.getShape().size() != 2 ||
+        after.getShape().asArrayRef().back() != input.recordElements || input.interleaveRows > 0 ||
+        !llvm::equal(reshape.getOrder(), before.getAxisIds().asArrayRef()))
+      return fail(reshape, "encoded reshape requires a contiguous record axis split with complete records");
+    // The physical shape already fixes the row-major record coordinates.
+    // Preserve the admitted byte address and spell its new axis strides.
+    int64_t stride = input.recordStrideBytes;
+    input.recordByteStrides.clear();
+    input.recordOrigins.clear();
+    for (size_t axis = after.getShape().size() - 1; axis-- > 0;) {
+      if (after.getShape()[axis] <= 0 || stride > INT64_MAX / after.getShape()[axis])
+        return fail(reshape, "encoded reshape requires bounded static record strides");
+      input.recordByteStrides.emplace_back(after.getAxisIds()[axis], std::to_string(stride));
+      input.recordOrigins.emplace_back(after.getAxisIds()[axis], "0");
+      stride *= after.getShape()[axis];
+    }
+    input.recordAxis = after.getAxisIds().asArrayRef().back();
+    input.recordOrigins.emplace_back(input.recordAxis, "0");
+  }
   if (input.kind == Binding::Kind::LocalArray &&
       reshape.getInput().getType().getShape() != reshape.getResult().getType().getShape()) {
     llvm::SmallVector<std::string> extents;

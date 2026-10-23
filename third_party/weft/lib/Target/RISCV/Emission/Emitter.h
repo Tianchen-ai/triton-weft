@@ -735,6 +735,25 @@ private:
         axisScopes[binding.point.axis].push_back(binding.point);
         physicalPointAxes.push_back(binding.point.axis);
       }
+      if (auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(operation)) {
+        auto before = reshape.getInput().getType();
+        auto after = reshape.getResult().getType();
+        auto bound = bindings.lookup(reshape.getResult());
+        if (bound.kind == Binding::Kind::Record && before.getShape().size() == 1 &&
+            after.getShape().size() == 2 && before.getShape() != after.getShape()) {
+          auto scope = axisScopes.find(before.getAxisIds()[0]);
+          if (scope != axisScopes.end() && !scope->second.empty()) {
+            auto point = scope->second.back();
+            point.axis = after.getAxisIds()[0];
+            point.base = "0";
+            point.active = "((" + point.active + " + " +
+                std::to_string(bound.recordElements - 1) + ") / " +
+                std::to_string(bound.recordElements) + ")";
+            axisScopes[point.axis].push_back(point);
+            physicalPointAxes.push_back(point.axis);
+          }
+        }
+      }
     }
     leavePhysicalPoints();
     return mlir::success();
