@@ -2666,6 +2666,8 @@ public:
     getOperation().walk(
         [&](riscv::FieldOp field) { fields.push_back(field); });
     for (riscv::FieldOp field : fields) {
+      if (llvm::all_of(field.getResult().getUses(), usesStorageProjection))
+        continue;
       if (hasTypedStorageMaterialization(field))
         continue;
       if (materializeInterleavedReplicaField(rewriter, field))
@@ -2702,14 +2704,17 @@ public:
         stream->setAttr("source_origin", origin);
       stream->setAttr("canonical_op",
                       rewriter.getStringAttr("weft_kernel.field"));
-      field.getResult().replaceAllUsesExcept(stream.getResult(),
-                                             stream.getOperation());
+      field.getResult().replaceUsesWithIf(stream.getResult(), [&](mlir::OpOperand &use) {
+        return use.getOwner() != stream && !usesStorageProjection(use);
+      });
     }
 
     llvm::SmallVector<riscv::ExtractOp> projectedExtracts;
     getOperation().walk(
         [&](riscv::ExtractOp extract) { projectedExtracts.push_back(extract); });
     for (riscv::ExtractOp extract : projectedExtracts) {
+      if (llvm::all_of(extract.getResult().getUses(), usesStorageProjection))
+        continue;
       riscv::FieldOp field;
       riscv::PhysicalPointOp origin;
       llvm::SmallVector<riscv::ConvertLayoutOp> conversions;
@@ -2745,8 +2750,10 @@ public:
       riscv_internal::copyOrigin(extract, stream);
       if (auto canonical = extract->getAttr("canonical_op"))
         stream->setAttr("canonical_op", canonical);
-      extract.getResult().replaceAllUsesWith(stream.getResult());
-      rewriter.eraseOp(extract);
+      extract.getResult().replaceUsesWithIf(stream.getResult(), [&](mlir::OpOperand &use) {
+        return !usesStorageProjection(use);
+      });
+      if (extract.getResult().use_empty()) rewriter.eraseOp(extract);
       for (riscv::ConvertLayoutOp conversion : llvm::reverse(conversions))
         if (conversion.getResult().use_empty())
           rewriter.eraseOp(conversion);

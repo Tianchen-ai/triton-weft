@@ -278,6 +278,13 @@ public:
                          : integer.getValue().isIntN(inputElement.getWidth());
       if (!input || !widened || !result || !constant || !integer ||
           !inputElement || !scalarElement || !resultElement || !scalarFits ||
+          input.getLayout().getCarrier() != "rvv" ||
+          result.getLayout().getCarrier() != "rvv" ||
+          input.getLayout().getSew() != inputElement.getWidth() ||
+          result.getLayout().getSew() != resultElement.getWidth() ||
+          result.getLayout().getLmulEighths() !=
+              2 * input.getLayout().getLmulEighths() ||
+          result.getLayout().getVl() != input.getLayout().getVl() ||
           inputElement.isSignless() || scalarElement.isSignless() ||
           resultElement.isSignless() ||
           scalarElement != widened.getElementType() ||

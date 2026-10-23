@@ -293,6 +293,13 @@ field load 的 scope；snapshot、尾块或不匹配 chunk 不进入该局部路
 unpack 只展开该 typed geometry。不同 N atom 消费同一 lhs fragment，不重建其供应；多个
 accumulator 交到 RVV 时按明确坐标拼接，不能改变作者 K 累加、Level 或 persistent ABI。
 
+闭合 signed-i32 contraction 的 K 可以包含多个完整 atom。物理 materializer 在宽度转换前
+将其分成显式 K issue，按原输入坐标供应每个 atom，用 `scf.for` carry 保留 fragment accumulator，
+最后仅 unpack 一次。每个 MMA 的 K 仍严格等于 capability 的 atom K；这不是放宽硬件 tile
+合同。整数累加遵守原有 i32 数值合同，块级浮点缩放、作者 Level 与状态边界不移动。
+已有 packed-window pass 可展开有界 issue 并共享同一存储窗口；dense 输入使用显式局部访存窗口，
+存在别名写入的 numeric Value 保留其原快照。资源收口继续分析完整的展开与累加器活跃区间。
+
 operand supply 有两种显式局部表示：`ime_pack` 消费已选的连续内轴 RVV slices，以寄存器拼接
 完成 packing；`ime_fragment_storage_load` 只在 source field 的整 chunk、row cohort、point partition/
 alignment 共同证明局部 tile 连续且不需要 snapshot 时执行 unit byte load，并按位重解释为 i8

@@ -181,6 +181,11 @@ std::optional<Supply> supply(riscv::IMEFragmentStorageLoadOp read) {
   const int64_t innerAxis = fragment.getAxisIds()[fragment.getPacking().getAxisOrder()[1]];
   auto point = riscv_internal::originPoint(read.getInput(), innerAxis);
   auto parent = point ? point.getParent().getDefiningOp<riscv::PhysicalPointOp>() : riscv::PhysicalPointOp();
+  // A physical issue can refine the same source domain without introducing an
+  // author Level. Its storage origin still bounds the shared packed window.
+  if (owner && point && (!parent ||
+      parent.getType().getDomain().getAxisId() != innerAxis))
+    parent = riscv_internal::originPoint(owner.getRegion(), innerAxis);
   if (access.getMapping() != "grouped_layered" || !field || !owner || !point || !parent ||
       owner.getSnapshotStorage() || access.getLayerSize() <= 0 ||
       access.getGroupSize() <= access.getLayerSize() ||

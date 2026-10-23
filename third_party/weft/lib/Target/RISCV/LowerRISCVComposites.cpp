@@ -105,6 +105,8 @@ public:
     lowerLoops(rewriter, failed);
     lowerLocalGroupExtracts(rewriter, failed);
     closeOrderedLoops(failed);
+    lowerContracts(rewriter, failed, /*repeatedFragmentsOnly=*/true);
+    eraseDeadComposites(rewriter);
     lowerPartitionedWidenReduceStores(rewriter, failed);
     lowerWidenReductions(rewriter, failed);
     lowerReciprocalSquareRoots(rewriter, failed);
@@ -545,6 +547,8 @@ private:
             if (mlir::isa<riscv::Fold2Op, riscv::MacGroupsOp,
                           riscv::DotOp, riscv::ContractOp,
                           riscv::OuterContractOp,
+                          riscv::CastOp, riscv::WidenOp, riscv::NarrowOp,
+                          riscv::UnaryOp, riscv::BinaryOp,
                           riscv::ConvertLayoutOp, riscv::LoadOp>(operation) &&
                 llvm::all_of(operation->getResults(),
                              [](mlir::Value value) { return value.use_empty(); }))
@@ -1641,7 +1645,8 @@ private:
     }
   }
 
-  void lowerContracts(mlir::IRRewriter &rewriter, bool &failed) {
+  void lowerContracts(mlir::IRRewriter &rewriter, bool &failed,
+                      bool repeatedFragmentsOnly = false) {
     llvm::SmallVector<mlir::Operation *> contracts;
     getOperation().walk([&](mlir::Operation *operation) {
       if (mlir::isa<riscv::DotOp, riscv::ContractOp,
@@ -1654,6 +1659,13 @@ private:
       auto resultType =
           mlir::dyn_cast<riscv::ValueType>(operation->getResult(0).getType());
       auto over = operation->getAttrOfType<mlir::DenseI64ArrayAttr>("over");
+      if (repeatedFragmentsOnly &&
+          (!implementation || implementation.getEngine() != "ime" ||
+           !over || over.size() != 1 ||
+           implementation.getParameters().size() != 5 ||
+           riscv_internal::physicalExtent(operation->getOperand(0), over[0]) ==
+               implementation.getParameters()[2]))
+        continue;
       auto accType = operation->getAttrOfType<mlir::TypeAttr>("acc_type");
       auto laneOperand =
           operation->getAttrOfType<mlir::StringAttr>("lane_operand");

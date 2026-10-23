@@ -2,6 +2,7 @@
 #include "Weft/Dialect/RISCV/IR/Fragment.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "../RISCVPhysicalSupport.h"
+#include "../LocalMemory.h"
 #include "Weft/Target/RISCVFragment.h"
 #include "Weft/Target/RISCVPasses.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -120,6 +121,151 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
   riscv::FragmentType resultFragment = makeFragment(
       resultType, "accumulator", capability.getAccumulatorPacking(), resultType.getAxisIds(),
       resultShape);
+  const int64_t reductionExtent = physicalExtent(operation->getOperand(0), over[0]);
+  if (reductionExtent != capability.getKFactor()) {
+    const int64_t atomK = capability.getKFactor();
+    if (reductionExtent <= 0 || reductionExtent % atomK ||
+        physicalExtent(operation->getOperand(1), over[0]) != reductionExtent ||
+        !resultType.getElementType().isSignedInteger(32)) {
+      operation->emitError("repeated IME reduction requires equal complete K atoms and a signed i32 accumulator");
+      return mlir::failure();
+    }
+    auto zero = riscv::IMEZeroOp::create(rewriter, operation->getLoc(), resultFragment,
+        leaf(rewriter, "ime", "fragment-init", "ime.zero", "ime.zero", 0, 0));
+    auto constant = [&](int64_t value) {
+      return mlir::arith::ConstantIndexOp::create(rewriter, operation->getLoc(), value).getResult();
+    };
+    auto loop = mlir::scf::ForOp::create(rewriter, operation->getLoc(), constant(0),
+        constant(reductionExtent / atomK), constant(1), mlir::ValueRange{zero.getResult()});
+    loop->setAttr("weft.riscv.system_unroll", rewriter.getStringAttr("disable"));
+    loop->setAttr("weft.riscv.direction", rewriter.getStringAttr("ascending"));
+    copyOrigin(operation, loop);
+    rewriter.setInsertionPointToStart(loop.getBody());
+    auto issueOffset = mlir::arith::MulIOp::create(rewriter, operation->getLoc(),
+        loop.getInductionVar(), constant(atomK));
+    llvm::DenseMap<mlir::Value, mlir::Value> sliced;
+    auto project = [&](auto &&self, mlir::Value input) -> mlir::FailureOr<mlir::Value> {
+      auto type = mlir::dyn_cast<riscv::ValueType>(input.getType());
+      if (!type || !llvm::is_contained(type.getAxisIds().asArrayRef(), over[0])) return input;
+      if (auto found = sliced.find(input); found != sliced.end()) return found->second;
+      const size_t position = llvm::find(type.getAxisIds().asArrayRef(), over[0]) - type.getAxisIds().asArrayRef().begin();
+      if (type.getShape()[position] == 1) return input;
+      llvm::SmallVector<int64_t> shape(type.getShape().asArrayRef()); shape[position] = atomK;
+      llvm::SmallVector<int64_t> one(shape.size(), 1), lanes(one), replicas(shape);
+      lanes[position] = atomK; replicas[position] = 1;
+      const int64_t sew = std::max<int64_t>(8, logicalBitWidth(type.getElementType()));
+      const int64_t lmul = std::max<int64_t>(1, atomK * sew * 8 / contract->vlenBits);
+      auto count = staticProduct(replicas);
+      if (!count) return mlir::failure();
+      auto layout = riscv::LayoutAttr::get(rewriter.getContext(), "rvv", type.getAxisIds(),
+          integers(rewriter, one), integers(rewriter, lanes), integers(rewriter, replicas),
+          integers(rewriter, one), integers(rewriter, one), sew, lmul, atomK,
+          *count * ((lmul + 7) / 8), type.getLayout().getValidity());
+      auto target = riscv::ValueType::get(rewriter.getContext(), type.getElementType(),
+          integers(rewriter, shape), type.getAxisIds(), layout);
+      auto producer = input.getDefiningOp();
+      mlir::Value result;
+      if (auto conversion = input.getDefiningOp<riscv::ConvertLayoutOp>()) {
+        auto projected = self(self, conversion.getInput());
+        if (mlir::failed(projected)) return mlir::failure();
+        result = *projected;
+      } else if (producer && mlir::isa<riscv::CastOp, riscv::WidenOp, riscv::NarrowOp,
+                                riscv::UnaryOp, riscv::BinaryOp>(producer)) {
+        llvm::SmallVector<mlir::Value> operands;
+        for (auto operand : producer->getOperands()) {
+          auto projected = self(self, operand);
+          if (mlir::failed(projected)) return mlir::failure();
+          operands.push_back(*projected);
+        }
+        mlir::OperationState state(producer->getLoc(), producer->getName());
+        state.addOperands(operands); state.addTypes(target); state.addAttributes(producer->getAttrs());
+        state.attributes.set("leaf", unselectedLeaf(rewriter));
+        result = rewriter.create(state)->getResult(0);
+      } else {
+        auto origin = originPoint(input, over[0]);
+        if (!origin) {
+          auto field = sourceField(input);
+          auto load = field ? sourceLoad(field.getOwner()) : riscv::LoadOp();
+          if (load) origin = originPoint(load.getRegion(), over[0]);
+        }
+        mlir::Value selector;
+        if (origin) {
+          auto base = mlir::arith::AddIOp::create(rewriter, operation->getLoc(),
+              origin.getBase(), issueOffset);
+          auto remaining = mlir::arith::SubIOp::create(rewriter, operation->getLoc(),
+              origin.getActive(), issueOffset);
+          auto active = mlir::arith::MaxSIOp::create(rewriter, operation->getLoc(),
+              remaining, constant(0));
+          mlir::Value bounded = mlir::arith::MinUIOp::create(rewriter, operation->getLoc(),
+              active, constant(atomK));
+          auto full = origin.getActive().getDefiningOp<mlir::arith::ConstantIndexOp>();
+          if (full && full.value() >= reductionExtent) bounded = constant(atomK);
+          auto point = riscv::PhysicalPointOp::create(rewriter, operation->getLoc(),
+              origin.getType(), origin.getParent(), base, bounded, constant(atomK));
+          copyOrigin(operation, point);
+          selector = point;
+        } else {
+          mlir::Value memory;
+          auto load = input.getDefiningOp<riscv::LoadOp>();
+          if (load && !load.getSnapshotStorage() &&
+              !riscv::storageWrittenBetween(load.getRegion(), load, operation)) {
+            memory = load.getRegion();
+          } else {
+            mlir::OpBuilder::InsertionGuard guard(rewriter);
+            rewriter.setInsertionPoint(loop);
+            mlir::Value local = input;
+            if (type.getLayout().getCarrier() != "local") {
+              int64_t identity = lastLocalIdentity(operation->getParentOfType<mlir::ModuleOp>());
+              auto allocated = allocateLocalValue(rewriter, type, operation, identity);
+              if (mlir::failed(allocated) ||
+                  mlir::failed(initializeLocalValue(rewriter, *allocated, input, operation)))
+                return mlir::failure();
+              local = *allocated;
+            }
+            auto view = localView(rewriter, local, operation);
+            if (mlir::failed(view)) return mlir::failure();
+            memory = *view;
+          }
+          llvm::SmallVector<mlir::Value> coordinates(shape.size(), constant(0));
+          coordinates[position] = issueOffset;
+          auto window = valueMemoryWindow(rewriter, memory, type, coordinates, target, operation);
+          if (mlir::failed(window)) return mlir::failure();
+          result = riscv::LoadOp::create(rewriter, operation->getLoc(), target, *window,
+              mlir::Value(), unassignedAccess(rewriter), unselectedLeaf(rewriter));
+          sliced.try_emplace(input, result);
+          return result;
+        }
+        llvm::SmallVector<mlir::Attribute> selectors(shape.size(), rewriter.getStringAttr("all"));
+        selectors[position] = rewriter.getStringAttr("domain");
+        auto extract = riscv::ExtractOp::create(rewriter, operation->getLoc(), target, input,
+            mlir::ValueRange{selector}, rewriter.getArrayAttr(selectors),
+            accessOf(input) ? accessOf(input) : unassignedAccess(rewriter), unselectedLeaf(rewriter));
+        copyOrigin(operation, extract); result = extract.getResult();
+      }
+      sliced.try_emplace(input, result); return result;
+    };
+    auto lhs = project(project, operation->getOperand(0)), rhs = project(project, operation->getOperand(1));
+    if (mlir::failed(lhs) || mlir::failed(rhs)) {
+      operation->emitError("IME K issue cannot preserve its operand coordinates"); return mlir::failure();
+    }
+    auto *atom = rewriter.clone(*operation);
+    atom->setOperand(0, *lhs); atom->setOperand(1, *rhs);
+    auto value = materializeFragmentProduct(rewriter, atom, implementation, resultType);
+    if (mlir::failed(value)) return mlir::failure();
+    auto unpack = (*value).getDefiningOp<riscv::IMEUnpackOp>();
+    auto mma = unpack.getInput().getDefiningOp<riscv::IMEFragmentMMAOp>();
+    auto redundantZero = mma.getAccumulator().getDefiningOp<riscv::IMEZeroOp>();
+    mma.getAccumulatorMutable().assign(loop.getRegionIterArg(0));
+    rewriter.setInsertionPointToEnd(loop.getBody());
+    mlir::scf::YieldOp::create(rewriter, operation->getLoc(), mma.getResult());
+    auto conversion = unpack.getConversion(); auto unpackLeaf = unpack.getLeaf();
+    rewriter.eraseOp(unpack); rewriter.eraseOp(redundantZero); rewriter.eraseOp(atom);
+    rewriter.setInsertionPointAfter(loop);
+    auto final = riscv::IMEUnpackOp::create(rewriter, operation->getLoc(), resultType,
+        loop.getResult(0), conversion, unpackLeaf);
+    copyOrigin(operation, final);
+    return final.getResult();
+  }
   auto packLeaf = [&](llvm::StringRef role) {
     return riscv_internal::leaf(
         rewriter, "ime", "fragment-pack", ("ime.pack." + role).str(),
@@ -156,7 +302,7 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
         riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter)).getResult();
   };
   auto operandAccess = [&](mlir::Value value) -> riscv::AccessAttr {
-    if (auto access = accessOf(value))
+    if (auto access = accessOf(value); access && access.getForm() != "unassigned")
       return access;
     auto type = mlir::dyn_cast<riscv::ValueType>(value.getType());
     if (!type || type.getLayout().getCarrier() != "rvv")

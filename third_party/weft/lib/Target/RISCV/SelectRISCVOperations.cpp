@@ -142,9 +142,13 @@ riscv::FragmentCapabilityAttr matchingFragment(mlir::Operation *operation,
         contract && supportsRISCVFragmentTile(*contract,
             riscv_internal::physicalExtent(lhs, resultAxes[0]),
             riscv_internal::physicalExtent(rhs, resultAxes[1]),
-            riscv_internal::physicalExtent(lhs, reduction)) &&
-        riscv_internal::physicalExtent(lhs, reduction) == fragment.getKFactor() &&
-        riscv_internal::physicalExtent(rhs, reduction) == fragment.getKFactor() &&
+            fragment.getKFactor()) &&
+        riscv_internal::physicalExtent(lhs, reduction) > 0 &&
+        riscv_internal::physicalExtent(lhs, reduction) % fragment.getKFactor() == 0 &&
+        (riscv_internal::physicalExtent(lhs, reduction) == fragment.getKFactor() ||
+         riscv_internal::logicalElement(result).isSignedInteger(32)) &&
+        riscv_internal::physicalExtent(rhs, reduction) ==
+            riscv_internal::physicalExtent(lhs, reduction) &&
         riscv_internal::physicalExtent(operation->getResult(0), resultAxes[0]) ==
             riscv_internal::physicalExtent(lhs, resultAxes[0]) &&
         riscv_internal::physicalExtent(operation->getResult(0), resultAxes[1]) ==
