@@ -561,6 +561,11 @@ class WeftSemantic:
         raise FrontendError("unsupported Weft annotation", self._location(annotation))
 
     def _resolve_static(self, node: ast.AST) -> object:
+        if isinstance(node, ast.Name) and node.id in self.generator.lscope:
+            from triton.language import constexpr
+            captured = self.generator.lscope[node.id]
+            if isinstance(captured, constexpr):
+                return normalize_static(captured.value)
         if isinstance(node, ast.Name) and node.id in self.static_env:
             return self.static_env[node.id]
         return self.source.resolve(node)
