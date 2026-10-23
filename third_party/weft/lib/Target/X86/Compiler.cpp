@@ -934,7 +934,83 @@ private:
       Value result = accessRuns(loc, base, offsets, mask, data, domain, load, run);
       if (load) scf::YieldOp::create(b, loc, result);
       b.setInsertionPointToStart(&choice.getElseRegion().front());
-      result = accessRuns(loc, base, offsets, mask, data, domain, load, 1);
+      auto vector = cast<VectorType>(data.getType());
+      unsigned payloadBits = vector.getElementType().isIndex() ? 64 : vector.getElementTypeBitWidth();
+      // A non-unit stride must not make every row's address vector live
+      // across the surrounding computation. Keep the address expansion inside
+      // a bounded native row helper when both the full address carrier and
+      // payload exceed the target's vector register file. A register-resident
+      // payload retains its inline alternate to avoid call-clobber spills.
+      // The unit-stride branch stays inline.
+      if (vector.getNumElements() > run &&
+          llvm::divideCeil(uint64_t(vector.getNumElements()) * payloadBits,
+                           uint64_t(target.vectorBits)) > target.vectorRegisters() &&
+          llvm::divideCeil(uint64_t(vector.getNumElements()) * 64, uint64_t(target.vectorBits)) > target.vectorRegisters()) {
+        auto packet = wk::ValueType::get(b.getContext(), element(domain),
+            b.getDenseI64ArrayAttr({run}), b.getDenseI64ArrayAttr({axes(domain).back()}));
+        auto payload = VectorType::get({run}, vector.getElementType());
+        auto helperPayload = vector.getElementType().isBF16() ? payload.clone(b.getI16Type()) : payload;
+        auto predicate = VectorType::get({run}, b.getI1Type());
+        std::string elementName;
+        llvm::raw_string_ostream stream(elementName);
+        vector.getElementType().print(stream);
+        std::string name = "__weft_strided_" + std::string(load ? "load_" : "store_") +
+                           elementName + "_" + std::to_string(run);
+        auto helper = module.lookupSymbol<func::FuncOp>(name);
+        if (!helper) {
+          OpBuilder::InsertionGuard insertion(b);
+          b.setInsertionPointToEnd(module.getBody());
+          SmallVector<Type> returns;
+          if (load) returns.push_back(helperPayload);
+          helper = func::FuncOp::create(b, loc, name, b.getFunctionType(
+              {base.getType(), b.getI64Type(), b.getI64Type(), predicate, helperPayload}, returns));
+          helper.setPrivate();
+          helper->setAttr("weft.x86.cpu", b.getStringAttr(target.cpu));
+          helper->setAttr("weft.x86.vector_bits", b.getI32IntegerAttr(target.vectorBits));
+          helper->setAttr("weft.x86.vector_registers", b.getI32IntegerAttr(target.vectorRegisters()));
+          // This generated body contains only integer address formation and
+          // masked SIMD/scalar transfers, so a call cannot alter AMX state.
+          helper->setAttr("weft.x86.preserves_tile_state", b.getUnitAttr());
+          helper->setAttr("weft.x86.helper", b.getDictionaryAttr({
+              b.getNamedAttr("name", b.getStringAttr(name)), b.getNamedAttr("noinline", b.getBoolAttr(true))}));
+          auto *body = helper.addEntryBlock();
+          b.setInsertionPointToStart(body);
+          auto indices = VectorType::get({run}, b.getI64Type());
+          SmallVector<APInt> lanes;
+          for (int64_t lane = 0; lane < run; ++lane) lanes.emplace_back(64, lane);
+          Value coordinates = arith::ConstantOp::create(b, loc, indices, DenseIntElementsAttr::get(indices, lanes));
+          Value row = vector::BroadcastOp::create(b, loc, indices, body->getArgument(1));
+          Value step = vector::BroadcastOp::create(b, loc, indices, body->getArgument(2));
+          Value addresses = arith::AddIOp::create(b, loc, row,
+              arith::MulIOp::create(b, loc, coordinates, step));
+          Value incoming = body->getArgument(4);
+          if (helperPayload != payload) incoming = operation(loc, "arith.bitcast", payload, incoming);
+          Value value = access(loc, body->getArgument(0), addresses, body->getArgument(3),
+                               incoming, packet, load, false);
+          if (load && helperPayload != payload) value = operation(loc, "arith.bitcast", helperPayload, value);
+          func::ReturnOp::create(b, loc, load ? ValueRange{value} : ValueRange{});
+        }
+        Value step = arith::IndexCastOp::create(b, loc, b.getI64Type(), stride);
+        result = data;
+        for (int64_t begin = 0; begin < vector.getNumElements(); begin += run) {
+          SmallVector<int64_t> lanes(run);
+          std::iota(lanes.begin(), lanes.end(), begin);
+          Value first = addressLane(loc, offsets, begin);
+          Value incoming = permute(loc, data, lanes, payload);
+          if (helperPayload != payload) incoming = operation(loc, "arith.bitcast", helperPayload, incoming);
+          auto call = func::CallOp::create(b, loc, helper, ValueRange{
+              base, first, step, permute(loc, mask, lanes, predicate), incoming});
+          if (load) {
+            if (vector.getElementType().isBF16()) {
+              Value bits = operation(loc, "arith.bitcast", vector.clone(b.getI16Type()), result);
+              bits = vector::InsertStridedSliceOp::create(b, loc, call.getResult(0), bits,
+                  ArrayRef<int64_t>{begin}, ArrayRef<int64_t>{1});
+              result = operation(loc, "arith.bitcast", vector, bits);
+            } else result = vector::InsertStridedSliceOp::create(b, loc, call.getResult(0), result,
+                ArrayRef<int64_t>{begin}, ArrayRef<int64_t>{1});
+          }
+        }
+      } else result = accessRuns(loc, base, offsets, mask, data, domain, load, 1);
       if (load) scf::YieldOp::create(b, loc, result);
     }
     return load ? choice.getResult(0) : Value();
