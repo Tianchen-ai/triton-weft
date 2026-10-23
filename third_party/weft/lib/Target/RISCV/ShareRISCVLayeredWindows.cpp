@@ -1370,24 +1370,59 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
   auto resultType =
       mlir::dyn_cast<riscv::ValueType>(extract.getResult().getType());
   auto kernel = extract->getParentOfType<riscv::KernelOp>();
-  if (!field || !fieldType || !resultType || extract.getIndices().size() != 1 ||
+  if (!field || !fieldType || !resultType ||
       !kernel ||
       extract.getAccess().getForm() != "indexed" ||
       (extract.getAccess().getMapping() != "natural" &&
        extract.getAccess().getMapping() != "grouped_layered"))
     return false;
-  int64_t gatherSelectors = 0;
-  int64_t domainAxis = -1;
-  for (auto [axis, selector] : llvm::enumerate(extract.getSelectors())) {
-    llvm::StringRef name = mlir::cast<mlir::StringAttr>(selector).getValue();
-    if (name == "gather")
-      ++gatherSelectors;
-    else if (name == "domain" && domainAxis == -1)
-      domainAxis = axis;
-    else if (name != "all")
+  auto ownerType = mlir::dyn_cast<riscv::ValueType>(field.getOwner().getType());
+  auto ownerEncoding = ownerType ? mlir::dyn_cast<kernel::EncodingType>(ownerType.getElementType())
+                                : kernel::EncodingType();
+  if (ownerEncoding && riscv_internal::interleaveRows(field, ownerEncoding) > 0)
+    return false; // Interleaved byte planes have their own selected load form.
+  if (extract.getAccess().getMapping() == "natural") {
+    auto element = mlir::dyn_cast<mlir::IntegerType>(fieldType.getElementType());
+    if (!element || (element.getWidth() != 8 && element.getWidth() != 16 && element.getWidth() != 32))
       return false;
   }
-  if (gatherSelectors + (domainAxis >= 0) != 1)
+  const auto fieldFacts = riscv_internal::fieldFacts(field);
+  if (fieldFacts.logicalRank < 0 ||
+      fieldFacts.logicalRank > static_cast<int64_t>(fieldType.getShape().size()))
+    return false;
+  const size_t selectedRecordRank = fieldType.getShape().size() - fieldFacts.logicalRank;
+  llvm::SmallVector<std::optional<int64_t>> selectedRecords(selectedRecordRank);
+  int64_t gatherSelectors = 0;
+  int64_t domainAxis = -1;
+  size_t indexPosition = 0;
+  mlir::Value selectedIndex;
+  for (auto [axis, selector] : llvm::enumerate(extract.getSelectors())) {
+    llvm::StringRef name = mlir::cast<mlir::StringAttr>(selector).getValue();
+    if (name == "all")
+      continue;
+    if (indexPosition >= extract.getIndices().size())
+      return false;
+    mlir::Value index = extract.getIndices()[indexPosition++];
+    if (name == "index" && axis < selectedRecordRank) {
+      auto coordinate = constantIndex(index);
+      if (!coordinate || *coordinate < 0 ||
+          *coordinate >= fieldType.getShape()[axis])
+        return false;
+      selectedRecords[axis] = *coordinate;
+      continue;
+    }
+    if (name == "gather") {
+      ++gatherSelectors;
+      selectedIndex = index;
+    } else if (name == "domain" && domainAxis == -1) {
+      domainAxis = axis;
+      selectedIndex = index;
+    } else {
+      return false;
+    }
+  }
+  if (gatherSelectors + (domainAxis >= 0) != 1 ||
+      indexPosition != extract.getIndices().size())
     return false;
 
   ShapedAffineIndex affine;
@@ -1395,7 +1430,7 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
   if (domainAxis >= 0) {
     if (domainAxis + 1 != static_cast<int64_t>(fieldType.getShape().size()))
       return false;
-    auto point = extract.getIndices().front().getDefiningOp<riscv::PhysicalPointOp>();
+    auto point = selectedIndex.getDefiningOp<riscv::PhysicalPointOp>();
     int64_t axis = fieldType.getAxisIds()[domainAxis];
     auto resultAxis = llvm::find(resultType.getAxisIds().asArrayRef(), axis);
     auto partition = point ? constantIndex(point.getPartition()) : std::optional<int64_t>();
@@ -1409,7 +1444,7 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
     affine.scalarBaseCoefficient = 1;
     affine.axisCoefficients[axis] = 1;
   } else {
-    decomposeShapedIndex(extract.getIndices().front(), 1, affine);
+    decomposeShapedIndex(selectedIndex, 1, affine);
   }
   if (!affine.valid)
     return false;
@@ -1680,6 +1715,10 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
     llvm::SmallVector<int64_t> recordCoordinates;
     recordCoordinates.reserve(recordRank);
     for (size_t fieldPosition = 0; fieldPosition < recordRank; ++fieldPosition) {
+      if (selectedRecords[fieldPosition]) {
+        recordCoordinates.push_back(*selectedRecords[fieldPosition]);
+        continue;
+      }
       const int64_t axis = fieldType.getAxisIds()[fieldPosition];
       auto selectedAxis =
           llvm::find(selectedType.getAxisIds().asArrayRef(), axis);

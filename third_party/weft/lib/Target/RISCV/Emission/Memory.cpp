@@ -80,6 +80,85 @@ mlir::LogicalResult Emitter::compileFieldRead(riscv::FieldReadOp operation) {
     bindings[operation.getResult()] = scalar(name);
     return mlir::success();
   }
+  if (operation.getLeaf().getInstruction() == "encoded.field-read.indexed-bits") {
+    auto field = fieldFor(input);
+    auto owner = bindings.lookup(input.field.owner);
+    if (owner.kind == Binding::Kind::Slice) {
+      auto record = recordForSlice(input.field.owner);
+      if (mlir::failed(record)) return mlir::failure();
+      owner = std::move(*record);
+    }
+    auto output = operation.getResult();
+    if (!field || !input.field.index || !input.field.relativeIndices.empty() ||
+        owner.kind != Binding::Kind::Record || owner.interleaveRows <= 1)
+      return fail(operation, "indexed bit read lost its selected storage relation");
+    auto indexValue = *input.field.index;
+    auto indexLayout = layoutOf(indexValue);
+    auto index = bindings.lookup(indexValue);
+    auto integer = mlir::cast<mlir::IntegerType>(output.getType().getElementType());
+    const int64_t bits = integer.getWidth(), chunk = operation.getAccess().getFieldChunkBytes();
+    const int64_t lmul = output.getType().getLayout().getLmulEighths();
+    const int64_t maskBits = 64 / lmul;
+    const std::string suffix = "u8" + lmulSpelling(lmul), type = "vuint8" + lmulSpelling(lmul) + "_t";
+    const std::string indexSuffix = "u" + std::to_string(indexLayout.getSew()) + lmulSpelling(indexLayout.getLmulEighths());
+    const std::string indexType = "vuint" + std::to_string(indexLayout.getSew()) + lmulSpelling(indexLayout.getLmulEighths()) + "_t";
+    if (index.kind != Binding::Kind::Vector) return fail(operation, "indexed bit read index is not numeric");
+    Binding result;
+    result.kind = Binding::Kind::Vector;
+    for (int64_t part = 0; part < vectorPartCount(output); ++part) {
+      auto selected = projectPart(indexValue, output, part);
+      auto coordinates = partOffsets(output, part);
+      auto active = partActive(output, part);
+      if (!selected || *selected >= index.parts.size() || !coordinates || !active)
+        return fail(operation, "indexed bit read lost part validity or index coordinates");
+      int64_t row = 0;
+      for (const auto &[axis, coordinate] : *coordinates)
+        if (axis == owner.interleaveRowAxis && llvm::StringRef(coordinate).getAsInteger(10, row))
+          return fail(operation, "indexed bit read row must be a selected static coordinate");
+      const std::string vl = partVL(output, part), name = fresh("field_bits");
+      line(type + " " + name + " = __riscv_vmv_v_x_" + suffix + "(0, " + vl + ");");
+      line("if (" + *active + ") {"); ++indent;
+      auto indexOp = [&](const std::string &expression, llvm::StringRef stem) {
+        std::string value = fresh(stem); line(indexType + " " + value + " = " + expression + ";"); return value;
+      };
+      const std::string bit = indexOp("__riscv_vmul_vx_" + indexSuffix + "(" + index.parts[*selected] + ", " + std::to_string(bits) + ", " + vl + ")", "field_bit_index");
+      const std::string byte = indexOp("__riscv_vsrl_vx_" + indexSuffix + "(" + bit + ", 3, " + vl + ")", "field_byte_index");
+      std::string shift = indexOp("__riscv_vand_vx_" + indexSuffix + "(" + bit + ", 7, " + vl + ")", "field_bit_shift");
+      for (int64_t width = indexLayout.getSew(), wideLMUL = indexLayout.getLmulEighths(); width > 8; width /= 2, wideLMUL /= 2) {
+        const std::string narrowSuffix = "u" + std::to_string(width / 2) + lmulSpelling(wideLMUL / 2);
+        const std::string next = fresh("field_shift_narrow");
+        line("vuint" + std::to_string(width / 2) + lmulSpelling(wideLMUL / 2) + "_t " + next +
+             " = __riscv_vnsrl_wx_" + narrowSuffix + "(" + shift + ", 0, " + vl + ");");
+        shift = next;
+      }
+      auto byteOffsets = [&](const std::string &bytes) {
+        const std::string cohorts = "__riscv_vdivu_vx_" + indexSuffix + "(" + bytes + ", " + std::to_string(chunk) + ", " + vl + ")";
+        return indexOp("__riscv_vadd_vv_" + indexSuffix + "(" + bytes + ", __riscv_vmul_vx_" + indexSuffix + "(" + cohorts + ", " +
+            std::to_string(chunk * (owner.interleaveRows - 1)) + ", " + vl + "), " + vl + ")", "field_plane_offsets");
+      };
+      const std::string pointer = "(const uint8_t *)" + fieldStorageAddress(owner, *field, std::to_string(field->bitOffset / 8), std::to_string(row));
+      const std::string lowOffsets = byteOffsets(byte), low = fresh("field_low");
+      line(type + " " + low + " = __riscv_vluxei" + std::to_string(indexLayout.getSew()) + "_v_" + suffix + "(" + pointer + ", " + lowOffsets + ", " + vl + ");");
+      std::string assembled = "__riscv_vsrl_vv_" + suffix + "(" + low + ", " + shift + ", " + vl + ")";
+      if (8 % bits) {
+        const std::string crossing = fresh("field_crossing"), high = fresh("field_high");
+        line("vbool" + std::to_string(maskBits) + "_t " + crossing + " = __riscv_vmsgtu_vx_" + suffix + "_b" + std::to_string(maskBits) + "(" + shift + ", " + std::to_string(8-bits) + ", " + vl + ");");
+        const std::string nextByte = indexOp("__riscv_vadd_vx_" + indexSuffix + "(" + byte + ", 1, " + vl + ")", "field_next_byte");
+        const std::string highOffsets = byteOffsets(nextByte);
+        line(type + " " + high + " = __riscv_vluxei" + std::to_string(indexLayout.getSew()) + "_v_" + suffix + "_mu(" + crossing + ", " + name + ", " + pointer + ", " + highOffsets + ", " + vl + ");");
+        assembled = "__riscv_vor_vv_" + suffix + "(" + assembled + ", __riscv_vsll_vv_" + suffix + "(" + high + ", __riscv_vrsub_vx_" + suffix + "(" + shift + ", 8, " + vl + "), " + vl + "), " + vl + ")";
+      }
+      line(name + " = __riscv_vand_vx_" + suffix + "(" + assembled + ", " + std::to_string((1u << bits)-1) + ", " + vl + ");");
+      --indent; line("}");
+      if (integer.isSigned()) {
+        const std::string signedName = fresh("field_signed"), signedSuffix = vectorSuffix(output);
+        line(vectorType(output) + " " + signedName + " = __riscv_vsra_vx_" + signedSuffix + "(__riscv_vreinterpret_v_" + suffix + "_" + signedSuffix + "(__riscv_vsll_vx_" + suffix + "(" + name + ", " + std::to_string(8-bits) + ", " + vl + ")), " + std::to_string(8-bits) + ", " + vl + ");");
+        result.parts.push_back(signedName);
+      } else result.parts.push_back(name);
+    }
+    bindings[output] = std::move(result);
+    return mlir::success();
+  }
   if (operation.getLeaf().getInstruction() == "encoded.field-read.indexed-bytes") {
     auto field = fieldFor(input);
     Binding owner = bindings.lookup(input.field.owner);

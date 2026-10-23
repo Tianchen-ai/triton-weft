@@ -1094,6 +1094,89 @@ private:
       targetName = mlir::isa<kernel::PointerLoadOp>(source)
           ? riscv::PointerLoadOp::getOperationName() : riscv::PointerStoreOp::getOperationName();
     } else if (auto admit = mlir::dyn_cast<kernel::AdmitOp>(source)) {
+      mlir::Value projected = operands.front();
+      llvm::SmallVector<riscv::SubviewOp> windows;
+      while (auto window = projected.getDefiningOp<riscv::SubviewOp>()) {
+        windows.push_back(window);
+        projected = window.getBase();
+      }
+      auto field = projected.getDefiningOp<riscv::FieldOp>();
+      auto owner = field ? mlir::dyn_cast<riscv::MemDescType>(field.getOwner().getType())
+                         : riscv::MemDescType();
+      if (owner) {
+        // A field View retains its owner's packed storage; admitting it is a
+        // numeric field projection, never a byte-addressable dense i4/i6 load.
+        auto element = denseElementType(mlir::cast<kernel::EncodingType>(
+            mlir::cast<riscv::MemDescType>(projected.getType()).getEncoding()));
+        auto valueType = [&](mlir::Type element, mlir::DenseI64ArrayAttr shape,
+                             mlir::DenseI64ArrayAttr axes) {
+          return riscv::ValueType::get(builder.getContext(), element, shape, axes,
+              riscv_internal::unassignedLayout(builder, axes.asArrayRef()));
+        };
+        if (!element) return admit.emitError("field admission requires its declared numeric element type");
+        for (auto window : windows)
+          if (!window.getDynamicBounds().empty())
+            return admit.emitError("dynamic field subview admission is not implemented for RISC-V");
+        auto record = riscv::LoadOp::create(builder, source->getLoc(),
+            valueType(owner.getEncoding(), owner.getShape(), owner.getAxisIds()),
+            field.getOwner(), mlir::Value(), riscv_internal::unassignedAccess(builder),
+            riscv_internal::unselectedLeaf(builder));
+        auto fieldView = mlir::cast<riscv::MemDescType>(projected.getType());
+        mlir::Type numericType = fieldView.getShape().empty() ? element :
+            mlir::Type(valueType(element, fieldView.getShape(), fieldView.getAxisIds()));
+        auto numeric = riscv::FieldOp::create(builder, source->getLoc(), numericType,
+            record.getResult(), field.getName(), riscv_internal::unassignedAccess(builder),
+            riscv_internal::unselectedLeaf(builder));
+        riscv_internal::copyOrigin(source, record);
+        riscv_internal::copyOrigin(source, numeric);
+        mlir::Value value = numeric.getResult();
+        auto integer = mlir::dyn_cast<mlir::IntegerType>(element);
+        if (windows.empty() && owner.getInterleaveRows() > 1 && integer &&
+            integer.getWidth() < 8 && fieldView.getShape().size() == 2) {
+          const int64_t extent = fieldView.getShape()[1];
+          if (extent <= 0) return admit.emitError("packed field admission requires a bounded field extent");
+          auto axis = builder.getDenseI64ArrayAttr({fieldView.getAxisIds()[1]});
+          auto index = riscv::IotaOp::create(builder, source->getLoc(),
+              valueType(builder.getIntegerType(64, false), builder.getDenseI64ArrayAttr({extent}), axis),
+              0, extent, riscv_internal::unselectedLeaf(builder));
+          auto extract = riscv::ExtractOp::create(builder, source->getLoc(), numericType,
+              value, mlir::ValueRange{index.getResult()}, riscv_internal::strings(builder, {"all", "gather"}),
+              riscv_internal::unassignedAccess(builder), riscv_internal::unselectedLeaf(builder));
+          riscv_internal::copyOrigin(source, index);
+          riscv_internal::copyOrigin(source, extract);
+          value = extract.getResult();
+        }
+        for (auto window : llvm::reverse(windows)) {
+          auto type = mlir::cast<riscv::ValueType>(value.getType());
+          for (size_t axis = 0; axis < type.getShape().size(); ++axis) {
+            const int64_t offset = window.getOffsets()[axis], extent = window.getExtents()[axis];
+            if (offset == 0 && extent == type.getShape()[axis]) continue;
+            if (offset < 0 || extent <= 0 || type.getShape()[axis] <= 0 ||
+                offset > type.getShape()[axis] - extent)
+              return admit.emitError("field subview must be a bounded static projection");
+            auto axes = builder.getDenseI64ArrayAttr({type.getAxisIds()[axis]});
+            auto index = riscv::IotaOp::create(builder, source->getLoc(),
+                valueType(builder.getIntegerType(64, false), builder.getDenseI64ArrayAttr({extent}), axes),
+                offset, offset + extent, riscv_internal::unselectedLeaf(builder));
+            llvm::SmallVector<int64_t> shape(type.getShape().asArrayRef());
+            shape[axis] = extent;
+            llvm::SmallVector<mlir::Attribute> selectors(shape.size(), builder.getStringAttr("all"));
+            selectors[axis] = builder.getStringAttr("gather");
+            auto extract = riscv::ExtractOp::create(builder, source->getLoc(),
+                valueType(element, builder.getDenseI64ArrayAttr(shape), type.getAxisIds()), value,
+                mlir::ValueRange{index.getResult()}, builder.getArrayAttr(selectors),
+                riscv_internal::unassignedAccess(builder), riscv_internal::unselectedLeaf(builder));
+            riscv_internal::copyOrigin(source, index);
+            riscv_internal::copyOrigin(source, extract);
+            value = extract.getResult();
+            type = mlir::cast<riscv::ValueType>(value.getType());
+          }
+        }
+        if (value.getType() != results.front())
+          return admit.emitError("field admission changed its numeric shape or axes");
+        mapping.map(source->getResult(0), value);
+        return mlir::success();
+      }
       addAccess(attrs);
       addLeaf(attrs);
       targetName = riscv::LoadOp::getOperationName();

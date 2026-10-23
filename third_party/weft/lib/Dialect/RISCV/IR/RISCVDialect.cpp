@@ -5232,6 +5232,40 @@ bool weft::riscv::isContiguousInterleavedScalarRead(
 }
 
 namespace {
+bool isInterleavedIndexedBitRead(mlir::Value input, ValueType result, AccessAttr access) {
+  auto extract = input.getDefiningOp<ExtractOp>();
+  auto field = fieldReadProjection(input);
+  auto load = field ? field.getOwner().getDefiningOp<LoadOp>() : LoadOp();
+  auto memory = load ? load.getRegion().getType() : MemDescType();
+  auto integer = result ? mlir::dyn_cast<mlir::IntegerType>(result.getElementType()) : mlir::IntegerType();
+  if (!extract || !memory || memory.getInterleaveRows() <= 1 || !integer ||
+      integer.isSignless() || integer.getWidth() >= 8 || !access ||
+      access.getForm() != "indexed" || access.getMapping() != "natural" ||
+      access.getFieldChunkBytes() <= 0 || access.getBitOffset() % 8 ||
+      extract.getIndices().size() != 1 || result.getShape().size() != 2 ||
+      result.getLayout().getCarrier() != "rvv" || result.getLayout().getSew() != 8 ||
+      result.getLayout().getLaneFactors()[0] != 1 ||
+      result.getAxisIds()[0] != memory.getAxisIds()[0] ||
+      extract.getSelectors().size() != 2 ||
+      mlir::cast<mlir::StringAttr>(extract.getSelectors()[0]).getValue() != "all" ||
+      mlir::cast<mlir::StringAttr>(extract.getSelectors()[1]).getValue() != "gather") return false;
+  auto index = mlir::dyn_cast<ValueType>(extract.getIndices()[0].getType());
+  auto indexInteger = index ? mlir::dyn_cast<mlir::IntegerType>(index.getElementType()) : mlir::IntegerType();
+  auto encoding = mlir::cast<weft::kernel::EncodingType>(memory.getEncoding());
+  auto declaration = findEncodingDeclaration(field, baseEncodingFamily(field, encoding));
+  return declaration && declaration.getByteOrder() == "little" && declaration.getBitOrder() == "lsb_first" &&
+      indexInteger && indexInteger.isUnsigned() && indexInteger.getWidth() <= 64 &&
+      index.getLayout().getSew() == indexInteger.getWidth() &&
+      index.getLayout().getLmulEighths() * 8 ==
+          result.getLayout().getLmulEighths() * index.getLayout().getSew() &&
+      static_cast<__int128>(access.getStorageBits()) * memory.getInterleaveRows() <
+          (static_cast<__int128>(1) << indexInteger.getWidth()) &&
+      index.getLayout().getCarrier() == "rvv" &&
+      index.getAxisIds().size() == 1 && index.getAxisIds()[0] == result.getAxisIds()[1] &&
+      index.getLayout().getLaneFactors()[0] == result.getLayout().getLaneFactors()[1] &&
+      encodedFieldRawLMULEighths(result).has_value();
+}
+
 bool isInterleavedIndexedByteRead(mlir::Value input, ValueType result, AccessAttr access) {
   auto extract = input.getDefiningOp<ExtractOp>();
   auto field = fieldReadProjection(input);
@@ -5358,6 +5392,7 @@ llvm::StringRef weft::riscv::fieldReadInstruction(
     if (declaration && declaration.getByteOrder() == "little")
       return "encoded.field-read.scalar-bytes";
   }
+  if (isInterleavedIndexedBitRead(input, result, access)) return "encoded.field-read.indexed-bits";
   if (isInterleavedIndexedByteRead(input, result, access)) return "encoded.field-read.indexed-bytes";
   if (isRecordGatherRead(input, result, access))
     return access.getMapping() == "joined" ? "encoded.field-read.record-gather-joined"
@@ -5391,7 +5426,9 @@ std::optional<int64_t> weft::riscv::fieldReadTemporaryGroups(
       indexGroups = std::max(indexGroups, (value.getLayout().getLmulEighths() + 7) / 8);
     }
   int64_t localPeak = 0;
-  if (isInterleavedIndexedByteRead(input, result, access)) {
+  if (isInterleavedIndexedBitRead(input, result, access)) {
+    localPeak = 4 * indexGroups + 5 * valueGroups + 1;
+  } else if (isInterleavedIndexedByteRead(input, result, access)) {
     localPeak = indexGroups + 3 * valueGroups;
   } else if (access.getMapping() == "joined") {
     // Head/low/high may coexist for record-strided joined storage; each
@@ -8029,7 +8066,17 @@ mlir::LogicalResult RVVRegularRepeatScalarLoadOp::verify() {
   const size_t resultPosition = static_cast<size_t>(
       resultAxis - result.getAxisIds().asArrayRef().begin());
   const int64_t lanes = result.getLayout().getLaneFactors()[resultPosition];
-  const bool flatWindow = natural && getRepeat() == 1 &&
+  auto recordPositions = regularRepeatRecordPositions(
+      field, result, getSourceAxis(), getReductionAxis());
+  const bool recordWindow = recordPositions && !recordPositions->empty();
+  if (recordWindow) {
+    auto load = sourceLoad(sourceField.getOwner());
+    auto memory = load ? load.getRegion().getType() : MemDescType();
+    if (!memory || memory.getInterleaveRows() != 0 ||
+        memory.getShape().size() != recordPositions->size() + 1)
+      return emitOpError("record scalar supply requires non-interleaved record axes and one field axis");
+  }
+  const bool flatWindow = !recordWindow && natural && getRepeat() == 1 &&
       result.getShape().size() > 1;
   if (getSourceCount() >
       std::numeric_limits<int64_t>::max() / getRepeat())
@@ -8038,6 +8085,8 @@ mlir::LogicalResult RVVRegularRepeatScalarLoadOp::verify() {
     const bool validExtent =
         flatWindow ? result.getShape()[position] > 0 : position == resultPosition
             ? result.getShape()[position] == getSourceCount() * getRepeat()
+            : recordWindow && llvm::is_contained(*recordPositions, position)
+            ? result.getShape()[position] > 0
             : result.getShape()[position] <= 0 ||
                   result.getShape()[position] == 1;
     if (!validExtent)
@@ -8067,6 +8116,16 @@ mlir::LogicalResult RVVRegularRepeatScalarLoadOp::verify() {
       for (auto [coordinate, size] : llvm::zip(*logical, result.getShape().asArrayRef()))
         offset = offset * size + coordinate;
       expectedPartBases.push_back(offset);
+    }
+  } else if (recordWindow) {
+    auto coordinates = RegisterCoordinates::get(result.getLayout());
+    if (!coordinates || coordinates->lanes() != 1 ||
+        !llvm::equal(coordinates->extents(), result.getShape().asArrayRef()))
+      return emitOpError("record scalar supply requires one scalar per logical coordinate");
+    for (int64_t part = 0; part < coordinates->parts(); ++part) {
+      auto logical = coordinates->logical(part);
+      if (!logical) return emitOpError("record scalar supply has no part coordinate");
+      expectedPartBases.push_back((*logical)[resultPosition] / getRepeat());
     }
   } else if (sourceReplicas == 1 && *replicas == 1 &&
       *timeParts == sourceTime && lanes > 0 &&

@@ -8,6 +8,30 @@
 
 using namespace weft::riscv;
 
+std::optional<llvm::SmallVector<unsigned>>
+weft::riscv::regularRepeatRecordPositions(ValueType field, ValueType result,
+                                        int64_t sourceAxis, int64_t reductionAxis) {
+  if (!field || !result || field.getShape().empty() ||
+      field.getAxisIds().asArrayRef().back() != sourceAxis ||
+      !llvm::is_contained(result.getAxisIds().asArrayRef(), reductionAxis))
+    return std::nullopt;
+  llvm::SmallVector<unsigned> positions;
+  for (size_t i = 0; i + 1 < field.getShape().size(); ++i) {
+    auto found = llvm::find(result.getAxisIds().asArrayRef(), field.getAxisIds()[i]);
+    if (found == result.getAxisIds().asArrayRef().end() || *found == reductionAxis)
+      return std::nullopt;
+    const unsigned position = found - result.getAxisIds().asArrayRef().begin();
+    if (result.getShape()[position] != field.getShape()[i])
+      return std::nullopt;
+    positions.push_back(position);
+  }
+  for (size_t i = 0; i < result.getShape().size(); ++i)
+    if (result.getAxisIds()[i] != reductionAxis && result.getShape()[i] != 1 &&
+        !llvm::is_contained(positions, i))
+      return std::nullopt;
+  return positions;
+}
+
 std::optional<llvm::SmallVector<int64_t>> weft::riscv::rvvRegularGatherIndices(
     ValueType input, ValueType result, llvm::ArrayRef<int64_t> pattern) {
   if (!input || !result || pattern.size() != 3 || pattern[0] < 0 ||

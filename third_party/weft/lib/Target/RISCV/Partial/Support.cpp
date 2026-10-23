@@ -1,4 +1,5 @@
 #include "Support.h"
+#include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "../LocalMemory.h"
 
 namespace weft::riscv_partial {
@@ -2713,6 +2714,53 @@ riscv::ValueType scalarReplicaType(mlir::Builder &builder,
                                source.getAxisIds(), layout);
 }
 
+bool scalarRepeatProjectionIsClosed(riscv::RVVRegularRepeatGatherOp gather) {
+  if (gather.getResults().size() != 1 || gather.getIndices().size() != 1 ||
+      gather.getSourceCount() <= 0 || gather.getRepeat() <= 0 ||
+      gather.getSourceCount() > std::numeric_limits<int64_t>::max() / gather.getRepeat())
+    return false;
+  auto bases = gather.getPartBases().size() == 1
+      ? mlir::dyn_cast<mlir::DenseI64ArrayAttr>(gather.getPartBases()[0])
+      : mlir::DenseI64ArrayAttr();
+  if (!bases || bases.size() != 1 || bases[0] != 0) return false;
+  auto element = mlir::dyn_cast<mlir::IntegerType>(gather.getField().getType().getElementType());
+  auto access = gather.getAccess();
+  if (!element || element.isSignless() ||
+      !((access.getMapping() == "natural" && access.getForm() == "unit" &&
+         (element.getWidth() == 8 || element.getWidth() == 16 || element.getWidth() == 32)) ||
+        (access.getMapping() == "joined" && access.getForm() == "indexed" &&
+         element.isUnsigned() && element.getWidth() <= 8)))
+    return false;
+  auto type = mlir::cast<riscv::ValueType>(gather.getResults().front().getType());
+  auto recordPositions = riscv::regularRepeatRecordPositions(
+      gather.getField().getType(), type, gather.getSourceAxis(), gather.getReductionAxis());
+  if (recordPositions && !recordPositions->empty()) {
+    auto field = gather.getField().getDefiningOp<riscv::FieldOp>();
+    auto load = field ? field.getOwner().getDefiningOp<riscv::LoadOp>() : riscv::LoadOp();
+    if (!load || load.getRegion().getType().getInterleaveRows() != 0 ||
+        riscv_internal::fieldFacts(field).logicalRank != 1)
+      return false;
+  }
+  const int64_t count = gather.getSourceCount() * gather.getRepeat();
+  bool sourceAxis = false;
+  int64_t replicas = 1;
+  for (size_t position = 0; position < type.getShape().size(); ++position) {
+    const int64_t axis = type.getAxisIds()[position], extent = type.getShape()[position];
+    const int64_t scalarExtent = extent > 0 ? extent : type.getLayout().getReplicaFactors()[position];
+    if (scalarExtent <= 0 || replicas > std::numeric_limits<int64_t>::max() / scalarExtent)
+      return false;
+    replicas *= scalarExtent;
+    if (axis == gather.getReductionAxis()) {
+      if (extent != count) return false;
+      sourceAxis = true;
+    } else if (scalarExtent > 1 &&
+               (!recordPositions || !llvm::is_contained(*recordPositions, position))) {
+      return false;
+    }
+  }
+  return sourceAxis && replicas % count == 0;
+}
+
 mlir::FailureOr<mlir::Value> rematerializeScalarReplicas(
     mlir::Value value, mlir::IRRewriter &rewriter,
     llvm::DenseMap<mlir::Value, mlir::Value> &memo) {
@@ -2748,6 +2796,7 @@ mlir::FailureOr<mlir::Value> rematerializeScalarReplicas(
   mlir::Operation *producer = value.getDefiningOp();
   if (auto gather =
           mlir::dyn_cast_or_null<riscv::RVVRegularRepeatGatherOp>(producer)) {
+    if (!scalarRepeatProjectionIsClosed(gather)) return mlir::failure();
     auto targetType = scalarReplicaType(rewriter, sourceType);
     auto replicas =
         targetType
@@ -2760,12 +2809,21 @@ mlir::FailureOr<mlir::Value> rematerializeScalarReplicas(
                      : mlir::DenseI64ArrayAttr();
     if (!targetType || !replicas || gather.getResults().size() != 1 ||
         gather.getIndices().size() != 1 || !bases || bases.size() != 1 ||
-        bases[0] != 0 || *replicas != gather.getSourceCount() * gather.getRepeat())
+        bases[0] != 0)
       return mlir::failure();
+    auto coordinates = riscv::RegisterCoordinates::get(targetType.getLayout());
+    auto reduction = llvm::find(targetType.getAxisIds().asArrayRef(), gather.getReductionAxis());
+    if (!coordinates || coordinates->lanes() != 1 ||
+        coordinates->parts() != *replicas ||
+        reduction == targetType.getAxisIds().asArrayRef().end()) return mlir::failure();
+    const size_t reductionPosition = reduction - targetType.getAxisIds().asArrayRef().begin();
     llvm::SmallVector<int64_t> partBases;
     partBases.reserve(*replicas);
-    for (int64_t replica = 0; replica < *replicas; ++replica)
-      partBases.push_back(replica / gather.getRepeat());
+    for (int64_t replica = 0; replica < *replicas; ++replica) {
+      auto point = coordinates->logical(replica);
+      if (!point) return mlir::failure();
+      partBases.push_back((*point)[reductionPosition] / gather.getRepeat());
+    }
     auto scalarLoad = riscv::RVVRegularRepeatScalarLoadOp::create(rewriter,
         gather.getLoc(), targetType, gather.getField(), gather.getSourceAxis(),
         gather.getReductionAxis(), gather.getSourceBase(),
@@ -2834,12 +2892,7 @@ bool supportsScalarReplicaRematerialization(
            supportsScalarReplicaRematerialization(conversion.getInput(),
                                                   visited);
   if (auto gather = mlir::dyn_cast<riscv::RVVRegularRepeatGatherOp>(producer)) {
-    auto bases = gather.getPartBases().size() == 1
-                     ? mlir::dyn_cast<mlir::DenseI64ArrayAttr>(
-                           gather.getPartBases()[0])
-                     : mlir::DenseI64ArrayAttr();
-    return gather.getResults().size() == 1 && gather.getIndices().size() == 1 &&
-           bases && bases.size() == 1 && bases[0] == 0;
+    return scalarRepeatProjectionIsClosed(gather);
   }
   if (!mlir::isa<riscv::IotaOp, riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp,
                  riscv::CastOp, riscv::NarrowOp, riscv::WidenOp>(producer) ||

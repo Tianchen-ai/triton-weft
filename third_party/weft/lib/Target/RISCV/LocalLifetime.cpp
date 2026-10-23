@@ -20,6 +20,10 @@ public:
   llvm::DenseSet<std::pair<Value, Value>> visitingDerived;
   llvm::DenseSet<std::pair<Value, Operation *>> visitingUses;
   llvm::DenseSet<std::pair<Value, Operation *>> visitingVersions;
+  llvm::DenseSet<Value> provenPrivate;
+  llvm::DenseSet<std::pair<Value, Value>> provenDerived;
+  llvm::DenseSet<std::pair<Value, Operation *>> provenUses;
+  llvm::DenseSet<std::pair<Value, Operation *>> provenVersions;
 
   bool step(Operation *operation) {
     if (!remaining) return reject(operation);
@@ -29,31 +33,39 @@ public:
   bool reject(Operation *operation) { unproven = operation; return false; }
 
   bool privateState(Value value) {
+    if (provenPrivate.contains(value)) return true;
     if (!step(value.getDefiningOp()) || !visitingPrivate.insert(value).second) return false;
     bool result = privateDefinition(value);
     visitingPrivate.erase(value);
+    if (result) provenPrivate.insert(value);
     return result;
   }
 
   bool derivedState(Value value, Value carried) {
     if (value == carried) return true;
+    if (provenDerived.contains({value, carried})) return true;
     if (!step(value.getDefiningOp()) || !visitingDerived.insert({value, carried}).second) return false;
     bool result = derivedDefinition(value, carried);
     visitingDerived.erase({value, carried});
+    if (result) provenDerived.insert({value, carried});
     return result;
   }
 
   bool usesBefore(Value value, Operation *write, DominanceInfo &dominance) {
+    if (provenUses.contains({value, write})) return true;
     if (!step(write) || !visitingUses.insert({value, write}).second) return reject(write);
     bool result = inspectUses(value, write, dominance);
     visitingUses.erase({value, write});
+    if (result) provenUses.insert({value, write});
     return result;
   }
 
   bool versionBefore(Value value, Operation *write, DominanceInfo &dominance) {
+    if (provenVersions.contains({value, write})) return true;
     if (!step(write) || !visitingVersions.insert({value, write}).second) return reject(write);
     bool result = usesBefore(value, write, dominance) && transferBefore(value, write, dominance);
     visitingVersions.erase({value, write});
+    if (result) provenVersions.insert({value, write});
     return result;
   }
 

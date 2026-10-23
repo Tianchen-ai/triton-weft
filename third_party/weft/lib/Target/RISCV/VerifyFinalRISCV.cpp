@@ -655,6 +655,23 @@ public:
         }
       }
       if (auto extract = mlir::dyn_cast<riscv::ExtractOp>(operation)) {
+        if (auto field = riscv::fieldReadProjection(extract.getInput())) {
+          auto fieldType = mlir::dyn_cast<riscv::ValueType>(field.getResult().getType());
+          auto facts = riscv_internal::fieldFacts(field);
+          if (fieldType && facts.logicalRank >= 0 &&
+              facts.logicalRank <= static_cast<int64_t>(fieldType.getShape().size())) {
+            auto recordAxes = fieldType.getAxisIds().asArrayRef().drop_back(facts.logicalRank);
+            for (auto [axis, selector] : llvm::zip(extract.getInput().getType().getAxisIds().asArrayRef(),
+                                                 extract.getSelectors())) {
+              if (llvm::is_contained(recordAxes, axis) &&
+                  mlir::cast<mlir::StringAttr>(selector).getValue() == "index") {
+                extract.emitError("encoded scalar record coordinates must be projected into the storage descriptor before final emission");
+                failed = true;
+                return;
+              }
+            }
+          }
+        }
         auto access = extract.getAccess();
         auto leaf = extract.getLeaf();
         const bool local = access && access.getForm() == "local";

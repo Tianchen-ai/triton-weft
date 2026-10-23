@@ -2866,6 +2866,80 @@ public:
   }
 };
 
+void projectScalarRecordFields(mlir::ModuleOp module,
+                               mlir::IRRewriter &rewriter) {
+  llvm::SmallVector<riscv::ExtractOp> extracts;
+  module.walk([&](riscv::ExtractOp op) { extracts.push_back(op); });
+  for (auto extract : extracts) {
+    if (mlir::isa<riscv::ValueType>(extract.getResult().getType()))
+      continue;
+    auto field = extract.getInput().getDefiningOp<riscv::FieldOp>();
+    auto load = field ? field.getOwner().getDefiningOp<riscv::LoadOp>() : riscv::LoadOp();
+    auto owner = load ? mlir::dyn_cast<riscv::ValueType>(load.getResult().getType()) : riscv::ValueType();
+    auto facts = field ? riscv_internal::fieldFacts(field) : riscv_internal::FieldFacts();
+    if (!load || !owner || load.getSnapshotStorage() || facts.logicalRank < 0 ||
+        !mlir::isa<kernel::EncodingType>(owner.getElementType()))
+      continue;
+    auto fieldType = extract.getInput().getType();
+    const int64_t rank = fieldType.getShape().size() - facts.logicalRank;
+    auto memory = load.getRegion().getType();
+    if (rank <= 0 || memory.getInterleaveRows() != 0 ||
+        memory.getShape().size() != static_cast<size_t>(rank + 1) ||
+        owner.getShape().size() != memory.getShape().size() ||
+        extract.getSelectors().size() != fieldType.getShape().size() ||
+        extract.getIndices().size() < static_cast<size_t>(rank) ||
+        riscv::readCrossesWrite(load, extract))
+      continue;
+    bool scalarRecords = true;
+    for (int64_t i = 0; i < rank; ++i)
+      scalarRecords &= mlir::cast<mlir::StringAttr>(extract.getSelectors()[i]).getValue() == "index" &&
+                       !mlir::isa<riscv::ValueType>(extract.getIndices()[i].getType());
+    if (!scalarRecords)
+      continue;
+    auto drop = [&](mlir::DenseI64ArrayAttr values) {
+      return rewriter.getDenseI64ArrayAttr(values.asArrayRef().drop_front(rank));
+    };
+    auto project = [&](riscv::ValueType value) {
+      auto layout = value.getLayout();
+      auto axes = drop(value.getAxisIds());
+      auto projected = riscv::LayoutAttr::get(rewriter.getContext(), layout.getCarrier(), axes,
+          drop(layout.getTimeFactors()), drop(layout.getLaneFactors()),
+          drop(layout.getReplicaFactors()), drop(layout.getFragmentFactors()),
+          drop(layout.getLocalFactors()), layout.getSew(), layout.getLmulEighths(),
+          layout.getVl(), layout.getRegisterGroups(), layout.getValidity(), layout.getReplicaGroup());
+      return riscv::ValueType::get(rewriter.getContext(), value.getElementType(),
+                                  drop(value.getShape()), axes, projected);
+    };
+    rewriter.setInsertionPoint(extract);
+    const int64_t alignment = std::gcd(memory.getAlignment(), memory.getStorageBits() / 8);
+    auto descriptor = riscv::MemDescType::get(rewriter.getContext(), memory.getEncoding(),
+        drop(memory.getShape()), drop(memory.getAxisIds()), drop(memory.getStrides()),
+        drop(memory.getOrigins()), alignment, "slice", memory.getAccess(),
+        memory.getAliasSet(), memory.getLayoutIdentity(), memory.getStorageBits(), memory.getElements(), 0);
+    llvm::SmallVector<mlir::Attribute> selectors(rank, rewriter.getStringAttr("index"));
+    selectors.push_back(rewriter.getStringAttr("all"));
+    auto region = riscv::SliceOp::create(rewriter, extract.getLoc(), descriptor,
+        load.getRegion(), extract.getIndices().take_front(rank), rewriter.getArrayAttr(selectors));
+    auto record = riscv::LoadOp::create(rewriter, extract.getLoc(), project(owner),
+        region, mlir::Value(), load.getAccess(), riscv_internal::unselectedLeaf(rewriter));
+    const bool scalarField = facts.logicalRank == 0;
+    mlir::Type projectedFieldType = scalarField ? fieldType.getElementType() : mlir::Type(project(fieldType));
+    auto projectedField = riscv::FieldOp::create(rewriter, extract.getLoc(), projectedFieldType,
+        record.getResult(), field.getName(), field.getAccess(), field.getLeaf());
+    riscv_internal::copyOrigin(extract, region);
+    riscv_internal::copyOrigin(extract, record);
+    riscv_internal::copyOrigin(extract, projectedField);
+    if (scalarField) {
+      rewriter.replaceOp(extract, projectedField.getResult());
+    } else {
+      extract.getInputMutable().assign(projectedField.getResult());
+      llvm::SmallVector<mlir::Value> indices(extract.getIndices().drop_front(rank));
+      extract.getIndicesMutable().assign(indices);
+      extract.setSelectorsAttr(rewriter.getArrayAttr(extract.getSelectors().getValue().drop_front(rank)));
+    }
+  }
+}
+
 void selectScalarEntrySupplies(mlir::ModuleOp module,
                               mlir::IRRewriter &rewriter) {
   llvm::SmallVector<riscv::ConvertLayoutOp> conversions;
@@ -3186,6 +3260,7 @@ public:
     mlir::Builder builder(&getContext());
     mlir::IRRewriter rewriter(&getContext());
     bool failed = false;
+    projectScalarRecordFields(getOperation(), rewriter);
     llvm::SmallVector<riscv::LoadOp> deadTableLoads;
     llvm::SmallVector<riscv::MaterializeOp> deadTableMaterializations;
     llvm::DenseMap<mlir::Value, mlir::Value> tableSnapshots;

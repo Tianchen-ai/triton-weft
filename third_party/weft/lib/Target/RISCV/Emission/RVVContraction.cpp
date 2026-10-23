@@ -553,13 +553,25 @@ mlir::LogicalResult Emitter::compileRVVRegularRepeatGather(
                 "regular-repeat gather requires one selected scalar source base");
   llvm::SmallVector<std::string> sourceWindows;
   llvm::SmallVector<std::string> sourceRecords;
+  llvm::SmallVector<std::string> sourceActive;
+  auto guardedRead = [&](llvm::StringRef resultType, llvm::StringRef resultSuffix,
+                         const std::string &name, const std::string &expression,
+                         const std::string &vl, const std::string &active) {
+    if (active == "1") {
+      line(resultType.str() + " " + name + " = " + expression + ";");
+    } else {
+      line(resultType.str() + " " + name + " = __riscv_vmv_v_x_" +
+           resultSuffix.str() + "(0, " + vl + ");");
+      line("if (" + active + ") " + name + " = " + expression + ";");
+    }
+  };
   llvm::SmallVector<int64_t, 4> axes = registerAxesFor(firstValue);
   for (int64_t replica = 0; replica < registerParts; ++replica) {
     auto coordinates = registerCoordinates(firstValue, replica);
     if (!coordinates || coordinates->size() != axes.size())
       return fail(operation,
                   "regular-repeat gather has no free-axis register coordinates");
-    std::string record = "(" + owner.recordPointer;
+    std::string record = "(" + owner.recordPointer, active = "1";
     for (auto [axis, coordinate] : llvm::zip(axes, *coordinates)) {
       auto byteStride = llvm::find_if(owner.recordByteStrides,
                                       [&](const auto &entry) {
@@ -570,17 +582,23 @@ mlir::LogicalResult Emitter::compileRVVRegularRepeatGather(
                     "regular-repeat gather free axis has no record stride");
       record += " + " + std::to_string(coordinate) + " * " +
                 byteStride->second;
+      auto scope = axisScopes.find(axis);
+      if (scope != axisScopes.end() && !scope->second.empty())
+        active += " && " + std::to_string(coordinate) + " < (" +
+                  scope->second.back().active + ")";
     }
     record += ")";
     sourceRecords.push_back(record);
+    sourceActive.push_back(active);
     if (joinedUnit) {
       std::string raw = fresh("joined_unit_bytes");
-      line(type + " " + raw + " = __riscv_vle8_v_" + suffix +
+      guardedRead(type, suffix, raw, "__riscv_vle8_v_" + suffix +
            "((const uint8_t *)(" + record + ") + " +
            std::to_string(storage->bitOffset / 8 +
                           operation.getAccess().getJoinRole() *
                               operation.getAccess().getGroupSize()) +
-           ", " + std::to_string(operation.getSourceCount()) + ");");
+           ", " + std::to_string(operation.getSourceCount()) + ")",
+           std::to_string(operation.getSourceCount()), active);
       sourceWindows.push_back(std::move(raw));
       continue;
     }
@@ -594,9 +612,10 @@ mlir::LogicalResult Emitter::compileRVVRegularRepeatGather(
         ") + " + std::to_string(storage->bitOffset / 8) + ") + " +
         sourceBase->scalar + ")";
     std::string loaded = fresh("repeat_source");
-    line(type + " " + loaded + " = __riscv_vle" +
+    guardedRead(type, suffix, loaded, "__riscv_vle" +
          std::to_string(integer.getWidth()) + "_v_" + suffix + "(" + pointer +
-         ", " + std::to_string(operation.getSourceCount()) + ");");
+         ", " + std::to_string(operation.getSourceCount()) + ")",
+         std::to_string(operation.getSourceCount()), active);
     sourceWindows.push_back(std::move(loaded));
   }
 
@@ -640,10 +659,10 @@ mlir::LogicalResult Emitter::compileRVVRegularRepeatGather(
                       "regular-repeat broadcast has no closed scalar storage spelling");
         std::string gathered = fresh("regular_broadcast");
         const bool floating = mlir::isa<mlir::FloatType>(storage->type);
-        line(vectorType(resultValue) + " " + gathered + " = __riscv_" +
+        guardedRead(vectorType(resultValue), vectorSuffix(resultValue), gathered, "__riscv_" +
              std::string(floating ? "vfmv_v_f_" : "vmv_v_x_") +
              vectorSuffix(resultValue) + "(" + *scalarValue + ", " +
-             partVL(resultValue, part) + ");");
+             partVL(resultValue, part) + ")", partVL(resultValue, part), sourceActive[replica]);
         result.parts.push_back(std::move(gathered));
         continue;
       }
@@ -729,12 +748,12 @@ mlir::LogicalResult Emitter::compileRVVRegularRepeatGather(
         } else {
           const std::string roleOffsets = addByteOffset(role * group, "joined_role_offsets");
           const std::string lowOffsets = addByteOffset(fields * group, "joined_low_offsets");
-          line(resultType + " " + roleBytes + " = __riscv_vluxei" +
+          guardedRead(resultType, resultSuffix, roleBytes, "__riscv_vluxei" +
                std::to_string(indexLayout.getSew()) + "_v_" + resultSuffix +
-               "(" + pointer + ", " + roleOffsets + ", " + vl + ");");
-          line(resultType + " " + lowBytes + " = __riscv_vluxei" +
+               "(" + pointer + ", " + roleOffsets + ", " + vl + ")", vl, sourceActive[replica]);
+          guardedRead(resultType, resultSuffix, lowBytes, "__riscv_vluxei" +
                std::to_string(indexLayout.getSew()) + "_v_" + resultSuffix +
-               "(" + pointer + ", " + lowOffsets + ", " + vl + ");");
+               "(" + pointer + ", " + lowOffsets + ", " + vl + ")", vl, sourceActive[replica]);
         }
         const std::string head =
             "__riscv_vand_vx_" + resultSuffix + "(" + roleBytes + ", " +
@@ -817,6 +836,63 @@ mlir::LogicalResult Emitter::compileRVVRegularRepeatScalarLoad(
       partBases.size() != static_cast<size_t>(scalarParts))
     return fail(operation,
                 "regular-repeat scalar load has incomplete typed storage geometry");
+
+  auto recordPositions = riscv::regularRepeatRecordPositions(
+      operation.getField().getType(), operation.getResult().getType(),
+      operation.getSourceAxis(), operation.getReductionAxis());
+  if (recordPositions && !recordPositions->empty()) {
+    auto coordinates = riscv::RegisterCoordinates::get(operation.getResult().getType().getLayout());
+    if (!coordinates || owner.interleaveRows != 0)
+      return fail(operation, "record scalar supply has no selected scalar coordinates");
+    llvm::SmallVector<std::pair<llvm::SmallVector<int64_t>, std::string>> loaded;
+    Binding result;
+    result.kind = Binding::Kind::ScalarTuple;
+    for (int64_t part = 0; part < scalarParts; ++part) {
+      auto point = coordinates->logical(part);
+      if (!point) return fail(operation, "record scalar supply has no logical part");
+      Binding record = owner;
+      llvm::SmallVector<int64_t> key;
+      std::string active = "1", address = "(" + owner.recordPointer;
+      for (auto [fieldPosition, resultPosition] : llvm::enumerate(*recordPositions)) {
+        const int64_t coordinate = (*point)[resultPosition];
+        const int64_t axis = operation.getField().getType().getAxisIds()[fieldPosition];
+        key.push_back(coordinate);
+        auto stride = llvm::find_if(owner.recordByteStrides, [&](const auto &entry) {
+          return entry.first == axis;
+        });
+        if (stride == owner.recordByteStrides.end())
+          return fail(operation, "record scalar supply lost its explicit byte stride");
+        address += " + " + std::to_string(coordinate) + " * " + stride->second;
+        auto scope = axisScopes.find(axis);
+        if (scope != axisScopes.end() && !scope->second.empty())
+          active += " && " + std::to_string(coordinate) + " < (" +
+                    scope->second.back().active + ")";
+      }
+      key.push_back(partBases[part]);
+      auto previous = llvm::find_if(loaded, [&](const auto &entry) { return entry.first == key; });
+      if (previous != loaded.end()) {
+        result.parts.push_back(previous->second);
+        continue;
+      }
+      record.recordPointer = address + ")";
+      const std::string sourceIndex = "(" + sourceBase->scalar + " + " +
+                                      std::to_string(partBases[part]) + ")";
+      auto expression = scalarFieldValue(record, *storage, sourceIndex);
+      if (!expression) return fail(operation, "record scalar supply has no closed field spelling");
+      std::string name = fresh("repeat_record_scalar");
+      line(*elementType + " " + name + " = 0;");
+      line("if (" + active + ") " + name + " = " + *expression + ";");
+      loaded.emplace_back(std::move(key), name);
+      result.parts.push_back(std::move(name));
+    }
+    if (scalarParts == 1) {
+      result.kind = Binding::Kind::Scalar;
+      result.scalar = result.parts.front();
+      result.parts.clear();
+    }
+    bindings[operation.getResult()] = std::move(result);
+    return mlir::success();
+  }
 
   llvm::SmallVector<std::string> sources;
   sources.reserve(sourceCount);

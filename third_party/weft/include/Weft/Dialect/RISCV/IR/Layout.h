@@ -46,6 +46,11 @@ std::optional<int64_t> projectCarrierPart(ValueType source, ValueType result,
 // exactly the input axes left after reduction, with one physical scalar part.
 bool isScalarReductionResult(ValueType input, mlir::Type result, int64_t axis);
 
+// Preserve each record axis while replacing the final field axis by a regular
+// repeat axis. The returned positions locate record coordinates in the result.
+std::optional<llvm::SmallVector<unsigned>> regularRepeatRecordPositions(
+    ValueType field, ValueType result, int64_t sourceAxis, int64_t reductionAxis);
+
 struct RVVLayoutSlice {
   int64_t sourcePart;
   int64_t sourceOffset;

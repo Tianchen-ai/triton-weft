@@ -1302,6 +1302,35 @@ mlir::LogicalResult Emitter::compileRVVReplicaStorageLoad(
     record += ")";
     return record;
   };
+  // A storage window may feed several decoded parts. Its address belongs to
+  // the explicit source record, including record axes removed by an extract.
+  // Result-part activity alone cannot recover those selected coordinates.
+  auto recordActive = [&](size_t window) {
+    std::string active = "1";
+    for (int64_t position = 0; position < recordRank; ++position) {
+      const int64_t axis = operation.getField().getType().getAxisIds()[position];
+      auto scope = axisScopes.find(axis);
+      if (scope == axisScopes.end() || scope->second.empty())
+        continue;
+      const int64_t coordinate = operation.getRecordCoordinatesForWindow()[
+          window * static_cast<size_t>(recordRank) + position];
+      active += " && " + std::to_string(coordinate) + " < (" +
+                scope->second.back().active + ")";
+    }
+    return active;
+  };
+  auto guardedLoad = [&](size_t window, llvm::StringRef type,
+                         llvm::StringRef suffix, const std::string &name,
+                         const std::string &expression) {
+    const std::string active = recordActive(window);
+    if (active == "1") {
+      line(type.str() + " " + name + " = " + expression + ";");
+      return;
+    }
+    line(type.str() + " " + name + " = __riscv_vmv_v_x_" +
+         suffix.str() + "(0, " + vl + ");");
+    line("if (" + active + ") " + name + " = " + expression + ";");
+  };
   llvm::SmallVector<std::string> windows;
   windows.reserve(operation.getWindowOffsets().size());
   if (interleaved) {
@@ -1320,12 +1349,20 @@ mlir::LogicalResult Emitter::compileRVVReplicaStorageLoad(
                   "interleaved replica storage load has an illegal raw-byte LMUL");
     const std::string rawSuffix = "u8" + rawLMULName;
     const std::string rawType = "vuint8" + rawLMULName + "_t";
-    auto byteLoad = [&](llvm::StringRef record, const std::string &byte,
+    auto byteLoad = [&](size_t window, llvm::StringRef record, const std::string &byte,
                         llvm::StringRef stem) {
       std::string loaded = fresh(stem);
-      line(rawType + " " + loaded + " = __riscv_vle8_v_" + rawSuffix +
+      std::string activeVL = vl;
+      auto scope = axisScopes.find(operation.getField().getType().getAxisIds()[0]);
+      if (scope != axisScopes.end() && !scope->second.empty()) {
+        const int64_t coordinate = operation.getRecordCoordinatesForWindow()[window];
+        const std::string remaining = "(" + scope->second.back().active + " - " +
+                                      std::to_string(coordinate) + ")";
+        activeVL = "(" + remaining + " < " + vl + " ? " + remaining + " : " + vl + ")";
+      }
+      guardedLoad(window, rawType, rawSuffix, loaded, "__riscv_vle8_v_" + rawSuffix +
            "((const uint8_t *)(" + record.str() + " + (" + byte + ") * " +
-           std::to_string(owner.interleaveRows) + "), " + vl + ");");
+           std::to_string(owner.interleaveRows) + "), " + activeVL + ")");
       return loaded;
     };
     for (auto [window, offset] :
@@ -1359,15 +1396,15 @@ mlir::LogicalResult Emitter::compileRVVReplicaStorageLoad(
             std::to_string(plan.getByteOffset() + fields * group) + " + " + tail;
         const std::string highByte =
             std::to_string(plan.getByteOffset() + role * group) + " + " + tail;
-        std::string head = byteLoad(*record, headByte, "replica_joined_head");
+        std::string head = byteLoad(window, *record, headByte, "replica_joined_head");
         head = "__riscv_vand_vx_" + rawSuffix + "(" + head + ", " +
                std::to_string(logicalMask) + ", " + vl + ")";
-        std::string low = byteLoad(*record, lowByte, "replica_joined_low");
+        std::string low = byteLoad(window, *record, lowByte, "replica_joined_low");
         low = "__riscv_vand_vx_" + rawSuffix + "(__riscv_vsrl_vx_" +
               rawSuffix + "(" + low + ", " +
               std::to_string(physicalRole * lowBits) + ", " + vl + "), " +
               std::to_string(lowMask) + ", " + vl + ")";
-        std::string high = byteLoad(*record, highByte, "replica_joined_high");
+        std::string high = byteLoad(window, *record, highByte, "replica_joined_high");
         high = "__riscv_vand_vx_" + rawSuffix + "(__riscv_vsrl_vx_" +
                rawSuffix + "(" + high + ", " + std::to_string(fieldWidth) +
                ", " + vl + "), " + std::to_string(highMask) + ", " + vl +
@@ -1405,7 +1442,7 @@ mlir::LogicalResult Emitter::compileRVVReplicaStorageLoad(
             std::to_string(plan.getByteOffset() + byte) + " + (" + logical +
             ") * " + std::to_string(bytes);
         std::string loaded =
-            byteLoad(*record, byteIndex, "replica_natural_byte");
+            byteLoad(window, *record, byteIndex, "replica_natural_byte");
         std::string widened = loaded;
         if (bytes > 1) {
           widened = "__riscv_vzext_vf" + std::to_string(bytes) + "_" +
@@ -1449,17 +1486,19 @@ mlir::LogicalResult Emitter::compileRVVReplicaStorageLoad(
           *record + ") + " + std::to_string(plan.getByteOffset()) +
           ")) + " + index;
       std::string raw = fresh("replica_window");
+      std::string expression;
       if (strided) {
         const int64_t strideBytes =
             plan.getProjectionStride() * static_cast<int64_t>(width / 8);
-        line(loadType + " " + raw + " = __riscv_vlse" +
+        expression = "__riscv_vlse" +
              std::to_string(width) + "_v_" + loadSuffix + "(" + pointer +
-             ", " + std::to_string(strideBytes) + ", " + loadVL + ");");
+             ", " + std::to_string(strideBytes) + ", " + loadVL + ")";
       } else {
-        line(loadType + " " + raw + " = __riscv_vle" +
+        expression = "__riscv_vle" +
              std::to_string(width) + "_v_" + loadSuffix + "(" + pointer +
-             ", " + loadVL + ");");
+             ", " + loadVL + ")";
       }
+      guardedLoad(window, loadType, loadSuffix, raw, expression);
       windows.push_back(std::move(raw));
     }
   } else {
@@ -1484,7 +1523,7 @@ mlir::LogicalResult Emitter::compileRVVReplicaStorageLoad(
           "(" + std::to_string(plan.getByteOffset()) + " + " + groupIndex +
           " * " + std::to_string(layer) + " + " + withinLayer + " + " +
           std::to_string(offset) + ")";
-      line("__asm__ volatile(\"lb zero, " + std::to_string(lanes - 1) +
+      line("if (" + recordActive(0) + ") __asm__ volatile(\"lb zero, " + std::to_string(lanes - 1) +
            "(%0)\" : : \"r\"((const uint8_t *)(" + *record + " + " +
            byte + ")) : \"memory\");");
     }
@@ -1499,9 +1538,10 @@ mlir::LogicalResult Emitter::compileRVVReplicaStorageLoad(
           " * " + std::to_string(layer) + " + " + withinLayer + " + " +
           std::to_string(offset) + ")";
       std::string raw = fresh("replica_layered_raw");
-      line(vectorTypeValue + " " + raw + " = __riscv_vle8_v_" +
+      guardedLoad(window, vectorTypeValue, vectorSuffixValue, raw,
+           "__riscv_vle8_v_" +
            vectorSuffixValue + "((const uint8_t *)(" + *record +
-           " + " + byte + "), " + vl + ");");
+           " + " + byte + "), " + vl + ")");
       windows.push_back(std::move(raw));
     }
   }

@@ -157,6 +157,11 @@ Encoding field access用 `AccessAttr` 保存 selected memory form以及 natural�
 joined 的完整 storage geometry。terminal lowering可以据此计算确定地址和bit extraction，
 不能按量化格式名补布局。
 
+字段 View 的 `load` 在 Canonical→Physical 转换中保留其 encoded owner，并形成数值 Field
+投影；静态 field subview 形成相应坐标的 gather。packed i4/i6 字段不能被误作独立、每元素
+一字节的 dense allocation。动态 field subview 尚未闭合时明确拒绝，普通 owner subview
+仍保留其 descriptor、offset 与调用前置条件。
+
 派生交错布局的每个字段另有 `fieldChunkBytes`，必须与 canonical derived declaration 的
 `field_chunks` 一致。地址由 cohort、record byte、字段起点和 chunk 共同确定；time/replica
 分片分别投影到 row 与 record-local 坐标，不能把所有分片都当作 row-lane offset。
@@ -182,6 +187,13 @@ natural field到RVV register的完整窗口用`rvv.replica_storage_load`表示�
 坐标与每个time/replica part对应的source window；result layout给出唯一SEW、LMUL与实际`vl`，
 leaf给出exact `vle`或`vlse`。因此strided与unit不是terminal emitter根据地址表达式临时选择的
 两种拼写。若后续issue materialization缩小窗口，只能投影已选plan，不能重新决定memory form。
+record tail 同时约束每个 raw window 的真实读取及可选 scalar-prime；无效 record 不解引用。
+该判定使用 window 的显式 source record 坐标，包括 scalar extract 已从结果消去的轴，
+不能只屏蔽最终 store 或按共享窗口的第一个 decoded part 推测范围。
+
+多 record field 的 scalar extract 先投影 record descriptor，再提取 record 内的字段坐标。
+memory pass 保留 Encoding、alias 与读取顺序；存在 snapshot 或干扰写入时不能重读原存储。
+record 坐标不是字段内部的 element offset，最终验证拒绝未闭合的混合坐标。
 
 `rvv_segment_pair_load` 将同一个 natural field 的两路完整一维交错投影表示为一次双结果读取：
 第一个结果对应 `field[base + 2*i]`，第二个对应 `field[base + 2*i + 1]`。静态 base、两端相同的
@@ -219,6 +231,11 @@ time/lane/replica分解，但carrier是scalar；后续pointwise边界因此只�
 operand form。verifier必须从layout与repeat关系重算`part_bases`，不能让terminal emitter推测
 哪个scalar服务哪个lane window。该形式只适用于已证明对齐的完整repeat window；其它relation
 保留为typed gather或普通memory edge。
+当 regular-repeat 保留完整 record axes 时，scalar supply 的每个 part 同时保存其 record
+坐标和字段内 source base；它可直接提供 scale 标量，避免先 gather 成向量再逐项提取。
+仅支持非交错 record 与完整的单字段轴，planner、materializer 和 verifier 共用轴对应关系；
+不满足条件时仍使用已合法的 vector conversion。每个 record 的实际读取遵守 tail，数值精度、
+repeat 次数和作者的 scale/reduction 边界不变。
 
 `LocalType` 是 invocation-local、target管理的可寻址对象，明确 size、alignment、alias、
 purpose、owner domain、birth与lifetime。当前真实用途包括 state/handoff object、spill slot与
@@ -270,12 +287,19 @@ projection 捕获的 index SSA 同时列为 `field_read.indices`，不能仅靠�
 资源 pass 与其它 live values 共同计数；转换的零临时数不能代替读取资源。
 同一 projection 同时有数值消费者和后续 storage extract/read 时，共享载入只替换数值边；
 后续读取仍保留原存储来源。只有存储消费者的 projection 不提前物化完整向量。
+若 numeric result 被嵌套控制流捕获，共享 field read 在原定义位置物化，使 binding 支配所有
+数值消费者；不能在第一个分支里才创建 C 局部量，再让其它分支借用它。
 record-axis 上的 strided byte read 可消费独立 scalar replica 坐标；natural 或 grouped-layered
 sub-byte 字段必须证明每个元素完全位于一个 byte 内，Physical leaf 固定该形式，每个 part
 按自己的坐标作 byte load、shift 与 mask，保持 row tail 的真实访存边界。
 joined 字段的 record gather 使用独立 selected leaf：head 读取一个 byte，tail 按声明的
 field role/low bits 读取并组合两个 byte；两条分支的有效地址不提前执行。数值和临时寄存器
 仍由同一 field-read 合同及资源分析约束。
+自然 sub-byte 字段在交错 record 中的 payload gather 使用显式 indexed-bits leaf：按
+field chunk 与 record cohort 计算 byte 地址，跨 byte 的元素只在真实 mask 下读取第二个
+byte，随后保留原符号和有限位宽。record 有效域、index/data LMUL 比例与临时寄存器进入
+验证和资源分析。标量字段没有同一连续 cohort 的证明时，以独立 record 地址读取，再通过
+显式 layout conversion 供给向量；不能用固定 stride 跨越两个 cohort。
 
 regular contraction 的 reduction operand projection 必须消费明确的 lane/time 坐标。
 被消去轴的 physical factors 全为 1 不意味着 logical extent 为 1；compiler 不能忽略

@@ -636,21 +636,42 @@ mlir::LogicalResult materializeFieldReads(mlir::ModuleOp module) {
     if (!result || !encoding || (!scalarBytes && (result.getLayout().getCarrier() != "rvv" ||
         access.getMapping() != "natural" ||
         !((access.getAlignment() < 2 && riscv_internal::logicalBitWidth(result.getElementType()) == 16) ||
-          (access.getForm() == "unit" && riscv_internal::fieldFacts(field).scalarPerRecord)) ||
+          riscv_internal::fieldFacts(field).scalarPerRecord) ||
         riscv_internal::interleaveRows(field, encoding) <= 0)) ||
         llvm::all_of(field.getResult().getUsers(), readsStorage))
       continue;
-    auto temporaries = riscv::fieldReadTemporaryGroups(field.getResult(), result, access, {});
+    auto readType = result;
+    if (!scalarBytes && riscv_internal::fieldFacts(field).scalarPerRecord &&
+        !riscv::isContiguousInterleavedScalarRead(field.getResult(), result, access)) {
+      auto geometry = riscv::RegisterCoordinates::get(result.getLayout());
+      if (!geometry) return field.emitError("record scalar read has no physical coordinates");
+      llvm::SmallVector<int64_t> one(result.getShape().size(), 1);
+      auto layout = riscv::LayoutAttr::get(rewriter.getContext(), "scalar", result.getAxisIds(),
+          rewriter.getDenseI64ArrayAttr(one), rewriter.getDenseI64ArrayAttr(one),
+          rewriter.getDenseI64ArrayAttr(geometry->extents()), rewriter.getDenseI64ArrayAttr(one),
+          rewriter.getDenseI64ArrayAttr(one), result.getLayout().getSew(), 0, 1, 0,
+          result.getLayout().getValidity());
+      readType = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(result, layout));
+    }
+    auto temporaries = riscv::fieldReadTemporaryGroups(field.getResult(), readType, access, {});
     if (!temporaries)
       return field.emitError("interleaved byte assembly has no closed read resources");
     rewriter.setInsertionPointAfter(field);
-    auto instruction = riscv::fieldReadInstruction(field.getResult(), result, access);
-    auto read = riscv::FieldReadOp::create(rewriter, field.getLoc(), result,
+    auto instruction = riscv::fieldReadInstruction(field.getResult(), readType, access);
+    auto read = riscv::FieldReadOp::create(rewriter, field.getLoc(), readType,
         field.getResult(), mlir::ValueRange{}, access,
         riscv_internal::leaf(rewriter, "transfer", "field-read", instruction,
                             instruction, 0, 0, *temporaries, 0, "none", "exact"));
+    mlir::Value numeric = read.getResult();
+    if (readType != result) {
+      auto conversion = riscv::ConvertLayoutOp::create(rewriter, field.getLoc(), result, numeric,
+          riscv_internal::layoutConversion(rewriter, readType.getLayout(), result.getLayout()),
+          riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
+      riscv_internal::copyOrigin(field, conversion);
+      numeric = conversion.getResult();
+    }
     // Explicit reads consume the storage projection, not another read's value.
-    field.getResult().replaceUsesWithIf(read.getResult(), [&](mlir::OpOperand &use) {
+    field.getResult().replaceUsesWithIf(numeric, [&](mlir::OpOperand &use) {
       return !readsStorage(use.getOwner());
     });
     riscv_internal::copyOrigin(field, read);
@@ -716,11 +737,27 @@ mlir::LogicalResult materializeFieldReads(mlir::ModuleOp module) {
     llvm::SmallVector<mlir::Value> indices;
     auto result = mlir::dyn_cast<riscv::ValueType>(extract.getResult().getType());
     auto instruction = riscv::fieldReadInstruction(extract, result, extract.getAccess());
+    auto numericConsumer = [&](mlir::Operation *user) {
+      if (mlir::isa<riscv::ExtractOp, riscv::FieldReadOp>(user)) return false;
+      if (auto effects = mlir::dyn_cast<mlir::MemoryEffectOpInterface>(user)) {
+        llvm::SmallVector<mlir::MemoryEffects::EffectInstance> instances;
+        effects.getEffects(instances);
+        if (llvm::any_of(instances, [&](const auto &effect) {
+              return mlir::isa<mlir::MemoryEffects::Read>(effect.getEffect()) &&
+                     effect.getValue() == extract.getResult();
+            })) return false;
+      }
+      return true;
+    };
+    const bool sharedRegionRead = result && result.getLayout().getCarrier() == "rvv" &&
+        riscv::fieldReadProjection(extract) &&
+        llvm::any_of(extract.getResult().getUsers(), [&](mlir::Operation *user) {
+          return user->getParentRegion() != extract->getParentRegion() &&
+                 numericConsumer(user);
+        });
     if (kernel && !kernel.getResourcesMaterialized() &&
-        instruction != "encoded.field-read" &&
-        llvm::any_of(extract.getResult().getUsers(), [](mlir::Operation *user) {
-          return !mlir::isa<riscv::ExtractOp, riscv::FieldReadOp>(user);
-        })) {
+        (instruction != "encoded.field-read" || sharedRegionRead) &&
+        llvm::any_of(extract.getResult().getUsers(), numericConsumer)) {
       riscv::fieldReadProjection(extract, &indices);
       auto temporary = riscv::fieldReadTemporaryGroups(extract, result, extract.getAccess(), indices);
       if (!temporary) return extract.emitError("selected field read has no closed resources");
@@ -730,7 +767,7 @@ mlir::LogicalResult materializeFieldReads(mlir::ModuleOp module) {
               instruction, instruction, 0, 0, *temporary, 0, "none", "exact"));
       riscv_internal::copyOrigin(extract, read);
       extract.getResult().replaceUsesWithIf(read.getResult(), [&](mlir::OpOperand &use) {
-        return use.getOwner() != read && !mlir::isa<riscv::ExtractOp, riscv::FieldReadOp>(use.getOwner());
+        return use.getOwner() != read && numericConsumer(use.getOwner());
       });
       continue;
     }
