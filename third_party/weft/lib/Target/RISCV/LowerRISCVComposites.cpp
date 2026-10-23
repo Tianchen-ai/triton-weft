@@ -2243,7 +2243,9 @@ private:
               })) {
             auto coordinates = gather.getIndices()[0];
             auto coordinateType = mlir::dyn_cast<riscv::ValueType>(coordinates.getType());
-            if (coordinateType && coordinateType.getLayout().getCarrier() == "scalar" &&
+            if (coordinateType &&
+                (coordinateType.getLayout().getCarrier() == "scalar" ||
+                 coordinateType.getLayout().getCarrier() == "rvv") &&
                 llvm::is_contained(coordinateType.getAxisIds().asArrayRef(), axis)) {
               auto coordinateResult = projectedReductionType(rewriter, coordinateType, axis);
               auto selected = riscv::ProjectReductionOperandOp::create(rewriter, operation->getLoc(),

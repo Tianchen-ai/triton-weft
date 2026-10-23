@@ -1181,6 +1181,24 @@ riscv::ConvertLayoutOp selectedReplicaConsumer(mlir::Value value,
   return conversion;
 }
 
+// A projection may be shared by numeric consumers and further storage reads.
+// Materializing its numeric value must not turn the latter into reads from an
+// arithmetic/register value. In particular, contraction operand projections
+// can retain a chain of ExtractOps ending in an explicit FieldReadOp.
+bool usesStorageProjection(mlir::OpOperand &use) {
+  if (auto extract = mlir::dyn_cast<riscv::ExtractOp>(use.getOwner()))
+    if (use.getOperandNumber() == 0 && extract.getAccess().getForm() != "register")
+      return true;
+  auto effects = mlir::dyn_cast<mlir::MemoryEffectOpInterface>(use.getOwner());
+  if (!effects) return false;
+  llvm::SmallVector<mlir::MemoryEffects::EffectInstance> instances;
+  effects.getEffects(instances);
+  return llvm::any_of(instances, [&](const auto &effect) {
+    return mlir::isa<mlir::MemoryEffects::Read>(effect.getEffect()) &&
+           effect.getValue() == use.get();
+  });
+}
+
 bool createInterleavedReplicaLoad(mlir::IRRewriter &rewriter,
                                   mlir::Location location,
                                   riscv::FieldOp field,
@@ -1189,6 +1207,9 @@ bool createInterleavedReplicaLoad(mlir::IRRewriter &rewriter,
                                   mlir::Operation *origin,
                                   mlir::Value valueToReplace,
                                   riscv::ConvertLayoutOp consumerConversion) {
+  if (!consumerConversion &&
+      llvm::all_of(valueToReplace.getUses(), usesStorageProjection))
+    return false;
   auto ownerEncoding = mlir::dyn_cast<kernel::EncodingType>(
       riscv_internal::logicalElement(field.getOwner().getType()));
   const int64_t interleave =
@@ -1241,7 +1262,9 @@ bool createInterleavedReplicaLoad(mlir::IRRewriter &rewriter,
     consumerConversion.getResult().replaceAllUsesWith(load.getResult());
     rewriter.eraseOp(consumerConversion);
   } else {
-    valueToReplace.replaceAllUsesExcept(load.getResult(), load.getOperation());
+    valueToReplace.replaceUsesWithIf(load.getResult(), [&](mlir::OpOperand &use) {
+      return use.getOwner() != load && !usesStorageProjection(use);
+    });
   }
   return true;
 }
@@ -1306,7 +1329,7 @@ bool materializeInterleavedReplicaExtract(mlir::IRRewriter &rewriter,
           extract.getIndices().front(), recordRank, extract, extract.getResult(),
           consumer))
     return false;
-  rewriter.eraseOp(extract);
+  if (extract.getResult().use_empty()) rewriter.eraseOp(extract);
   for (riscv::ConvertLayoutOp conversion : llvm::reverse(conversions))
     if (conversion.getResult().use_empty())
       rewriter.eraseOp(conversion);
@@ -1335,6 +1358,8 @@ bool materializeInterleavedReplicaField(mlir::IRRewriter &rewriter,
 
 bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
                                    riscv::ExtractOp extract) {
+  if (llvm::all_of(extract.getResult().getUses(), usesStorageProjection))
+    return false;
   llvm::SmallVector<riscv::ConvertLayoutOp> conversions;
   mlir::Value input = riscv_internal::stripRepresentationConversions(
       extract.getInput(), &conversions);
@@ -1892,8 +1917,10 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
     consumerConversion.getResult().replaceAllUsesWith(replacement);
     rewriter.eraseOp(consumerConversion);
   }
-  extract.getResult().replaceAllUsesWith(replacement);
-  rewriter.eraseOp(extract);
+  extract.getResult().replaceUsesWithIf(replacement, [&](mlir::OpOperand &use) {
+    return !usesStorageProjection(use);
+  });
+  if (extract.getResult().use_empty()) rewriter.eraseOp(extract);
   for (riscv::ConvertLayoutOp conversion : llvm::reverse(conversions))
     if (conversion.getResult().use_empty())
       rewriter.eraseOp(conversion);

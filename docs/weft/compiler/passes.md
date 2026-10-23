@@ -806,6 +806,11 @@ load 与 tuple component binding，不重新选择 memory form。
 
 ### `PlanRISCVPartialTopologies` 与 `MaterializeRISCVPartialAccumulators`
 
+单边拥有独立输出轴的 batched integer reduction 可以采用 widening-dot，然后逐输出
+物化 partial。早期 operation selection 不将全部 scalar 输出元组当作同时存活的向量累加器；
+双边分别提供 M/N 输出轴的 outer product 仍检查局部寄存器微块。实际载入、partial、spill
+与其它活跃值的资源上界在生成 Physical Program 后重新计算。
+
 两者分别实现在 `lib/Target/Partial/PlanTopologies.cpp` 与 `Materialize.cpp`，共同的
 typed topology/几何工具在 `Support.h/.cpp`，add-tree 的规划与物化共用 `AddTrees.cpp`；
 planner 与 materializer 不通过 include 实现片段形成第二份算法。

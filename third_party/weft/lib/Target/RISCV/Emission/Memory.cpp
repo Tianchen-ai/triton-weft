@@ -144,7 +144,8 @@ mlir::LogicalResult Emitter::compileFieldRead(riscv::FieldReadOp operation) {
     bindings[result] = std::move(loaded);
     return mlir::success();
   }
-  const bool recordGather = operation.getLeaf().getInstruction() == "encoded.field-read.record-gather";
+  const bool joinedGather = operation.getLeaf().getInstruction() == "encoded.field-read.record-gather-joined";
+  const bool recordGather = joinedGather || operation.getLeaf().getInstruction() == "encoded.field-read.record-gather";
   if (recordGather || operation.getLeaf().getInstruction() == "encoded.field-read.record-element") {
     auto field = fieldFor(input);
     if (!field || !input.field.index || !input.field.relativeIndices.empty())
@@ -180,18 +181,56 @@ mlir::LogicalResult Emitter::compileFieldRead(riscv::FieldReadOp operation) {
           return fail(operation, "record gather index has no selected scalar part");
         coordinate = index.parts[*sourcePart];
       }
-      auto fragment = singleStorageFragment(*field, coordinate, bits);
-      if (!fragment) return fail(operation, "record element read does not fit one storage byte");
       std::string address = owner.recordPointer;
       for (const auto &[axis, offset] : *offsets)
         for (const auto &[recordAxis, bytes] : owner.recordByteStrides)
           if (axis == recordAxis) address += " + (" + offset + ") * (" + bytes + ")";
-      address += " + (" + fragment->byte + ")";
       const std::string suffix = vectorSuffix(output), vl = partVL(output, part);
       auto name = fresh("record_element");
       line(vectorType(output) + " " + name + " = __riscv_vmv_v_x_" + suffix + "(0, " + vl + ");");
       line("if (" + *active + ") {");
       ++indent;
+      if (joinedGather) {
+        auto access = operation.getAccess();
+        const int64_t group = access.getGroupSize(), fields = access.getJoinFields();
+        const int64_t lowBits = access.getJoinLowBits(), role = access.getJoinRole();
+        auto byteLoad = [&](int64_t offset, const std::string &index) {
+          auto byte = fresh("record_joined_byte");
+          line(vectorType(output) + " " + byte + " = __riscv_vlse8_v_" + suffix +
+               "((const uint8_t *)(" + address + " + " +
+               std::to_string(access.getBitOffset() / 8 + offset) + " + (" + index +
+               ")), (ptrdiff_t)(" + stride + "), " + vl + ");");
+          return byte;
+        };
+        line("if ((" + coordinate + ") < " + std::to_string(group) + ") {");
+        ++indent;
+        auto head = byteLoad(role * group, coordinate);
+        line(name + " = __riscv_vand_vx_" + suffix + "(" + head + ", " +
+             std::to_string((1u << bits) - 1) + ", " + vl + ");");
+        --indent;
+        line("} else {");
+        ++indent;
+        const std::string tail = "(" + coordinate + " - " + std::to_string(group) + ")";
+        auto low = byteLoad(fields * group, tail);
+        auto high = byteLoad(role * group, tail);
+        line(low + " = __riscv_vand_vx_" + suffix + "(__riscv_vsrl_vx_" + suffix +
+             "(" + low + ", " + std::to_string(role * lowBits) + ", " + vl + "), " +
+             std::to_string((1u << lowBits) - 1) + ", " + vl + ");");
+        line(high + " = __riscv_vand_vx_" + suffix + "(__riscv_vsrl_vx_" + suffix +
+             "(" + high + ", " + std::to_string(bits) + ", " + vl + "), " +
+             std::to_string((1u << (bits - lowBits)) - 1) + ", " + vl + ");");
+        line(name + " = __riscv_vor_vv_" + suffix + "(" + low + ", __riscv_vsll_vx_" +
+             suffix + "(" + high + ", " + std::to_string(lowBits) + ", " + vl + "), " + vl + ");");
+        --indent;
+        line("}");
+        --indent;
+        line("}");
+        result.parts.push_back(std::move(name));
+        continue;
+      }
+      auto fragment = singleStorageFragment(*field, coordinate, bits);
+      if (!fragment) return fail(operation, "record element read does not fit one storage byte");
+      address += " + (" + fragment->byte + ")";
       const bool signedByte = mlir::cast<mlir::IntegerType>(output.getType().getElementType()).isSigned();
       line(name + " = __riscv_vlse8_v_" + suffix + "((const " +
            std::string(signedByte ? "int8_t" : "uint8_t") + " *)(" + address +

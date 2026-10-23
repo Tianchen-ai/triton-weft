@@ -717,13 +717,13 @@ mlir::LogicalResult materializeFieldReads(mlir::ModuleOp module) {
     auto result = mlir::dyn_cast<riscv::ValueType>(extract.getResult().getType());
     auto instruction = riscv::fieldReadInstruction(extract, result, extract.getAccess());
     if (kernel && !kernel.getResourcesMaterialized() &&
-        instruction == "encoded.field-read.indexed-bytes" &&
+        instruction != "encoded.field-read" &&
         llvm::any_of(extract.getResult().getUsers(), [](mlir::Operation *user) {
           return !mlir::isa<riscv::ExtractOp, riscv::FieldReadOp>(user);
         })) {
       riscv::fieldReadProjection(extract, &indices);
       auto temporary = riscv::fieldReadTemporaryGroups(extract, result, extract.getAccess(), indices);
-      if (!temporary) return extract.emitError("indexed byte assembly has no closed resources");
+      if (!temporary) return extract.emitError("selected field read has no closed resources");
       rewriter.setInsertionPointAfter(extract);
       auto read = riscv::FieldReadOp::create(rewriter, extract.getLoc(), result, extract,
           indices, extract.getAccess(), riscv_internal::leaf(rewriter, "transfer", "field-read",

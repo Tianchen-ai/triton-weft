@@ -965,6 +965,20 @@ private:
         if (!mlir::isa<riscv::OuterContractOp>(operation) &&
             (riscv_internal::logicalAxes(result).empty() || over.size() != 1))
           return true;
+        // A batched reduction has no pair of independent M/N axes. Its
+        // widening partials are materialized per output by the partial passes,
+        // and its completed outputs are scalar tuples, not simultaneously live
+        // vector accumulators. The outer-product estimate below must not force
+        // it into strided, one-K-element-at-a-time MACs.
+        auto hasExclusiveOutput = [&](mlir::Value input, mlir::Value other) {
+          for (int64_t axis : riscv_internal::logicalAxes(input.getType()))
+            if (!llvm::is_contained(over, axis) &&
+                !llvm::is_contained(riscv_internal::logicalAxes(other.getType()), axis))
+              return true;
+          return false;
+        };
+        if (!hasExclusiveOutput(lhs, rhs) || !hasExclusiveOutput(rhs, lhs))
+          return true;
         auto value = mlir::dyn_cast<riscv::ValueType>(result);
         if (!value)
           return false;

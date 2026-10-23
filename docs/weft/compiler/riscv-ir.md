@@ -268,6 +268,14 @@ result type 固定数值元素、axes、每个 part 的布局与活跃范围。�
 projection 捕获的 index SSA 同时列为 `field_read.indices`，不能仅靠祖先 Extract 隐式延长
 向量索引寿命。load/decode 的输出组与临时载体上界由共享几何函数计算，leaf verifier 核对，
 资源 pass 与其它 live values 共同计数；转换的零临时数不能代替读取资源。
+同一 projection 同时有数值消费者和后续 storage extract/read 时，共享载入只替换数值边；
+后续读取仍保留原存储来源。只有存储消费者的 projection 不提前物化完整向量。
+record-axis 上的 strided byte read 可消费独立 scalar replica 坐标；natural 或 grouped-layered
+sub-byte 字段必须证明每个元素完全位于一个 byte 内，Physical leaf 固定该形式，每个 part
+按自己的坐标作 byte load、shift 与 mask，保持 row tail 的真实访存边界。
+joined 字段的 record gather 使用独立 selected leaf：head 读取一个 byte，tail 按声明的
+field role/low bits 读取并组合两个 byte；两条分支的有效地址不提前执行。数值和临时寄存器
+仍由同一 field-read 合同及资源分析约束。
 
 regular contraction 的 reduction operand projection 必须消费明确的 lane/time 坐标。
 被消去轴的 physical factors 全为 1 不意味着 logical extent 为 1；compiler 不能忽略

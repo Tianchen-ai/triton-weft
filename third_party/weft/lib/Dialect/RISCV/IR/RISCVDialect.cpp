@@ -5296,13 +5296,37 @@ bool isRecordGatherRead(mlir::Value input, ValueType result, AccessAttr access) 
   auto source = field ? mlir::dyn_cast<ValueType>(field.getResult().getType()) : ValueType();
   auto encoding = field ? mlir::dyn_cast<weft::kernel::EncodingType>(elementOf(field.getOwner().getType()))
                         : weft::kernel::EncodingType();
+  auto integer = result ? mlir::dyn_cast<mlir::IntegerType>(result.getElementType())
+                        : mlir::IntegerType();
+  const bool joined = access && access.getMapping() == "joined";
   if (!extract || !source || !encoding || encoding.getKind() != "base" ||
       localPackInterleaveRows(field.getOwner()) || !result || !access ||
-      access.getForm() != "strided" || access.getMapping() != "natural" ||
-      access.getBitOffset() % 8 || elementBitWidth(result.getElementType()) != 8 ||
-      !mlir::isa<mlir::IntegerType>(result.getElementType()) ||
+      access.getForm() != "strided" ||
+      (access.getMapping() != "natural" && access.getMapping() != "grouped_layered" && !joined) ||
+      access.getBitOffset() % 8 || !integer ||
+      (!joined && integer.getWidth() != 8 && (!integer.isUnsigned() ||
+       (integer.getWidth() != 1 && integer.getWidth() != 2 && integer.getWidth() != 4))) ||
       extract.getIndices().size() != 1 || source.getShape().size() < 2 ||
-      result.getLayout().getCarrier() != "rvv") return false;
+      result.getLayout().getCarrier() != "rvv" || result.getLayout().getSew() != 8) return false;
+  // The same byte-local transfer used for one scalar coordinate also serves
+  // independent scalar replicas. Each replica freezes its own byte/shift;
+  // the RVV lanes remain on a record axis, never across the packed field.
+  if (!joined && (access.getStorageBits() % integer.getWidth() ||
+      source.getShape().asArrayRef().back() != access.getStorageBits() / integer.getWidth() ||
+      (access.getMapping() == "grouped_layered" &&
+       (access.getGroupSize() <= 0 || access.getLayerSize() <= 0 ||
+        access.getGroupSize() % access.getLayerSize() || access.getOrder() != "lo_first" ||
+        access.getGroupSize() / access.getLayerSize() > 8 / integer.getWidth()))))
+    return false;
+  if (joined && (!integer.isUnsigned() || integer.getWidth() > 8 ||
+      access.getGroupSize() <= 0 || access.getGroupSize() > std::numeric_limits<int64_t>::max() / 2 ||
+      source.getShape().asArrayRef().back() != 2 * access.getGroupSize() ||
+      access.getJoinFields() <= 1 || access.getJoinRole() < 0 ||
+      access.getJoinRole() >= access.getJoinFields() || access.getJoinLowBits() <= 0 ||
+      access.getJoinLowBits() >= integer.getWidth() ||
+      access.getJoinFields() > 8 / access.getJoinLowBits() ||
+      2 * integer.getWidth() - access.getJoinLowBits() > 8 ||
+      access.getOrder() != "lo_first")) return false;
   auto index = mlir::dyn_cast<ValueType>(extract.getIndices()[0].getType());
   if (!index || index.getLayout().getCarrier() != "scalar" ||
       llvm::any_of(index.getLayout().getLaneFactors().asArrayRef(), [](int64_t n) { return n != 1; }) ||
@@ -5335,7 +5359,9 @@ llvm::StringRef weft::riscv::fieldReadInstruction(
       return "encoded.field-read.scalar-bytes";
   }
   if (isInterleavedIndexedByteRead(input, result, access)) return "encoded.field-read.indexed-bytes";
-  if (isRecordGatherRead(input, result, access)) return "encoded.field-read.record-gather";
+  if (isRecordGatherRead(input, result, access))
+    return access.getMapping() == "joined" ? "encoded.field-read.record-gather-joined"
+                                            : "encoded.field-read.record-gather";
   if (isRecordElementRead(input, result, access)) return "encoded.field-read.record-element";
   if (result && access && result.getLayout().getCarrier() == "rvv" &&
       access.getForm() == "unit" && access.getMapping() == "natural" &&
