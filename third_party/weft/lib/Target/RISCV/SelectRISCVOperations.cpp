@@ -472,6 +472,10 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
       if (scale != element) {
         auto extended = riscv::WidenOp::create(rewriter, add.getLoc(), element, scalar,
             riscv_internal::unselectedLeaf(rewriter));
+        // MAC selection runs after the generic operation selector. Carry the
+        // scalar representation decision to leaf finalization for this new op.
+        extended->setAttr("implementation",
+            scalarImplementation(rewriter, "widen", "scalar.widen"));
         riscv_internal::copyOrigin(add, extended);
         scalar = extended.getResult();
       }

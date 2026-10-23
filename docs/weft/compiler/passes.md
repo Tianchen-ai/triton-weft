@@ -424,6 +424,9 @@ accumulator reuse，避免把可以原位更新的 accumulator 误算成同时�
 实现跨 block hoist/sink、全局 conversion algebra 或任意 producer rematerialization。
 conversion CSE 与 backward rematerialization 处于同一个固定点：合并conversion后新出现的
 single-use producer须在本次pass内继续处理，不留给下一次解析/重放才改变其表示。
+重物化前先核对全部 shaped operands 的 layout 投影；例如窄结果的 lane 数会使宽整数
+index 超过合法 LMUL 时，保留原 producer 与显式 conversion，不插入半套转换再报错。
+这是同一物理程序的可选 rewrite，不改变作者计算、目标引擎或访存边界。
 
 partial materialization 后，`physical-share` 的 input/result 都变成单 use 时，若到唯一
 conversion 的同 block 区间没有写入或未知 effect，允许移除这条已无共享用途的边界，
@@ -929,6 +932,17 @@ tail passthrough 的 full-step leaf；其它 step 保留未更新 lane。整块�
 vector/scalar 乘法的两端若来自同 signedness 的精确扩展，先检查 widening MAC 的完整
 坐标与目标合法性；不能因为扩展后的同宽 MAC 也合法就先选它，留下冗余向量 widen。
 没有合法 widening 关系时，同宽 MAC 继续按原输入选择，不改变显式窄化或累加精度。
+新建的 scalar scale 扩展同时记录 scalar implementation，由随后 leaf finalization
+闭合；不能依赖已经结束的 operation selector 再访问它。
+
+### `SimplifyRISCVControl` 的整数常量
+
+显式 signed/unsigned scalar 的常量 add/sub/mul、按位运算及合法位移，在声明位宽内用
+APInt 求值，保留 wrap 和有符号右移语义。不折叠浮点、不跨 storage birth，也不把非法
+位移当作合法常量。固定 storage offset 因而能在访存规划前形成显式常量 SSA。
+layered replica read 可据该 SSA 的准确余数选择原 encoded group 内的 layer；shift 与
+mask 写入 Physical IR，verifier 重新核对 offset、顺序和 layer 域。最高 byte layer
+省去冗余 mask，零移位直接省去；动态 offset 仍保留原动态计算，emitter 不自行推断。
 
 ### `FinalizeRISCVLeaves`
 

@@ -701,12 +701,16 @@ public:
               !integerReinterpret)
             continue;
         }
-        rewriter.setInsertionPoint(conversion);
-        llvm::SmallVector<mlir::Value> operands;
+        // Backward rematerialization is optional. In particular a wider index
+        // feeding a narrow value may need an illegal LMUL in the consumer's
+        // lane geometry. Check every operand before creating any new edges;
+        // the original, legal conversion still represents that program.
+        llvm::SmallVector<riscv::LayoutAttr> operandLayouts;
+        bool legalProjection = true;
         for (mlir::Value operand : producer->getOperands()) {
           auto operandType = mlir::dyn_cast<riscv::ValueType>(operand.getType());
           if (!operandType) {
-            operands.push_back(operand);
+            operandLayouts.push_back({});
             continue;
           }
           auto kernel = conversion->getParentOfType<riscv::KernelOp>();
@@ -723,10 +727,20 @@ public:
                     rewriter, operandType, targetType.getLayout(),
                     kernel.getTarget());
           if (!required) {
-            conversion.emitError(
-                "rematerialized producer has no legal operand layout projection");
-            signalPassFailure();
-            return;
+            legalProjection = false;
+            break;
+          }
+          operandLayouts.push_back(required);
+        }
+        if (!legalProjection)
+          continue;
+        rewriter.setInsertionPoint(conversion);
+        llvm::SmallVector<mlir::Value> operands;
+        for (auto [operand, required] : llvm::zip(producer->getOperands(), operandLayouts)) {
+          auto operandType = mlir::dyn_cast<riscv::ValueType>(operand.getType());
+          if (!operandType) {
+            operands.push_back(operand);
+            continue;
           }
           mlir::Type requiredType = riscv_internal::withLayout(operandType, required);
           mlir::Value projected = operand;

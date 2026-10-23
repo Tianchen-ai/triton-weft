@@ -156,6 +156,38 @@ private:
   void foldScalar(Operation *operation) {
     Value result = operation->getResult(0);
     if (isa<arith::ConstantOp, riscv::ConstantOp, riscv::LocalShapeOp>(operation)) return;
+    // Author constexpr arithmetic may survive materialization as signed/unsigned
+    // Weft scalars. Fold it at the declared width before storage analysis, so
+    // fixed byte windows do not acquire dynamic layer shifts and masks.
+    if (auto binary = dyn_cast<riscv::BinaryOp>(operation)) {
+      auto type = dyn_cast<IntegerType>(result.getType());
+      if (!type || type.isSignless() || type.getWidth() > 64 ||
+          binary.getLhs().getType() != type || binary.getRhs().getType() != type)
+        return;
+      auto left = riscv_internal::constantInt(binary.getLhs());
+      auto right = riscv_internal::constantInt(binary.getRhs());
+      if (!left || !right) return;
+      llvm::APInt a(type.getWidth(), *left, type.isSigned());
+      llvm::APInt c(type.getWidth(), *right, type.isSigned());
+      llvm::APInt value(type.getWidth(), 0);
+      auto kind = binary.getKind();
+      if (kind == "add") value = a + c;
+      else if (kind == "sub") value = a - c;
+      else if (kind == "mul") value = a * c;
+      else if (kind == "and") value = a & c;
+      else if (kind == "or") value = a | c;
+      else if (kind == "xor") value = a ^ c;
+      else if ((kind == "shl" || kind == "shr") && c.ult(type.getWidth()))
+        value = kind == "shl" ? a.shl(c.getZExtValue())
+            : type.isUnsigned() ? a.lshr(c.getZExtValue()) : a.ashr(c.getZExtValue());
+      else return;
+      b.setInsertionPoint(operation);
+      auto constant = riscv::ConstantOp::create(b, operation->getLoc(), type,
+          IntegerAttr::get(type, value));
+      riscv_internal::copyOrigin(operation, constant);
+      replace(operation, constant.getResult());
+      return;
+    }
     // Do not replace a memory read or a physical identity by a constant even
     // when its result happens to be used as an index. Only scalar arithmetic
     // and the read-only explicit descriptor extent participate here.

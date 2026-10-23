@@ -8667,6 +8667,7 @@ mlir::LogicalResult RVVReplicaStorageLoadOp::verify() {
   const int64_t fullMask = (int64_t{1} << elementBits) - 1;
   const bool dynamicBase =
       layered && logicalBaseMultiple % group != 0;
+  auto fixedBase = getLogicalBase().getDefiningOp<mlir::arith::ConstantIndexOp>();
   for (auto [logicalLayer, physicalLayer, shiftOffset, shiftBaseFactor,
              maskValue] :
        llvm::zip(getLayerForPart(), getPhysicalLayerForPart(),
@@ -8679,25 +8680,35 @@ mlir::LogicalResult RVVReplicaStorageLoadOp::verify() {
             "natural replica storage load cannot carry a physical layer");
       continue;
     }
+    if (logicalLayer < 0 || logicalLayer >= layers)
+      return emitOpError("replica storage logical layer is outside the encoded group");
+    // A fixed SSA offset proves its precise encoded layer even when its
+    // alignment alone does not prove a group boundary. Dynamic plans remain
+    // valid; only a zero base factor claims this additional static proof.
+    const bool fixedLayer = dynamicBase && shiftBaseFactor == 0 && fixedBase &&
+        fixedBase.value() >= 0;
+    const int64_t selectedLayer = logicalLayer +
+        (fixedLayer ? (fixedBase.value() % group) / layer : 0);
+    const bool needsBase = dynamicBase && !fixedLayer;
     const int64_t expectedPhysical =
-        dynamicBase ? 0
+        needsBase ? 0
                     : (getAccess().getOrder() == "lo_first"
-                           ? logicalLayer
-                           : layers - 1 - logicalLayer);
+                           ? selectedLayer
+                           : layers - 1 - selectedLayer);
     const int64_t expectedOffset =
-        dynamicBase
+        needsBase
             ? (getAccess().getOrder() == "lo_first"
                    ? logicalLayer * elementBits
                    : (layers - 1 - logicalLayer) * elementBits)
             : expectedPhysical * elementBits;
     const int64_t expectedFactor =
-        dynamicBase
+        needsBase
             ? (getAccess().getOrder() == "lo_first" ? elementBits
                                                       : -elementBits)
             : 0;
     const int64_t expectedMask =
-        dynamicBase || (expectedPhysical + 1) * elementBits != 8 ? fullMask : 0;
-    if (logicalLayer < 0 || logicalLayer >= layers ||
+        needsBase || (expectedPhysical + 1) * elementBits != 8 ? fullMask : 0;
+    if (selectedLayer >= layers ||
         physicalLayer != expectedPhysical || shiftOffset != expectedOffset ||
         shiftBaseFactor != expectedFactor || maskValue != expectedMask)
       return emitOpError(
