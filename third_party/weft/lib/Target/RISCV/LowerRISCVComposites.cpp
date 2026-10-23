@@ -126,6 +126,9 @@ public:
     lowerLoopCarriedWideningPartials(rewriter, failed);
     lowerContracts(rewriter, failed);
     closeRegisterReductionDomains(rewriter, failed);
+    // Bounded value programs can turn scalar-array conversions into RVV
+    // issues. Close their width steps after that representation is known.
+    lowerNumericConversions(rewriter, failed);
     eraseDeadComposites(rewriter);
     return mlir::failure(failed);
   }
@@ -469,23 +472,18 @@ private:
                                     input.getElementType())
                               : mlir::IntegerType();
       auto resultElement =
-          mlir::dyn_cast<mlir::IntegerType>(reduce.getResult().getType());
+          mlir::dyn_cast<mlir::IntegerType>(riscv_internal::logicalElement(reduce.getResult().getType()));
       auto target = reduce->getParentOfType<riscv::KernelOp>().getTarget();
       if (!widen || !input || !inputElement || inputElement.isSignless() ||
           !resultElement || resultElement.isSignless() ||
           reduce.getKind() != "add" ||
           resultElement.getWidth() != inputElement.getWidth() * 2 ||
-          mlir::isa<riscv::ValueType>(reduce.getResult().getType()) ||
+          !riscv::isScalarReductionResult(input, reduce.getResult().getType(), reduce.getAxis()) ||
           input.getLayout().getCarrier() != "rvv" ||
           !target.getHasRVV() ||
           !target.getHasWideningInteger() ||
           !riscv::supportsRVVLayout(target, input.getLayout()))
         continue;
-      bool completeReduction = true;
-      for (auto [axis, extent] : llvm::enumerate(input.getShape().asArrayRef()))
-        if (axis != static_cast<size_t>(reduce.getAxis()) && extent != 1)
-          completeReduction = false;
-      if (!completeReduction) continue;
       rewriter.setInsertionPoint(reduce);
       auto folded = riscv::RVVWidenReduceOp::create(rewriter,
           reduce.getLoc(), reduce.getResult().getType(), widen.getInput(),

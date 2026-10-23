@@ -41,6 +41,28 @@ std::optional<llvm::SmallVector<int64_t>> weft::riscv::rvvRegularGatherIndices(
   return indices;
 }
 
+bool weft::riscv::isScalarReductionResult(ValueType input, mlir::Type result,
+                                         int64_t axis) {
+  if (axis < 0 || axis >= static_cast<int64_t>(input.getShape().size()))
+    return false;
+  llvm::SmallVector<int64_t> axes;
+  for (auto [index, extent] : llvm::enumerate(input.getShape().asArrayRef())) {
+    if (static_cast<int64_t>(index) == axis)
+      continue;
+    if (extent != 1)
+      return false;
+    axes.push_back(input.getAxisIds()[index]);
+  }
+  auto value = mlir::dyn_cast<ValueType>(result);
+  if (!value)
+    return mlir::isa<mlir::IntegerType, mlir::FloatType>(result);
+  auto coordinates = RegisterCoordinates::get(value.getLayout());
+  return value.getAxisIds().asArrayRef() == llvm::ArrayRef<int64_t>(axes) &&
+      llvm::all_of(value.getShape().asArrayRef(), [](int64_t n) { return n == 1; }) &&
+      value.getLayout().getCarrier() == "scalar" && coordinates &&
+      coordinates->parts() == 1 && coordinates->lanes() == 1;
+}
+
 std::optional<llvm::SmallVector<int64_t>> weft::riscv::scalarExtractParts(ExtractOp op) {
   auto input = op.getInput().getType();
   auto output = mlir::dyn_cast<ValueType>(op.getResult().getType());

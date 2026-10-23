@@ -10243,8 +10243,9 @@ mlir::LogicalResult RVVWidenReduceOp::verify() {
   auto input = getInput().getType();
   auto inputElement =
       mlir::dyn_cast<mlir::IntegerType>(input.getElementType());
-  auto resultElement =
-      mlir::dyn_cast<mlir::IntegerType>(getResult().getType());
+  auto resultValue = mlir::dyn_cast<ValueType>(getResult().getType());
+  auto resultElement = mlir::dyn_cast<mlir::IntegerType>(
+      resultValue ? resultValue.getElementType() : getResult().getType());
   auto parts = physicalPartCount(input);
   auto kernel = getOperation()->getParentOfType<KernelOp>();
   if (!kernel)
@@ -10255,8 +10256,7 @@ mlir::LogicalResult RVVWidenReduceOp::verify() {
       resultElement.isSignless() || getKind() != "add" ||
       resultElement.getWidth() != inputElement.getWidth() * 2 ||
       inputElement.getWidth() < 8 || inputElement.getWidth() > 16 ||
-      !isScalar(getResult().getType()) || getAxis() < 0 ||
-      static_cast<size_t>(getAxis()) >= input.getShape().size() ||
+      !isScalarReductionResult(input, getResult().getType(), getAxis()) ||
       input.getLayout().getCarrier() != "rvv" ||
       !checkedPositiveProduct(input.getLayout().getTimeFactors().asArrayRef()) ||
       !parts || *parts <= 0 ||
@@ -10269,10 +10269,7 @@ mlir::LogicalResult RVVWidenReduceOp::verify() {
                  "exact"))
     return emitOpError(
         "RVV widening reduction requires signedness-qualified integer "
-        "vector, an add reduction axis, and a double-width scalar result");
-  for (auto [axis, extent] : llvm::enumerate(input.getShape().asArrayRef()))
-    if (axis != static_cast<size_t>(getAxis()) && extent != 1)
-      return emitOpError("scalar widening reduction must consume the full non-unit logical domain");
+        "vector, an add reduction axis, and a double-width scalar or singleton scalar-carried result");
   return mlir::success();
 }
 

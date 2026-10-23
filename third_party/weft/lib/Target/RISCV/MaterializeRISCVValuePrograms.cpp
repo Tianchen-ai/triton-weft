@@ -2,6 +2,8 @@
 #include "RISCVPhysicalSupport.h"
 #include "LocalMemory.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
+#include "Weft/Dialect/RISCV/IR/DenseBounds.h"
+#include "Weft/Dialect/RISCV/IR/Stream.h"
 #include "DenseValuePrograms.h"
 #include "DenseIssue.h"
 #include "LocalLifetime.h"
@@ -110,9 +112,7 @@ public:
       }
       if (auto reduce = dyn_cast<riscv::ReduceOp>(op)) {
         if (Value source = local(reduce.getInput()); source &&
-            (cast<riscv::ValueType>(source.getType()).getElementType().isF32() ||
-             cast<riscv::ValueType>(source.getType()).getElementType().isF64() ||
-             (cast<riscv::ValueType>(source.getType()).getElementType().isInteger(32) && reduce.getKind() == "add")))
+            riscv::supportsStreamReduction(cast<riscv::ValueType>(source.getType()).getElementType(), reduce.getKind()))
           if (failed(riscv_internal::materializeDenseValueProgram(reduce))) return failure();
         continue;
       }
@@ -213,7 +213,7 @@ public:
         if (!encoding || encoding.getKind() != "dense" || load.getSnapshotStorage() ||
             memory.getShape() != type.getShape() || memory.getAxisIds() != type.getAxisIds() ||
             (!completeLocal && !completeDynamic && type.getLayout().getValidity() != "full" &&
-             !completePhysicalDomain(load.getRegion(), type)) ||
+             !boundedPhysicalDomain(load.getRegion(), type)) ||
             (llvm::any_of(type.getShape().asArrayRef(), [](int64_t extent) { return extent < 0; }) &&
              !completeLocal && !completeDynamic))
           continue;
@@ -281,12 +281,16 @@ private:
     }
   }
 
-  bool completePhysicalDomain(Value source, riscv::ValueType type) const {
+  bool boundedPhysicalDomain(Value source, riscv::ValueType type) const {
     for (auto [extent, axis] : llvm::zip(type.getShape().asArrayRef(), type.getAxisIds().asArrayRef())) {
       auto point = riscv_internal::originPoint(source, axis);
       auto partition = point ? point.getPartition().getDefiningOp<arith::ConstantIndexOp>() : arith::ConstantIndexOp();
-      auto active = riscv_internal::completePointExtent(point);
-      if (extent <= 0 || !partition || partition.value() != extent || !active || *active != extent) return false;
+      // The private object holds the partition capacity, while copyView walks
+      // the descriptor's actual extents. A tail remains a tail on the numeric
+      // read boundary; requiring a full active partition loses its snapshot
+      // before an intervening write that may alias the original source.
+      if (extent <= 0 || !partition || partition.value() != extent ||
+          riscv::denseIndexBounds(point.getActive()).upper > uint64_t(extent)) return false;
     }
     return true;
   }

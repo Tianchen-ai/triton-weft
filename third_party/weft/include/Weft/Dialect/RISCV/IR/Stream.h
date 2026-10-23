@@ -5,6 +5,10 @@
 
 namespace weft::riscv {
 
+// Integer addition is associative modulo its declared width. Extrema retain
+// the floating contract until integer extrema have their own selected leaves.
+bool supportsStreamReduction(mlir::Type element, llvm::StringRef kind);
+
 // One lane axis and explicit free-axis replicas. Coordinates are shared by
 // verification and emission; neither consumer may invent another mapping.
 struct StreamGeometry {

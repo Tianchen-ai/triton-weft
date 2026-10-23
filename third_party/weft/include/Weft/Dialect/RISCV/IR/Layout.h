@@ -42,6 +42,10 @@ private:
 std::optional<int64_t> projectCarrierPart(ValueType source, ValueType result,
                                          int64_t resultPart);
 
+// A single reduction scalar may retain singleton logical axes. They must be
+// exactly the input axes left after reduction, with one physical scalar part.
+bool isScalarReductionResult(ValueType input, mlir::Type result, int64_t axis);
+
 struct RVVLayoutSlice {
   int64_t sourcePart;
   int64_t sourceOffset;

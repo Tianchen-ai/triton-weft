@@ -498,6 +498,15 @@ allocation 和 descriptor。未闭合的动态窗口或非独占更新明确拒�
 - IME contract变成 typed fragment 初始化、operand supply、带 accumulator 的 MMA 与 unpack；
 - layout conversion获得唯一 terminal conversion leaf。
 
+整数 widening 后紧接单轴 sum 时，`rvv_widen_reduce` 直接消费窄向量，保持双宽结果
+的模整数语义。结果可以是裸标量，也可以保留所有未归约的单位轴；后者必须具有一个
+scalar carrier，axis identity 恰好等于输入删除归约轴后的序列。非单位 free axis 仍需
+逐行/分片归约，不能被这条优化合并为一个标量。pass 与 verifier 共享该坐标检查，
+terminal 继续只拼写已选的 widening reduction，不先生成整向量扩宽。
+有界 value program 将原先的数组/scalar traversal 转为 RVV issue 后，再闭合一次数值
+conversion；例如 i64 截到 i8 仍显式形成 64→32→16→8 的 narrowing 链，不能把尚未
+选定的多宽度转换交给 terminal 猜测实现。
+
 小型、单 reduction 轴的 memory-backed integer `vx` operand 可以采用 scalar tuple，
 直接供应各次 issue 的 GPR；相应 projection 保留完整坐标，不先向量加载再逐 lane 提取。
 闭合整数 contract 在 full-valid、每个 accumulator 至多两组寄存器、偶数 unroll 且静态
@@ -606,6 +615,12 @@ fresh local allocation 不改变已存在的输入，允许纯读取供应跨越
 执行路径或读取次数，可以在读取窗口时同时填共享快照。跨越写入、未知 effect 或较早 consumer 时不允许
 这种延迟。该查询在 composite lowering 的直接 stream matcher 之前使用，并在新 composite
 program 产生后由本 pass 再次消费；已经形成的单 issue 不再扩大改写。
+
+有界尾部读取同样可以物化快照：私有容量等于已声明 partition，复制遍历由原 descriptor
+的实际 extent 限制，数值边界仍保留 tail。不能因为 active 小于 capacity 而延迟读取跨过
+可能别名的写入，也不能将未复制的容量尾部作为有效数值。整数 add 的流式 carry 支持
+有符号或无符号 8/16/32/64 位；逐 lane 更新和最后归约均按原位宽取模，显式 widening
+边界仍保留，不把窄整数累加自动改成无限精度求和。
 
 issue 资源包含数学 leaf 的临时数据载体和 mask；数据载体随 LMUL 增长，mask 按实际
 寄存器计数。不能只计算输入和输出，或用固定的 m1 临时开销为更宽的指数 issue 选型。

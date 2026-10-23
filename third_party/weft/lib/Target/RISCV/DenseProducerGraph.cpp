@@ -3,6 +3,7 @@
 #include "RISCVPhysicalSupport.h"
 #include "ValueLiveness.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
+#include "Weft/Dialect/RISCV/IR/Stream.h"
 #include "Weft/Dialect/RISCV/IR/DenseRelations.h"
 #include "mlir/IR/Dominance.h"
 #include <functional>
@@ -517,9 +518,9 @@ bool DenseProducerGraph::analyze(bool required, bool allowGuards) {
     if (lanes > 1) lanePosition = position;
   if (!reductions.empty()) {
     failureReason = "reduction has no compatible issue axis";
-    if (!domain.getElementType().isF32() && !domain.getElementType().isF64() &&
-        !(domain.getElementType().isInteger(32) &&
-          llvm::all_of(reductions, [](riscv::ReduceOp reduce) { return reduce.getKind() == "add"; }))) return false;
+    if (!llvm::all_of(reductions, [&](riscv::ReduceOp reduce) {
+          return riscv::supportsStreamReduction(domain.getElementType(), reduce.getKind());
+        })) return false;
     lanePosition = reductions.front().getAxis();
     if (domain.getShape()[lanePosition] == 1 || llvm::any_of(reductions, [&](riscv::ReduceOp reduce) {
           return reduce.getAxis() != lanePosition || reduce.getResult().getType() != reductions.front().getResult().getType();

@@ -163,7 +163,7 @@ Value riscv_internal::denseReductionSeed(IRRewriter &b, Location loc,
   double neutral = kind == "max" ? -std::numeric_limits<double>::infinity()
       : kind == "min" ? std::numeric_limits<double>::infinity() : 0.0;
   Type element = accumulator.getElementType();
-  TypedAttr identity = element.isInteger(32) ? TypedAttr(b.getIntegerAttr(element, 0))
+  TypedAttr identity = isa<IntegerType>(element) ? TypedAttr(b.getIntegerAttr(element, 0))
                                             : TypedAttr(b.getFloatAttr(element, neutral));
   Value scalar = riscv::ConstantOp::create(b, loc, element, identity);
   return riscv::RVVSplatOp::create(b, loc, accumulator, scalar,

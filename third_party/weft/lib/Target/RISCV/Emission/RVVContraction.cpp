@@ -1307,7 +1307,7 @@ mlir::LogicalResult Emitter::compileRVVStreamReduceStep(
       input.parts.size() != accumulator.parts.size())
     return fail(operation,
                 "RVV stream reduce step requires matching vector parts and active lanes");
-  llvm::StringRef stem = operation.getResult().getType().getElementType().isInteger(32) ? "vadd"
+  llvm::StringRef stem = mlir::isa<mlir::IntegerType>(operation.getResult().getType().getElementType()) ? "vadd"
                          : operation.getKind() == "max" ? "vfmax"
                          : operation.getKind() == "min" ? "vfmin"
                                                         : "vfadd";
