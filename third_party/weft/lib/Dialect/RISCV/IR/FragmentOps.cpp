@@ -780,12 +780,14 @@ std::optional<int64_t> weft::riscv::fragmentZeroPrefixWidth(FragmentType fragmen
   const int64_t bits = elementBitWidth(fragment.getElementType());
   const int64_t active = fragment.getPacking().getRowsPerTile() *
       fragment.getPacking().getColumnsPerTile() * bits;
-  const int64_t width = active * 8 / target.getVlenBits();
   const int64_t elen = *llvm::max_element(target.getSupportedSEW().asArrayRef());
-  if (width <= 0 || active * 8 != width * target.getVlenBits() ||
-      width >= fragmentPartResourceGroups(fragment) * 8 || bits * 8 > elen * width ||
-      !llvm::is_contained(target.getLegalLMULEighths().asArrayRef(), width)) return std::nullopt;
-  return width;
+  std::optional<int64_t> selected;
+  for (int64_t width : target.getLegalLMULEighths().asArrayRef())
+    if (width > 0 && width < fragmentPartResourceGroups(fragment) * 8 &&
+        bits * 8 <= elen * width && active * 8 <= width * target.getVlenBits() &&
+        (!selected || width < *selected))
+      selected = width;
+  return selected;
 }
 
 mlir::LogicalResult IMEZeroOp::verify() {

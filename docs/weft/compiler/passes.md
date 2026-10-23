@@ -408,6 +408,14 @@ scale supply。仅移动既有 field/read/widen/cast/mul/纯 conversion closure�
 不改变读取次数、Level、iteration 或浮点运算树。跨越的操作必须只有读取 effect 或无 memory
 clobber 的已选 fragment MMA，随后用完整 region live set 检查 vector/fragment 容量。
 容量不足保留原顺序。调度结果写回实际 SSA 顺序，terminal emitter 不重新安排该供应。
+unpack 的 fragment 来自内层 `scf.for` 结果时，沿对应 yield 追踪 MMA 结果，以该循环作为
+同 block 调度锚点；不因循环中存在无关 MMA 就选择它。被跨越循环的所有嵌套 effect
+必须可读或纯计算；无 memory clobber 的 MMA 只更新 SSA fragment。独立供应仍只执行
+一次，不移入循环，不跨越自身的外层 Level。容量分析前按真实最后 use 更新 fragment
+accumulator reuse，避免把可以原位更新的 accumulator 误算成同时存在的新旧两份。
+循环中的单 use fragment zero 若只占硬件 fragment 的前缀，选择既有 local-prefix leaf，
+以能容纳有效元素且满足 SEW/LMUL 合法性的最小载体初始化。有效 VL 不变；不用完整
+硬件 fragment 的常量复制来初始化未被作者结果观察的行。
 
 ### `CanonicalizeRISCVLayouts`
 
@@ -1100,9 +1108,11 @@ validity 保持相同。不穿过改变类型的数值操作，不移动任何�
 两次运算的精度必须相同，不能绕过 cast/widen/narrow、跨 region 或 write/未知 effect。
 当前支持 f32/f64 scalar，以及同布局 RVV vector/vector、vector/scalar；其它
 形状继续使用原有两条运算。选择不依赖 kernel、量化格式或扩展名称。
-向量结果的 scalar addend 若在最近的循环内变化，保留原有 multiply 与 `.vf`
-add/subtract；新建 splat 再做 FMA 没有减少指令数，却增加了向量 accumulator 的存活与
-读写。若 addend 定义在循环外，广播可跨迭代复用，继续选择显式 splat + FMA。
+向量结果只含一个物理 packet 且 scalar addend 在最近的循环内变化时，保留原有
+multiply 与 `.vf` add/subtract；新建 splat 再做 FMA 没有减少指令数。
+完整有效域的多个 time/replica packet 可以共用同一 scalar 广播，因而允许显式
+splat + FMA；不能只按一个 packet 的成本拒绝整个 Value 的融合。若 addend 定义在
+循环外，广播也可跨迭代复用。新增 accumulator 的存活与读写仍由资源 pass 核算。
 已有向量 accumulator 的融合继续进行；已经物化的 `fma` 不由这个隐式 pass 改写。
 独立的 `fma` 保存 typed operands 和 exact leaf，资源 pass 重新核算实际活跃值；
 它沿用原 pointwise 的逐 part 活动长度，没有 closed FMA issue 的调度屏障或 loop-unroll 限制。

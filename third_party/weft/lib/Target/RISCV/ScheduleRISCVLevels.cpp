@@ -165,6 +165,7 @@ private:
         positions.emplace_back(op, op->getNextNode());
         op->moveBefore(anchor);
       }
+      selectFragmentRegisterReuse(kernel);
       auto pressure = physicalRegisterPressure(kernel);
       if (!pressure || pressure->total() > kernel.getTarget().getVectorRegisters()) {
         for (auto [op, next] : llvm::reverse(positions)) op->moveBefore(next);
@@ -179,10 +180,48 @@ private:
     for (unsigned depth = 0; depth < 8; ++depth) {
       auto *op = value.getDefiningOp();
       if (auto unpack = dyn_cast_or_null<riscv::IMEUnpackOp>(op)) return unpack;
-      if (!isa_and_nonnull<riscv::WidenOp, riscv::CastOp, riscv::ConvertLayoutOp>(op)) return {};
+      if (!isa_and_nonnull<riscv::WidenOp, riscv::CastOp, riscv::ReshapeOp,
+                          riscv::ConvertLayoutOp>(op)) return {};
       value = op->getOperand(0);
     }
     return {};
+  }
+
+  // A fragment can leave an inner issue loop before its scalar/vector epilogue.
+  // Follow that result's yield/carry, not merely any MMA found inside the loop.
+  // The scheduling anchor stays in the consumer's block: supplies are neither
+  // cloned into the loop nor moved across their enclosing Level.
+  static Operation *accumulationAnchor(Value value, unsigned depth = 0) {
+    if (depth >= 8) return nullptr;
+    if (auto mma = value.getDefiningOp<riscv::IMEFragmentMMAOp>()) {
+      Operation *first = mma;
+      while (auto prior = mma.getAccumulator().getDefiningOp<riscv::IMEFragmentMMAOp>()) {
+        if (prior->getBlock() != first->getBlock()) break;
+        first = prior;
+        mma = prior;
+      }
+      return first;
+    }
+    auto result = dyn_cast<OpResult>(value);
+    auto loop = result ? dyn_cast<scf::ForOp>(result.getOwner()) : scf::ForOp();
+    if (!loop) return nullptr;
+    Value carried = loop.getBody()->getTerminator()->getOperand(result.getResultNumber());
+    auto *nested = accumulationAnchor(carried, depth + 1);
+    return nested && nested->getBlock() == loop.getBody() ? loop.getOperation() : nullptr;
+  }
+
+  static bool canCross(Operation *operation) {
+    if (auto mma = dyn_cast<riscv::IMEFragmentMMAOp>(operation))
+      // Its write effect belongs to the SSA fragment, not the source storage.
+      return !mma.getMemoryClobber();
+    if (isa<scf::ForOp, scf::IfOp>(operation)) {
+      for (Region &region : operation->getRegions())
+        for (Block &block : region)
+          for (Operation &nested : block)
+            if (!canCross(&nested)) return false;
+      return true;
+    }
+    return riscv::hasOnlyReadEffects(operation);
   }
 
   static bool collect(Value value, Operation *anchor, llvm::SetVector<Operation *> &operations) {
@@ -190,8 +229,10 @@ private:
     if (!op || op->getBlock() != anchor->getBlock() || op->isBeforeInBlock(anchor)) return true;
     if (operations.contains(op)) return true;
     if (operations.size() >= 24 || op == anchor || op->getNumRegions() ||
+        op->hasAttr("birth_id") ||
         !isa<riscv::FieldOp, riscv::FieldReadOp, riscv::WidenOp, riscv::CastOp,
-             riscv::BinaryOp, riscv::ConvertLayoutOp>(op) || !riscv::hasOnlyReadEffects(op)) return false;
+             riscv::BinaryOp, riscv::ReshapeOp, riscv::ConvertLayoutOp>(op) ||
+        !riscv::hasOnlyReadEffects(op)) return false;
     if (auto binary = dyn_cast<riscv::BinaryOp>(op); binary && binary.getKind() != "mul") return false;
     for (Value operand : op->getOperands())
       if (!collect(operand, anchor, operations)) return false;
@@ -206,6 +247,19 @@ public:
   }
   void runOnOperation() override {
     SmallVector<riscv::BinaryOp> consumers;
+    getOperation().walk([&](riscv::IMEZeroOp zero) {
+      auto kernel = zero->getParentOfType<riscv::KernelOp>();
+      if (!kernel || kernel.getResourcesMaterialized() ||
+          !zero->getParentOfType<scf::ForOp>() || !zero.getResult().hasOneUse())
+        return;
+      auto width = riscv::fragmentZeroPrefixWidth(zero.getResult().getType(), kernel.getTarget());
+      if (!width) return;
+      // Keep a short logical zero at its use instead of hoisting a full
+      // fragment constant and copying every unused hardware row each iteration.
+      OpBuilder builder(zero);
+      zero.setLeafAttr(leaf(builder, "ime", "fragment-init", "ime.zero.local-prefix",
+                           "ime.zero.local-prefix", 0, 0, 0, 0, "none", "exact", {*width}));
+    });
     getOperation().walk([&](riscv::BinaryOp op) {
       if (op.getKind() == "mul") consumers.push_back(op);
     });
@@ -217,25 +271,20 @@ public:
       Value supply = consumer.getRhs();
       if (!unpack) { unpack = fragmentResult(consumer.getRhs()); supply = consumer.getLhs(); }
       if (!unpack || unpack->getBlock() != consumer->getBlock()) continue;
-      auto first = unpack.getInput().getDefiningOp<riscv::IMEFragmentMMAOp>();
+      auto *first = accumulationAnchor(unpack.getInput());
       if (!first || first->getBlock() != consumer->getBlock()) continue;
-      while (auto prior = first.getAccumulator().getDefiningOp<riscv::IMEFragmentMMAOp>()) {
-        if (prior->getBlock() != consumer->getBlock()) break;
-        first = prior;
-      }
       llvm::SetVector<Operation *> closure;
       if (!collect(supply, first, closure) || closure.empty()) continue;
       bool legal = true;
-      for (Operation *op = first; op != consumer; op = op->getNextNode()) {
-        if (auto mma = dyn_cast<riscv::IMEFragmentMMAOp>(op)) legal &= !mma.getMemoryClobber();
-        else legal &= riscv::hasOnlyReadEffects(op);
-      }
+      for (Operation *op = first; op != consumer; op = op->getNextNode())
+        legal &= canCross(op);
       if (!legal) continue;
       SmallVector<std::pair<Operation *, Operation *>> positions;
       for (Operation *op : closure) {
         positions.emplace_back(op, op->getNextNode());
         op->moveBefore(first);
       }
+      selectFragmentRegisterReuse(kernel);
       auto pressure = physicalRegisterPressure(kernel);
       if (!pressure || pressure->total() > kernel.getTarget().getVectorRegisters()) {
         for (auto [op, next] : llvm::reverse(positions)) op->moveBefore(next);

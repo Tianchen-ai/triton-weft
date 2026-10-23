@@ -38,15 +38,21 @@ public:
         const bool scalarAccumulator = vector && accumulator.getType() == vector.getElementType();
         bool reusableSplat = false;
         if (scalarAccumulator) {
-          for (Operation *parent = add->getParentOp(); parent; parent = parent->getParentOp())
-            if (auto loop = dyn_cast<LoopLikeOpInterface>(parent)) {
-              reusableSplat = loop.isDefinedOutsideOfLoop(accumulator);
-              break;
-            }
+          auto layout = vector.getLayout();
+          const auto streams = staticProduct(layout.getTimeFactors().asArrayRef());
+          const auto replicas = staticProduct(layout.getReplicaFactors().asArrayRef());
+          reusableSplat = layout.getValidity() == "full" &&
+              (streams.value_or(1) > 1 || replicas.value_or(1) > 1);
+          if (!reusableSplat)
+            for (Operation *parent = add->getParentOp(); parent; parent = parent->getParentOp())
+              if (auto loop = dyn_cast<LoopLikeOpInterface>(parent)) {
+                reusableSplat = loop.isDefinedOutsideOfLoop(accumulator);
+                break;
+              }
         }
         // A changing scalar addend already has a direct .vf add/subtract form;
-        // splat + FMA saves no instruction. An invariant addend can amortize
-        // its broadcast across loop iterations, so keep that fusion available.
+        // splat + FMA saves no instruction for a single packet. Full packets
+        // share the broadcast, as can loop iterations with an invariant addend.
         if (accumulator.getType() != result && !reusableSplat) continue;
         const StringRef kind = add.getKind() == "add" ? "add" :
             operand == 0 ? "subtract_accumulator" : "subtract_product";
