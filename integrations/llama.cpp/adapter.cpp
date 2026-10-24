@@ -20,7 +20,7 @@ struct ggml_weft_ime1_binding {
 };
 
 struct ggml_weft_ime2_binding {
-  void (*selected[2])(const uint8_t *, const uint8_t *, float *, size_t, size_t, size_t, size_t, size_t) = {};
+  void (*selected[3])(const uint8_t *, const uint8_t *, float *, size_t, size_t, size_t, size_t, size_t) = {};
   ggml_weft_ime1_t original = nullptr;
   uint64_t calls = 0;
 };
@@ -111,7 +111,7 @@ struct ThreadState {
   std::array<std::array<bool, 2>, GGML_TYPE_COUNT> checkedAMX{};
   std::array<bool, GGML_TYPE_COUNT> checkedDots{}, checkedQuantizers{};
   std::array<std::array<bool, 2>, 2> checkedPacked{};
-  std::array<bool, 2> checkedIME2{};
+  std::array<bool, 3> checkedIME2{};
   void (*quantize)(const float *, uint8_t *, size_t) = nullptr;
   ~ThreadState() { if (registry) registry->detach(&counters); }
 };
@@ -320,7 +320,7 @@ struct Adapter {
   std::array<std::unique_ptr<Quantizer>, GGML_TYPE_COUNT> quantizers;
   std::array<std::array<std::unique_ptr<PackedIME>, 2>, 2> packed;
   std::atomic<uint64_t> packedCalls{0};
-  std::array<std::unique_ptr<PackedIME2>, 2> ime2;
+  std::array<std::unique_ptr<PackedIME2>, 3> ime2;
   std::atomic<uint64_t> ime2Calls{0};
   std::array<std::array<std::unique_ptr<PackedAMX>, 2>, GGML_TYPE_COUNT> amx;
   std::atomic<uint64_t> amxCalls{0};
@@ -357,10 +357,11 @@ struct Adapter {
       packed[affine][single] = std::make_unique<PackedIME>(package.get_kernel(name), affine, single ? 1 : 4);
     }
     for (const auto &[role, name] : bindings("ggml.ime2")) {
-      require(role == "i8_prefill" || role == "i8_decode", "unsupported IME2 packed role: " + role);
-      const size_t single = role == "i8_decode";
-      require(!ime2[single], "duplicate IME2 packed role");
-      ime2[single] = std::make_unique<PackedIME2>(package.get_kernel(name), single ? 1 : 4);
+      require(role == "i8_prefill" || role == "i8_decode" || role == "i8_prefill_rows8",
+              "unsupported IME2 packed role: " + role);
+      const size_t slot = role == "i8_decode" ? 1 : role == "i8_prefill_rows8" ? 2 : 0;
+      require(!ime2[slot], "duplicate IME2 packed role");
+      ime2[slot] = std::make_unique<PackedIME2>(package.get_kernel(name), slot == 1 ? 1 : 4);
     }
     for (const auto &[role, name] : bindings("ggml.amx")) {
       require(role == "q4_0_decode" || role == "q4_0_prefill" || role == "q4_K_decode" || role == "q4_K_prefill" || role == "q6_K_decode" || role == "q6_K_prefill", "unsupported AMX packed role: " + role);
@@ -501,8 +502,8 @@ ggml_weft_ime1_binding *ggml_weft_select_ime1(ggml_weft_ime1_t original, ggml_ty
 size_t ggml_weft_call_ime2(ggml_weft_ime2_binding *binding, size_t block,
                         const uint8_t *x, const uint8_t *w, const uint8_t *zero,
                         float *y, size_t rows, size_t columns, size_t blocks, size_t stride) {
-  const size_t tileRows = rows >= 4 ? 4 : 1;
-  const auto selected = binding->selected[tileRows == 1];
+  const size_t tileRows = rows >= 8 && binding->selected[2] ? 8 : rows >= 4 ? 4 : 1;
+  const auto selected = binding->selected[tileRows == 8 ? 2 : tileRows == 1 ? 1 : 0];
   if (selected && block == 32 && !zero && rows > 0 && columns > 0 && columns % 32 == 0) {
     selected(w, x, y, columns, blocks * 32, tileRows, stride, 1);
     ++binding->calls;
@@ -515,7 +516,7 @@ ggml_weft_ime2_binding *ggml_weft_select_ime2(ggml_weft_ime1_t original, ggml_ty
   require(weightType == GGML_TYPE_Q6_K || weightType == GGML_TYPE_Q8_0,
           "IME2 signed i8 selection requires Q6_K or Q8_0 packed weights");
   const auto &entries = adapter().ime2;
-  if (!entries[0] && !entries[1]) return nullptr;
+  if (!entries[0] && !entries[1] && !entries[2]) return nullptr;
   auto &state = threadState();
   auto &binding = ime2Dispatch;
   for (size_t single = 0; single < entries.size(); ++single) {

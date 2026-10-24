@@ -177,6 +177,10 @@ M4/M1 分派及激活布局一致，单行角色也可处理 prefill 的尾行�
 `IME2Activation8Rows[1]`；原始 block32 record 分别占 34 与 38 字节，输出保留行列 stride。
 这两个角色仅替换厂商 Q6_K/Q8_0 的 signed-i8 packed 调用点，保留上游权重准备、激活量化、
 分块和线程调度。它们不绑定 Q4 的带 FP16 scale/accumulator 指令路径。
+`ggml.ime2/i8_prefill_rows8` 使用同一 M4-interleaved activation 存储，但每次计算两个连续
+cohort。仅当当前 GGML worker 的剩余行数至少为 8 时调用，并向上游返回已处理 8 行；
+输出 stride 与原调用一致。剩余 4 行使用已绑定的 `i8_prefill` 或原生实现，单行仍遵守
+独立的 M1 storage 合同。该角色不扩大 worker 任务范围，不申请新的线程或重排输入。
 `install_spacemit_source(...)` 可给已有 CPU package adapter 的源码树安装该独立后端 hooks；
 它逐项核对两个 i8 调用点及 graph/node 边界，并与 CPU backend 共用 package 和 counters。
 构建保留上游 `GGML_SPACEMIT`，运行时仍须启用厂商 backend 并选择具有 IME2 的实际 workers。

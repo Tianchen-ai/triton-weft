@@ -112,7 +112,7 @@ def validate_ime1(artifact, role):
 
 
 def validate_ime2(artifact, role):
-    if role not in ("i8_decode", "i8_prefill"):
+    if role not in ("i8_decode", "i8_prefill", "i8_prefill_rows8"):
         raise NotImplementedError(f"GGML IME2 has no packed numerical contract for {role}")
     rows = 1 if role == "i8_decode" else 4
     interface = _interface(artifact)
