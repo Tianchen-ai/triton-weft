@@ -55,7 +55,7 @@ ConvertWeftToRISCV
 → SelectRISCVScalarLoadPrimes
 → MaterializeRISCVReadSnapshots
 → CloseRISCVLeafResources
-→ CSE
+→ RISCV physical CSE
 → FuseRISCVPhysicalIssueLoops
 → EliminateDeadRISCVLayouts
 → MaterializeRISCVResources
@@ -433,6 +433,9 @@ type 的逆转换可以消除；这不授权穿过已选 coordinate exchange 任
 展开，不是整个 tile 的周期预测，不包含未变化的 MMA、decode、地址计算与 memory 延迟；
 cycle estimate 明确 unavailable。未知局部工作不填零，后续 memory/leaf/resource 失败也不
 触发另一套隐藏结构的重试。
+当原程序的已知峰值已经超出寄存器容量，而候选不增加该峰值时，前面的布局 pass 可将
+该候选交给后续真实资源闭合，不提前宣称可驻留。后续必须通过缩短活跃区间或显式
+spill/reload 使完整程序满足预算，否则拒绝。未知峰值不适用此规则；它不增加目标预算。
 
 已注册的 N16 accumulator 可按 row atom 合并，或在 VLEN 可容纳两行时保留连续行对。
 当原布局的完整活跃集合超出寄存器预算，而候选无需 spill 即可驻留时，优先合法驻留候选；
@@ -454,6 +457,9 @@ accumulator reuse，避免把可以原位更新的 accumulator 误算成同时�
 循环中的单 use fragment zero 若只占硬件 fragment 的前缀，选择既有 local-prefix leaf，
 以能容纳有效元素且满足 SEW/LMUL 合法性的最小载体初始化。有效 VL 不变；不用完整
 硬件 fragment 的常量复制来初始化未被作者结果观察的行。
+沿同 block 的 lane-local add/sub/mul 可继续追踪到唯一 unpack，因此独立整数修正不会
+遮蔽 contraction 依赖。分析遇到多个不同 unpack 或 lifecycle birth 时停止；只移动独立
+供应，不移动这些算术节点，也不重排其运算树。
 
 ### `CanonicalizeRISCVLayouts`
 
@@ -705,6 +711,17 @@ carry 改为 FragmentType，并将 unpack 放到 loop 出口。初值仍属于�
 lifetime，不把初始化吞成无身份的 leaf。signed-i8 的保守单步界为 `128*128*K_atom`，总步数
 不得使该界超过 i32；转换不越过外层 FP scale、rounding 或其它数值节点。该 pass 不创造外层
 traversal，也不凭 kernel/格式名挑选循环。
+已验证的 pure `lane_repack` 可以位于 unpack 与累加之间。每一段必须单 use，并保留相同
+element type、shape 和 axis identity；完整转换链随 unpack 放到循环出口。非纯转换、
+可观察的中间结果和 lifecycle birth 保留原有位置。
+分组布局把标量零初值展开为显式 RVV splat 时，同一精确零值仍可初始化 fragment；只替换
+已有 New 的物理初值，不增加或合并 birth。分组数值的 spill/reload 保留既有逐 part 存储
+合同，由各 op 检查 element/domain、完整 slot 大小与选定 leaf，最终 verifier 接受这些
+已验证的本地存储操作。
+
+资源闭合前的 `weft-riscv-cse` 使用 MLIR 的公共子表达式消除实现，然后重新根据当前 use-def
+选择 fragment accumulator/pointwise 的 copy 或 reuse 策略及资源费用。共享初始化值后不能
+继续沿用原 single-use 的覆盖许可；最终资源 pass 仍重新核算完整活跃集合。
 
 `MaterializeRISCVPrograms` 紧随其后，把仍以 transient macro op 承载的已选
 local-pack 与 grouped-MAC program 展开成真实 `scf` control、point、load/step 和 SSA

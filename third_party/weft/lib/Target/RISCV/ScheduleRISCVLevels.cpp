@@ -7,6 +7,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 using namespace mlir;
 using namespace weft;
@@ -203,14 +204,32 @@ private:
   }
 
   static riscv::IMEUnpackOp fragmentResult(Value value) {
-    for (unsigned depth = 0; depth < 8; ++depth) {
-      auto *op = value.getDefiningOp();
-      if (auto unpack = dyn_cast_or_null<riscv::IMEUnpackOp>(op)) return unpack;
-      if (!isa_and_nonnull<riscv::WidenOp, riscv::CastOp, riscv::ReshapeOp,
-                          riscv::ConvertLayoutOp>(op)) return {};
-      value = op->getOperand(0);
+    SmallVector<Value> pending{value};
+    llvm::SmallPtrSet<Operation *, 16> visited;
+    riscv::IMEUnpackOp result;
+    while (!pending.empty()) {
+      auto *op = pending.pop_back_val().getDefiningOp();
+      if (!op || !visited.insert(op).second) continue;
+      if (visited.size() > 24) return {};
+      if (auto unpack = dyn_cast<riscv::IMEUnpackOp>(op)) {
+        if (result && result != unpack) return {};
+        result = unpack;
+        continue;
+      }
+      if (op->hasAttr("birth_id")) continue;
+      if (isa<riscv::WidenOp, riscv::CastOp, riscv::ReshapeOp,
+              riscv::ConvertLayoutOp>(op)) {
+        pending.push_back(op->getOperand(0));
+      } else if (auto binary = dyn_cast<riscv::BinaryOp>(op);
+                 binary && (binary.getKind() == "add" || binary.getKind() == "sub" ||
+                            binary.getKind() == "mul")) {
+        // An independent correction does not sever the dependency on the
+        // contraction. Follow only lane-local arithmetic to its unique unpack;
+        // do not move or reassociate that arithmetic while scheduling supply.
+        llvm::append_range(pending, binary->getOperands());
+      }
     }
-    return {};
+    return result;
   }
 
   // A fragment can leave an inner issue loop before its scalar/vector epilogue.

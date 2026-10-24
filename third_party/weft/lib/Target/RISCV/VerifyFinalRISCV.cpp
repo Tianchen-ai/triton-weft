@@ -224,11 +224,13 @@ public:
       if ((llvm::any_of(operation->getOperandTypes(), grouped) ||
            llvm::any_of(operation->getResultTypes(), grouped)) &&
           !mlir::isa<riscv::IMEUnpackOp, riscv::NewOp, riscv::UnaryOp,
-                     riscv::BinaryOp, riscv::FMAOp, riscv::CastOp, riscv::WidenOp, riscv::NarrowOp,
+                     riscv::BinaryOp, riscv::FMAOp, riscv::RVVIntegerMACOp,
+                     riscv::CastOp, riscv::WidenOp, riscv::NarrowOp,
                      riscv::RVVAxisBroadcastOp, riscv::RVVSplatOp, riscv::ConvertLayoutOp,
+                     riscv::SpillOp, riscv::ReloadOp, riscv::ReloadSliceOp,
                      riscv::RegisterMaterializeOp, mlir::scf::ForOp,
                      mlir::scf::IfOp, mlir::scf::YieldOp>(operation)) {
-        operation->emitError("replica-grouped values require a selected pointwise/control relation or an explicit lane repack");
+        operation->emitError("replica-grouped values require a selected pointwise/control relation, an explicit lane repack, or verified spill storage");
         failed = true;
       }
       mlir::Value region;

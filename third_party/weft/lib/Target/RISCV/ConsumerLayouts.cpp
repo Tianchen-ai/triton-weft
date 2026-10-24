@@ -611,10 +611,18 @@ static mlir::LogicalResult propagateConsumerLayouts(
     auto baselinePressure = physicalRegisterPressure(kernel);
     const bool avoidsSpill = baselinePressure &&
         baselinePressure->total() > kernel.getTarget().getVectorRegisters();
-    const bool selected = resourceLegal && candidate && (avoidsSpill || preferGrouped || lessWork(*candidate, *baseline));
+    // A numerical snapshot may exceed the register file before the memory and
+    // resource passes shorten its live ranges or insert explicit spill/reload.
+    // Do not reject an equally bounded representation at this earlier stage.
+    // Only a proposal that does not increase an already excessive peak may
+    // defer that decision; final resource materialization remains mandatory.
+    const bool requiresClosure = legal && pressure && baselinePressure && avoidsSpill &&
+        pressure->total() <= baselinePressure->total();
+    const bool selected = (resourceLegal || requiresClosure) && candidate &&
+        (avoidsSpill || preferGrouped || lessWork(*candidate, *baseline));
     llvm::errs() << "weft-consumer-layout: candidates=2 requested=" << kernel.getLocalTileStrategy() << " selected="
                  << (selected ? (grouped ? "register-grouped" : rowPairs ? "register-row-pairs" : completeRow ? "complete-row" : "fragment-order") : "existing")
-                 << " reason=" << (!legal ? "unsupported-coordinate-edge" : !resourceLegal ? "resident-budget" : !candidate ? "unknown-local-work" : avoidsSpill ? "fits-resident-budget" : preferGrouped ? "target-register-group-rule" : selected ? "less-inner-issue-work" : "no-issue-work-reduction")
+                 << " reason=" << (!legal ? "unsupported-coordinate-edge" : !resourceLegal && requiresClosure ? "requires-resource-closure" : !resourceLegal ? "resident-budget" : !candidate ? "unknown-local-work" : avoidsSpill ? "fits-resident-budget" : preferGrouped ? "target-register-group-rule" : selected ? "less-inner-issue-work" : "no-issue-work-reduction")
                  << " existing-resident-groups=" << (baselinePressure ? baselinePressure->total() : -1)
                  << " resident-groups=" << (pressure ? pressure->total() : -1)
                  << " scope=pointwise+broadcast+conversion+initializer estimate=pre-system-compiler cycle-estimate=unavailable work-by-dynamic-loop-depth(alu,movement)=";

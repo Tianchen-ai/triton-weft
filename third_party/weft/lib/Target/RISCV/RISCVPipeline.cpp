@@ -7,10 +7,12 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/Transforms/CSE.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/raw_ostream.h"
@@ -22,6 +24,28 @@ using namespace mlir;
 using namespace weft;
 
 namespace {
+
+class EliminatePhysicalCommonSubexpressions
+    : public PassWrapper<EliminatePhysicalCommonSubexpressions, OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(EliminatePhysicalCommonSubexpressions)
+  StringRef getArgument() const override { return "weft-riscv-cse"; }
+  StringRef getDescription() const override {
+    return "Eliminate common physical expressions and rebind use-dependent fragment storage";
+  }
+  void runOnOperation() override {
+    IRRewriter rewriter(&getContext());
+    DominanceInfo dominance(getOperation());
+    eliminateCommonSubExpressions(rewriter, dominance, getOperation());
+    // Deduplicating a fragment initializer changes its consumer count. A
+    // previously unique accumulator can no longer overwrite that shared value.
+    // Rebind the physical policy and its resource charge before verification;
+    // final resource materialization still decides whether the program fits.
+    getOperation().walk([&](riscv::KernelOp kernel) {
+      riscv_internal::selectFragmentRegisterReuse(kernel);
+    });
+  }
+};
 
 StringRef checkpointAttribute(RISCVCheckpoint checkpoint) {
   switch (checkpoint) {
@@ -334,7 +358,7 @@ std::unique_ptr<Pass> makePass(PassID id, const RISCVCompilerOptions &options,
   case PassID::IntegerPointwise: return createContractRISCVIntegerPointwisePass();
   case PassID::Snapshots: return createMaterializeRISCVReadSnapshotsPass();
   case PassID::LeafResources: return createCloseRISCVLeafResourcesPass();
-  case PassID::CSE: return createCSEPass();
+  case PassID::CSE: return std::make_unique<EliminatePhysicalCommonSubexpressions>();
   case PassID::FuseIssues: return createFuseRISCVPhysicalIssueLoopsPass();
   case PassID::Resources: return createMaterializeRISCVResourcesPass();
   case PassID::Verify: return createVerifyFinalRISCVPass();

@@ -597,12 +597,28 @@ void retainFragmentAccumulators(
     if (!mma || !unpack.getResult().hasOneUse() || !mma.getResult().hasOneUse() ||
         !mma.getAccumulator().getDefiningOp<riscv::IMEZeroOp>())
       continue;
-    auto add = mlir::dyn_cast<riscv::BinaryOp>(*unpack.getResult().getUsers().begin());
+    mlir::Value numeric = unpack.getResult();
+    llvm::SmallVector<riscv::ConvertLayoutOp> handoff;
+    while (numeric.hasOneUse()) {
+      auto conversion = mlir::dyn_cast<riscv::ConvertLayoutOp>(*numeric.getUsers().begin());
+      if (!conversion || conversion->getBlock() != unpack->getBlock() ||
+          conversion->hasAttr("birth_id") ||
+          conversion.getConversion().getKind() != "lane_repack" ||
+          conversion.getConversion().getEffect() != "pure") break;
+      auto from = mlir::cast<riscv::ValueType>(numeric.getType());
+      auto to = conversion.getResult().getType();
+      if (from.getElementType() != to.getElementType() || from.getShape() != to.getShape() ||
+          from.getAxisIds() != to.getAxisIds()) break;
+      handoff.push_back(conversion);
+      numeric = conversion.getResult();
+    }
+    if (!numeric.hasOneUse()) continue;
+    auto add = mlir::dyn_cast<riscv::BinaryOp>(*numeric.getUsers().begin());
     if (!add || add.getKind() != "add" || !add.getResult().hasOneUse() ||
         add->getBlock() != unpack->getBlock())
       continue;
     auto carried = mlir::dyn_cast<mlir::BlockArgument>(
-        add.getLhs() == unpack.getResult() ? add.getRhs() : add.getLhs());
+        add.getLhs() == numeric ? add.getRhs() : add.getLhs());
     auto loop = mlir::dyn_cast<mlir::scf::ForOp>(add->getParentOp());
     if (!carried || !loop || carried.getOwner() != loop.getBody() ||
         carried.getArgNumber() == 0)
@@ -621,11 +637,14 @@ void retainFragmentAccumulators(
     const unsigned index = carried.getArgNumber() - 1;
     auto yield = mlir::cast<mlir::scf::YieldOp>(loop.getBody()->getTerminator());
     auto initial = loop.getInitArgs()[index].getDefiningOp<riscv::NewOp>();
+    mlir::Value seed = initial ? initial.getInitial() : mlir::Value();
+    if (auto splat = seed ? seed.getDefiningOp<riscv::RVVSplatOp>() : riscv::RVVSplatOp())
+      seed = splat.getScalar();
     if (!initial || !initial.getInitialized() || initial.getPlacement() != "register" ||
         !initial.getResult().hasOneUse() ||
-        constantInt(initial.getInitial()) != 0 ||
+        !seed || constantInt(seed) != 0 ||
         yield.getOperand(index) != next ||
-        carried.getType() != unpack.getResult().getType() ||
+        carried.getType() != numeric.getType() ||
         add.getResult().getType() != carried.getType())
       continue;
     auto lower = constantInt(loop.getLowerBound());
@@ -654,10 +673,16 @@ void retainFragmentAccumulators(
     rewriter.setInsertionPointAfter(loop);
     auto final = riscv::IMEUnpackOp::create(rewriter, loop.getLoc(), oldType, loop.getResult(index),
         unpack.getConversion(), unpack.getLeaf());
-    loop.getResult(index).replaceAllUsesExcept(final.getResult(), final);
+    mlir::Value result = final.getResult();
+    mlir::IRMapping mapping;
+    mapping.map(unpack.getResult(), result);
+    for (auto conversion : handoff)
+      result = rewriter.clone(*conversion, mapping)->getResult(0);
+    loop.getResult(index).replaceAllUsesExcept(result, final);
     copyOrigin(unpack, final);
     if (update) rewriter.eraseOp(update);
     rewriter.eraseOp(add);
+    for (auto conversion : llvm::reverse(handoff)) rewriter.eraseOp(conversion);
     rewriter.eraseOp(unpack);
   }
 }
