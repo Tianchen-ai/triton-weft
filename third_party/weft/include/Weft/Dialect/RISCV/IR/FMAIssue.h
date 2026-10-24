@@ -13,6 +13,8 @@ llvm::StringRef pointwiseFMAInstruction(mlir::Type lhs, mlir::Type rhs,
                                       mlir::Type result, llvm::StringRef kind = "add");
 llvm::StringRef pointwiseIntegerMACInstruction(TargetAttr target, ValueType lhs,
                                                mlir::Type rhs, ValueType result);
+std::optional<llvm::SmallVector<std::pair<int64_t, int64_t>>>
+integerMACRowParts(ValueType vector, ValueType multiplier, ValueType result);
 
 // A finite set of independent lane-wise FMA updates. All operands are numeric
 // values; memory supply, reduction traversal and initialization remain IR.

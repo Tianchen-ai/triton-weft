@@ -128,6 +128,10 @@ time/replica 坐标；共享寄存器坐标分析确定每个结果 part 的来�
 `rvv_integer_mac` 使用 `rvv.vmacc.vx` 实现同宽整数的模乘加。vector、accumulator 与 result
 具有相同的完整 type，multiplier 是相同元素类型的 scalar；每个 part 保留原 active lanes。
 它没有 widening、saturation、读取或额外临时载体，不能跨过显式整数精度边界。
+`rvv.vmacc.row.vx` 允许 multiplier 为同位宽 scalar tuple、vector 覆盖输出的列轴；
+共同寄存器坐标分析证明每个输出 carrier 对应同一个 scalar part 与一个完整 vector part。
+pass 只合并同 block 的单消费者整数 multiply/add，保持原模整数位宽，不跨越 cast、widen、
+region 或写入边界。它消去中间乘积，不新增 broadcast buffer、内存读取或归约。
 
 两个同型整数 operand 分别扩到双倍位宽后相乘，可以选择已有的 `rvv_widen_multiply`。
 选择要求相同 signedness、完整有效域、相同坐标分解与合法的双倍 SEW/LMUL；不跨越

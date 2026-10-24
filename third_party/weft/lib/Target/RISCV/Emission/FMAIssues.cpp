@@ -9,18 +9,32 @@ mlir::LogicalResult Emitter::compileRVVIntegerMAC(riscv::RVVIntegerMACOp operati
   auto accumulator = materializeNumeric(operation.getAccumulator(), bindings.lookup(operation.getAccumulator()));
   if (mlir::failed(vector) || mlir::failed(multiplier) || mlir::failed(accumulator)) return mlir::failure();
   auto instruction = operation.getLeaf().getInstruction();
+  const bool rows = instruction == "rvv.vmacc.row.vx";
+  const auto rowParts = rows ? riscv::integerMACRowParts(operation.getVector().getType(),
+      mlir::dyn_cast<riscv::ValueType>(operation.getMultiplier().getType()), operation.getResult().getType())
+      : std::optional<llvm::SmallVector<std::pair<int64_t, int64_t>>>();
   const bool wideScalar = instruction == "rvv.vwmacc.vx" || instruction == "rvv.vwmaccu.vx";
-  const bool scalarMultiplier = instruction == "rvv.vmacc.vx" || wideScalar;
+  const bool scalarMultiplier = instruction == "rvv.vmacc.vx" || wideScalar || rows;
   const bool unsignedWide = instruction == "rvv.vwmaccu.vv";
   if ((!scalarMultiplier && !unsignedWide && instruction != "rvv.vwmacc.vv") ||
       vector->kind != Binding::Kind::Vector || accumulator->kind != Binding::Kind::Vector ||
-      vector->parts.size() != accumulator->parts.size() ||
-      (scalarMultiplier ? multiplier->kind != Binding::Kind::Scalar :
+      (rows ? !rowParts || rowParts->size() != accumulator->parts.size() :
+              vector->parts.size() != accumulator->parts.size()) ||
+      (rows ? multiplier->kind != Binding::Kind::ScalarTuple && multiplier->kind != Binding::Kind::Scalar :
+       scalarMultiplier ? multiplier->kind != Binding::Kind::Scalar :
           multiplier->kind != Binding::Kind::Vector || multiplier->parts.size() != vector->parts.size()))
     return fail(operation, "integer MAC lost its selected numeric bindings");
   Binding result;
   result.kind = Binding::Kind::Vector;
-  for (size_t part = 0; part < vector->parts.size(); ++part) {
+  for (size_t part = 0; part < accumulator->parts.size(); ++part) {
+    const int64_t vectorPart = rows ? (*rowParts)[part].first : part;
+    const int64_t multiplierPart = rows ? (*rowParts)[part].second : part;
+    if (vectorPart >= int64_t(vector->parts.size()) ||
+        (rows && (multiplier->kind == Binding::Kind::Scalar ? multiplierPart != 0 :
+                   multiplierPart >= int64_t(multiplier->parts.size()))))
+      return fail(operation, "integer MAC row mapping exceeds its numeric bindings");
+    const std::string scale = rows && multiplier->kind == Binding::Kind::ScalarTuple
+        ? multiplier->parts[multiplierPart] : scalarMultiplier ? multiplier->scalar : multiplier->parts[part];
     auto name = fresh("integer_mac");
     std::string intrinsic = wideScalar
         ? (instruction == "rvv.vwmaccu.vx" ? "vwmaccu_vx_" : "vwmacc_vx_")
@@ -28,7 +42,7 @@ mlir::LogicalResult Emitter::compileRVVIntegerMAC(riscv::RVVIntegerMACOp operati
         unsignedWide ? "vwmaccu_vv_" : "vwmacc_vv_";
     line(vectorType(operation.getResult()) + " " + name + " = __riscv_" + intrinsic +
          vectorSuffix(operation.getResult()) + "(" + accumulator->parts[part] + ", " +
-         (scalarMultiplier ? multiplier->scalar : multiplier->parts[part]) + ", " + vector->parts[part] + ", " +
+         scale + ", " + vector->parts[vectorPart] + ", " +
          partVL(operation.getResult(), part) + ");");
     result.parts.push_back(std::move(name));
   }

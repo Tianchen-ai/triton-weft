@@ -441,7 +441,8 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
           accumulator.getType() != result) continue;
       mlir::Value vector = product.getLhs();
       mlir::Value scalar = product.getRhs();
-      if (!mlir::isa<riscv::ValueType>(vector.getType())) std::swap(vector, scalar);
+      auto leftType = mlir::dyn_cast<riscv::ValueType>(vector.getType());
+      if (!leftType || leftType.getLayout().getCarrier() == "scalar") std::swap(vector, scalar);
       auto narrowVector = exactIntegerExtensionInput(vector);
       auto narrowScalar = exactIntegerExtensionInput(scalar);
       if (narrowVector && narrowScalar) {
@@ -463,18 +464,21 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
         std::swap(vector, scalar);
       auto input = vector ? mlir::dyn_cast<riscv::ValueType>(vector.getType()) : riscv::ValueType();
       auto scale = scalar ? mlir::dyn_cast<mlir::IntegerType>(scalar.getType()) : mlir::IntegerType();
+      auto rowScale = scalar ? mlir::dyn_cast<riscv::ValueType>(scalar.getType()) : riscv::ValueType();
       auto element = input ? mlir::dyn_cast<mlir::IntegerType>(input.getElementType()) : mlir::IntegerType();
-      if (!input || !element || !scale || scale.isSignless() ||
-          scale.getSignedness() != element.getSignedness() || scale.getWidth() > element.getWidth()) continue;
-      auto instruction = riscv::pointwiseIntegerMACInstruction(kernel.getTarget(), input, element, result);
+      if (!input || !element) continue;
+      if (!rowScale && (!scale || scale.isSignless() ||
+          scale.getSignedness() != element.getSignedness() || scale.getWidth() > element.getWidth())) continue;
+      auto instruction = riscv::pointwiseIntegerMACInstruction(kernel.getTarget(), input,
+          rowScale ? mlir::Type(rowScale) : mlir::Type(element), result);
       if (instruction != "rvv.vmacc.vx" && instruction != "rvv.vwmacc.vx" &&
-          instruction != "rvv.vwmaccu.vx") continue;
+          instruction != "rvv.vwmaccu.vx" && instruction != "rvv.vmacc.row.vx") continue;
       bool ordered = true;
       for (auto *op = product->getNextNode(); op != add; op = op->getNextNode())
         if (op->getNumRegions() || !riscv::hasOnlyReadEffects(op)) { ordered = false; break; }
       if (!ordered) continue;
       rewriter.setInsertionPoint(add);
-      if (scale != element) {
+      if (!rowScale && scale != element) {
         auto extended = riscv::WidenOp::create(rewriter, add.getLoc(), element, scalar,
             riscv_internal::unselectedLeaf(rewriter));
         // MAC selection runs after the generic operation selector. Carry the

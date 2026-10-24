@@ -178,6 +178,32 @@ StringRef weft::riscv::pointwiseFMAInstruction(Type lhs, Type rhs, Type result, 
       ? select("rvv.vfmacc.vf", "rvv.vfnmsac.vf", "rvv.vfmsac.vf") : "";
 }
 
+std::optional<SmallVector<std::pair<int64_t, int64_t>>>
+weft::riscv::integerMACRowParts(ValueType vector, ValueType multiplier, ValueType result) {
+  if (!vector || !multiplier || !result) return std::nullopt;
+  auto integer = dyn_cast<IntegerType>(result.getElementType());
+  auto output = RegisterCoordinates::get(result.getLayout());
+  if (!integer || integer.isSignless() || integer.getWidth() < 8 || integer.getWidth() > 64 ||
+      vector.getElementType() != integer || multiplier.getElementType() != integer ||
+      vector.getLayout().getCarrier() != "rvv" || multiplier.getLayout().getCarrier() != "scalar" ||
+      result.getLayout().getCarrier() != "rvv" || !embeds(vector, result) || !embeds(multiplier, result) ||
+      vector.getLayout().getSew() != result.getLayout().getSew() ||
+      vector.getLayout().getLmulEighths() != result.getLayout().getLmulEighths() ||
+      !output || output->parts() < 1 || output->parts() > 64 ||
+      output->lanes() != result.getLayout().getVl()) return std::nullopt;
+  for (int64_t axis : result.getAxisIds().asArrayRef())
+    if (!llvm::is_contained(vector.getAxisIds().asArrayRef(), axis) &&
+        !llvm::is_contained(multiplier.getAxisIds().asArrayRef(), axis)) return std::nullopt;
+  SmallVector<std::pair<int64_t, int64_t>> parts;
+  for (int64_t part = 0; part < output->parts(); ++part) {
+    auto first = project(vector, result, part, false);
+    auto second = project(multiplier, result, part, true);
+    if (!first || !second) return std::nullopt;
+    parts.emplace_back(*first, *second);
+  }
+  return parts;
+}
+
 StringRef weft::riscv::pointwiseIntegerMACInstruction(TargetAttr target, ValueType lhs,
                                                      Type rhs, ValueType type) {
   if (!target || !lhs || !type) return "";
@@ -189,10 +215,12 @@ StringRef weft::riscv::pointwiseIntegerMACInstruction(TargetAttr target, ValueTy
       (layout.getValidity() != "full" && layout.getValidity() != "tail") ||
       !supportsRVVLayout(target, layout)) return "";
   if (lhs == type && rhs == element) return "rvv.vmacc.vx";
+  auto multiplier = dyn_cast<ValueType>(rhs);
+  if (integerMACRowParts(lhs, multiplier, type) && supportsRVVLayout(target, lhs.getLayout()))
+    return "rvv.vmacc.row.vx";
   if (rhs == lhs.getElementType() && layout.getValidity() == "full" &&
       supportsRVVWidenBinary(target, lhs, lhs, type))
     return element.isUnsigned() ? "rvv.vwmaccu.vx" : "rvv.vwmacc.vx";
-  auto multiplier = dyn_cast<ValueType>(rhs);
   if (layout.getValidity() == "full" &&
       supportsRVVWidenBinary(target, lhs, multiplier, type))
     return element.isUnsigned() ? "rvv.vwmaccu.vv" : "rvv.vwmacc.vv";
