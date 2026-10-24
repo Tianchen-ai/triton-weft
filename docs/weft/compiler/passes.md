@@ -24,11 +24,25 @@ natural、grouped/layered、joined 几何事实；byte/bit order 和 persistent 
 记录轴由实际 descriptor extent 遍历。这不覆盖任意整记录 reshape 传输或字段窗口；
 这些访问仍须具有自己的完整物理程序，不能留给 emitter 临时解释。
 
+`MaterializeRISCVEncodedValues` 在布局选择前处理有界 base-record 的
+load → reshape → field/store 子图。原 load 处生成私有记录字节和逐记录有效性，
+reshape 的输入轴次序生成显式逆坐标运算；整记录 store 只传输有效记录，字段数值
+沿用共享 byte-fragment 关系，并进入共同的数值有效性传播。读取时刻不因后续
+重排或可能别名的写入而改变，padding 随整记录逐字节保存。该物理程序目前不接管
+derived layout、跨控制结果或 stage 的 encoded reshape 子图。
+
+descriptor 的请求 extent 与 backing storage 的有效范围分别验证：`MemoryBounds`
+生成穿过 subview、slice 和轴改名的显式 SSA 条件。嵌套 domain point 替换同轴的
+绝对基坐标，普通 index/subview offset 仍按相对坐标组合，避免重复加上父层 base。
+已经拥有实际 allocation 的 `LocalBind` 保持 local carrier；布局传播不能隐式将
+存储身份变成寄存器数值，消费者必须经过真实的 load 或 conversion。
+
 ## 1. 固定顺序
 
 ```text
 ConvertWeftToRISCV
 → SpecializeRISCVPointerOffsets
+→ MaterializeRISCVEncodedValues
 → MaterializeRISCVReductions
 → MaterializeRISCVGroupedArithmetic
 → MaterializeRISCVAtomics

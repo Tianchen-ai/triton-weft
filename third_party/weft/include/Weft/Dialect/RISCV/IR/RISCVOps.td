@@ -1185,6 +1185,12 @@ def WeftRISCV_RecordCohortOp : WeftRISCV_TerminalOp<"record_cohort"> {
   let hasVerifier = 1;
 }
 
+def WeftRISCV_PointBaseOp : WeftRISCV_TerminalOp<"point_base", [Pure]> {
+  let summary = "The explicit logical base coordinate of an existing physical point";
+  let arguments = (ins WeftRISCV_PointType:$point);
+  let results = (outs Index:$result);
+}
+
 def WeftRISCV_ConstantOp : WeftRISCV_TerminalOp<"constant", [Pure]> {
   let arguments = (ins AnyAttr:$value);
   let results = (outs AnyType:$result);

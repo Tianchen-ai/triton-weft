@@ -481,6 +481,13 @@ mlir::LogicalResult Emitter::compileOperation(mlir::Operation &operation) {
     return compileAtomicRMW(atomic);
   if (auto commit = mlir::dyn_cast<riscv::StoreOp>(operation))
     return compileCommit(commit);
+  if (auto coordinate = mlir::dyn_cast<riscv::PointBaseOp>(operation)) {
+    auto point = bindings.lookup(coordinate.getPoint());
+    if (point.kind != Binding::Kind::Point)
+      return fail(coordinate, "point base requires its explicit physical point binding");
+    bindings[coordinate.getResult()] = scalar(point.point.base);
+    return mlir::success();
+  }
   if (auto byte = mlir::dyn_cast<riscv::FieldByteStoreOp>(operation))
     return compileFieldByteStore(byte);
   if (auto byte = mlir::dyn_cast<riscv::FieldByteLoadOp>(operation))

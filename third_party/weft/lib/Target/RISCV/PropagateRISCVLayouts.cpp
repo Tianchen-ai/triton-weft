@@ -1245,9 +1245,10 @@ bool canPlaceStateLocally(mlir::Value value) {
 
 Roles rolesFor(mlir::Value value) {
   Roles roles;
-  // An uninitialized state denotes addressable storage, including rank-zero
-  // state.  It cannot acquire a numerical register value before its writes.
-  if (value.getDefiningOp<riscv::EmptyOp>()) {
+  // An uninitialized state and an explicit local binding denote addressable
+  // storage, including rank-zero state. A register representation requires a
+  // real read; layout propagation cannot turn the storage identity into data.
+  if (mlir::isa_and_nonnull<riscv::EmptyOp, riscv::LocalBindOp>(value.getDefiningOp())) {
     roles.local = true;
     return roles;
   }

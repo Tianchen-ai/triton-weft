@@ -170,7 +170,7 @@ private:
 };
 
 enum class PassID {
-  BindSource, Convert, PointerOffsets, Reductions, GroupedArithmetic, NumericConversions, Atomics, Select, Layouts, LocalWindows, CanonicalizeLayouts, Memory,
+  BindSource, Convert, PointerOffsets, EncodedValues, Reductions, GroupedArithmetic, NumericConversions, Atomics, Select, Layouts, LocalWindows, CanonicalizeLayouts, Memory,
   PrepareComposites, DenseContractions, Composites, SelectPanelTransfers, PanelTransfers,
   DenseFragments, Values, LocalProjections, Programs, RecordLoops, NestedMemory, Bitplanes,
   Hoist, Schedule, Pipeline, SCCP, Control, Fragments, ShareWindows,
@@ -192,6 +192,7 @@ constexpr Entry prefix[] = {
     {PassID::BindSource, "source-specialization"},
     {PassID::Convert, "canonical-to-physical"},
     {PassID::PointerOffsets, "pointer-addressing"},
+    {PassID::EncodedValues, "encoded-value-materialization"},
     {PassID::Reductions, "reduction-materialization"},
     {PassID::GroupedArithmetic, "grouped-arithmetic-materialization"},
     {PassID::Atomics, "atomic-materialization"},
@@ -313,6 +314,7 @@ std::unique_ptr<Pass> makePass(PassID id, const RISCVCompilerOptions &options,
   }
   case PassID::Reductions: return createMaterializeRISCVReductionsPass();
   case PassID::GroupedArithmetic: return createMaterializeRISCVGroupedArithmeticPass();
+  case PassID::EncodedValues: return createMaterializeRISCVEncodedValuesPass();
   case PassID::NumericConversions: return createMaterializeRISCVNumericConversionsPass();
   case PassID::Atomics: return createMaterializeRISCVAtomicsPass();
   case PassID::Helpers: return createFinalizeRISCVHelpersPass();

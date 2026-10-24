@@ -1,4 +1,5 @@
 #include "NumericalValidity.h"
+#include "LocalMemory.h"
 #include "Weft/Analysis/ReductionIdentity.h"
 #include "RISCVPhysicalSupport.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -296,6 +297,9 @@ class ValidityPropagation {
     auto valueType = dyn_cast<riscv::ValueType>(op.getValue().getType());
     Value active = combined(op, op.getValue().getType());
     if (!valueType) {
+      auto bounds = memoryContains(b, op.getRegion(), {}, op);
+      if (failed(bounds)) return failure();
+      active = b.createOrFold<arith::AndIOp>(op.getLoc(), active, *bounds);
       auto branch = scf::IfOp::create(b, op.getLoc(), active, false);
       op->moveBefore(branch.thenBlock()->getTerminator());
       return success();
@@ -330,6 +334,9 @@ class ValidityPropagation {
       }
       Value predicate = riscv::ExtractOp::create(b, loc, b.getI1Type(), active, coordinates,
           b.getArrayAttr(selectors), unassignedAccess(b), unselectedLeaf(b));
+      auto bounds = memoryContains(b, op.getRegion(), coordinates, op);
+      if (failed(bounds)) return failure();
+      predicate = b.createOrFold<arith::AndIOp>(loc, predicate, *bounds);
       auto branch = scf::IfOp::create(b, loc, predicate, false);
       OpBuilder::InsertionGuard guard(b);
       b.setInsertionPointToStart(branch.thenBlock());

@@ -12,6 +12,10 @@ struct LogicalDomain {
   llvm::ArrayRef<int64_t> axes;
 };
 
+// Resolve an axis permutation once, independently of storage or target lanes.
+std::optional<llvm::SmallVector<unsigned>> axisPermutation(
+    llvm::ArrayRef<int64_t> axes, llvm::ArrayRef<int64_t> order);
+
 struct GroupedAxes {
   int64_t axis;
   int64_t group;

@@ -4018,11 +4018,12 @@ private:
   LogicalResult arrayReshape(wk::ReshapeOp op) {
     Location loc = op.getLoc(); auto inputShape = arrayExtents(op.getInput(), loc), outputShape = arrayExtents(op.getResult(), loc);
     auto inputAxes = axes(op.getInput().getType());
+    auto permutation = weft::analysis::axisPermutation(inputAxes, op.getOrder());
+    if (!permutation) return op.emitError("x86 reshape requires a complete axis permutation");
     auto output = weft::x86::allocateArray(b, loc, scalar(op.getResult().getType()), outputShape);
     if (failed(weft::x86::forArray(b, loc, outputShape, [&](Value linear, ValueRange) {
       SmallVector<Value> coordinates(inputShape.size()); Value remaining = linear;
-      for (int64_t axis : llvm::reverse(op.getOrder())) {
-        unsigned position = llvm::find(inputAxes, axis) - inputAxes.begin();
+      for (unsigned position : llvm::reverse(*permutation)) {
         coordinates[position] = arith::RemUIOp::create(b, loc, remaining, inputShape[position]);
         remaining = arith::DivUIOp::create(b, loc, remaining, inputShape[position]);
       }
@@ -4710,12 +4711,9 @@ private:
     }
     if (auto reshape = dyn_cast<wk::ReshapeOp>(op)) {
       auto dimensions = shape(reshape.getInput().getType()), inputAxes = axes(reshape.getInput().getType());
-      SmallVector<int64_t> order;
-      for (auto id : reshape.getOrder()) {
-        auto found = llvm::find(inputAxes, id);
-        if (found == inputAxes.end()) return reshape.emitError("x86 reshape axis is absent");
-        order.push_back(found - inputAxes.begin());
-      }
+      auto permutation = weft::analysis::axisPermutation(inputAxes, reshape.getOrder());
+      if (!permutation) return reshape.emitError("x86 reshape requires a complete axis permutation");
+      const auto &order = *permutation;
       SmallVector<int64_t> reordered;
       for (auto d : order) reordered.push_back(dimensions[d]);
       SmallVector<int64_t> indices;

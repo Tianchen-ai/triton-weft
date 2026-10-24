@@ -64,6 +64,12 @@ mlir::FailureOr<mlir::Value> localView(mlir::IRRewriter &builder,
                                     mlir::Operation *anchor);
 mlir::Value completeLocalSlice(mlir::IRRewriter &builder, mlir::Value view);
 
+// Check a logical coordinate against every enclosing descriptor window and
+// its backing storage. A Subview extent is a requested capacity, not proof
+// that the parent contains that many elements. Returned predicates are SSA.
+mlir::FailureOr<mlir::Value> memoryContains(mlir::IRRewriter &builder,
+    mlir::Value view, llvm::ArrayRef<mlir::Value> coordinates, mlir::Operation *anchor);
+
 // Full selected register coordinates can read a completed static local value.
 // Time may occur on any axis, independently of the lane axis.
 bool isCompleteLocalRead(riscv::ConvertLayoutOp conversion);

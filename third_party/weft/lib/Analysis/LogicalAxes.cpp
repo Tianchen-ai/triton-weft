@@ -4,6 +4,21 @@
 
 using namespace weft::analysis;
 
+std::optional<llvm::SmallVector<unsigned>> weft::analysis::axisPermutation(
+    llvm::ArrayRef<int64_t> axes, llvm::ArrayRef<int64_t> order) {
+  if (axes.size() != order.size()) return {};
+  llvm::SmallDenseSet<int64_t> unique;
+  for (int64_t axis : axes) if (!unique.insert(axis).second) return {};
+  unique.clear();
+  llvm::SmallVector<unsigned> result;
+  for (int64_t axis : order) {
+    auto found = llvm::find(axes, axis);
+    if (found == axes.end() || !unique.insert(axis).second) return {};
+    result.push_back(found - axes.begin());
+  }
+  return result;
+}
+
 std::optional<MatrixAxes> weft::analysis::matrixAxes(
     LogicalDomain left, LogicalDomain right, LogicalDomain output,
     llvm::ArrayRef<int64_t> reductionAxes) {
