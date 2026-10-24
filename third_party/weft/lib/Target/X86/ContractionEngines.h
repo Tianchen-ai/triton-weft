@@ -25,6 +25,6 @@ mlir::FailureOr<ContractionEngine> selectContractionEngine(
     bool arrayResult, llvm::ArrayRef<int64_t> left, llvm::ArrayRef<int64_t> right,
     llvm::ArrayRef<int64_t> output);
 void recordContractionEngine(mlir::ModuleOp module, mlir::Operation &source,
-                             ContractionEngine engine, bool arrayResult);
+                             ContractionEngine engine);
 } // namespace weft::x86
 #endif

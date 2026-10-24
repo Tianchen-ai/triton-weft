@@ -2678,7 +2678,7 @@ private:
         isa<VectorType>(mapped(op.getOperand(1)).getType())};
     auto selected = weft::x86::selectContractionEngine(op, target, storage, arrayResult,
         shape(op.getOperand(0).getType()), shape(op.getOperand(1).getType()), shape(op.getResult(0).getType()));
-    if (succeeded(selected)) weft::x86::recordContractionEngine(module, op, *selected, arrayResult);
+    if (succeeded(selected)) weft::x86::recordContractionEngine(module, op, *selected);
     return selected;
   }
   LogicalResult contraction(Operation &op) {
@@ -4310,7 +4310,10 @@ private:
       });
     };
     auto rightAxes = axes(op.getOperand(1).getType());
-    auto leftStatic = shape(op.getOperand(0).getType()), rightStatic = shape(op.getOperand(1).getType());
+    auto leftStatic = weft::x86::matrixOperandShape(op, 0, shape(op.getOperand(0).getType()));
+    auto rightStatic = weft::x86::matrixOperandShape(op, 1, shape(op.getOperand(1).getType()));
+    bool leftReductionFirst = weft::x86::matrixReductionFirst(op, 0);
+    bool rightReductionFirst = weft::x86::matrixReductionFirst(op, 1);
     bool amx = *selected == weft::x86::ContractionEngine::MatrixBFloat;
     bool fixedRightMatrix = *selected == weft::x86::ContractionEngine::MatrixInteger &&
         scalar(op.getOperand(0).getType()).isInteger(8) &&
@@ -4342,12 +4345,19 @@ private:
         }
         complete = loop.getResult(0);
       }
-      auto choice = scf::IfOp::create(b, loc, TypeRange{}, complete, true);
-      OpBuilder::InsertionGuard guard(b);
-      b.setInsertionPointToStart(&choice.getThenRegion().front());
+      auto emitInteger = [&](bool masked) {
       weft::x86::ArrayStorage left{mapped(op.getOperand(0)), valid(op.getOperand(0), loc), leftShape};
       if (fixedRightMatrix) {
         Value right = mapped(op.getOperand(1));
+        if (masked)
+          right = arith::SelectOp::create(b, loc, valid(op.getOperand(1), loc), right, zero(loc, right.getType()));
+        if (rightReductionFirst) {
+          SmallVector<int64_t> order;
+          for (int64_t column = 0; column < rightStatic[0]; ++column)
+            for (int64_t term = 0; term < rightStatic[1]; ++term)
+              order.push_back(term * rightStatic[0] + column);
+          right = permute(loc, right, order, right.getType());
+        }
         bool leftUnsigned = unsignedType(op.getOperand(0).getType());
         bool rightUnsigned = unsignedType(op.getOperand(1).getType());
         auto type = cast<VectorType>(right.getType());
@@ -4360,7 +4370,8 @@ private:
         }
         auto emit = [&](Value rhs, const weft::x86::ArrayStorage &destination, bool isUnsigned) {
           weft::x86::materializeAMXIntegerFixed(module, b, loc, target, left, rhs, destination,
-              leftStatic[0], rightStatic[0], leftStatic[1], leftUnsigned, isUnsigned);
+              leftStatic[0], rightStatic[0], leftStatic[1], leftUnsigned, isUnsigned, false,
+              leftReductionFirst, masked);
         };
         if (carrier == 8) {
           emit(right, output, rightUnsigned);
@@ -4396,10 +4407,41 @@ private:
         weft::x86::ArrayStorage right{mapped(op.getOperand(1)), valid(op.getOperand(1), loc), arrayExtents(op.getOperand(1), loc)};
         weft::x86::materializeAMXInteger(module, b, loc, target, left, right, output,
             leftStatic[0], rightStatic[0], leftStatic[1], unsignedType(op.getOperand(0).getType()),
-            unsignedType(op.getOperand(1).getType()));
+            unsignedType(op.getOperand(1).getType()), leftReductionFirst, rightReductionFirst, masked);
       }
+      };
+      auto choice = scf::IfOp::create(b, loc, TypeRange{}, complete, true);
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(&choice.getThenRegion().front());
+      emitInteger(false);
       b.setInsertionPointToStart(&choice.getElseRegion().front());
-      if (failed(generic())) return failure();
+      emitInteger(true);
+      // Integer zero padding is exact, but does not make the output domain
+      // complete. A result is active iff some original pair was active. This
+      // computes only validity; partial inputs still execute the selected AMX
+      // arithmetic and never introduce an alternate SIMD contraction.
+      if (failed(weft::x86::forArray(b, loc, outputShape,
+          [&](Value outputIndex, ValueRange coordinates) -> LogicalResult {
+        auto loop = scf::ForOp::create(b, loc, indexConstant(loc, 0), indexConstant(loc, leftStatic[1]),
+            indexConstant(loc, 1), ValueRange{constant(loc, b.getI1Type(), b.getBoolAttr(false))});
+        loop->setAttr("weft.x86.matrix_validity", b.getUnitAttr());
+        {
+          OpBuilder::InsertionGuard loopGuard(b);
+          b.setInsertionPointToStart(loop.getBody());
+          SmallVector<Value> active;
+          for (unsigned side = 0; side < 2; ++side) {
+            Value source = op.getOperand(side);
+            SmallVector<Value> point{coordinates[side], loop.getInductionVar()};
+            if (side == 0 ? leftReductionFirst : rightReductionFirst) std::swap(point[0], point[1]);
+            Value offset = weft::x86::arrayLinear(b, loc, arrayExtents(source, loc), point);
+            active.push_back(arrayMask(loc, valid(source, loc), offset));
+          }
+          Value pair = arith::AndIOp::create(b, loc, active[0], active[1]);
+          scf::YieldOp::create(b, loc, arith::OrIOp::create(b, loc, loop.getRegionIterArgs()[0], pair).getResult());
+        }
+        storeArrayMask(loc, loop.getResult(0), output.valid, outputIndex);
+        return success();
+      }))) return failure();
     } else if (amx) {
       weft::x86::ArrayStorage left{mapped(op.getOperand(0)), valid(op.getOperand(0), loc), leftShape};
       weft::x86::ArrayStorage right{mapped(op.getOperand(1)), valid(op.getOperand(1), loc), arrayExtents(op.getOperand(1), loc)};
@@ -4422,7 +4464,7 @@ private:
       OpBuilder::InsertionGuard guard(b);
       b.setInsertionPointToStart(&choice.getThenRegion().front());
       weft::x86::materializeAMXBFloat(module, b, loc, target, left, right, output,
-          leftStatic[0], rightStatic[0], leftStatic[1]);
+          leftStatic[0], rightStatic[0], leftStatic[1], leftReductionFirst, rightReductionFirst);
       b.setInsertionPointToStart(&choice.getElseRegion().front());
       if (failed(generic())) return failure();
     } else if (failed(generic())) return failure();

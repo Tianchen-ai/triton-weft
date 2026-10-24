@@ -105,11 +105,77 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
                            const weft::x86::ArrayStorage &right, const weft::x86::ArrayStorage &output,
                            int64_t rows, int64_t columns, int64_t terms,
                            bool integerDot, bool leftUnsigned, bool rightUnsigned, Value rightSnapshot,
-                           bool tiledOutput = false) {
+                           bool tiledOutput = false, bool leftReductionFirst = false,
+                           bool rightReductionFirst = false, bool maskInputs = false) {
   int64_t group = integerDot ? 4 : 2;
   int64_t bytesPerElement = integerDot ? 1 : 2;
   int64_t reductionTile = !integerDot ? 32 : terms % 64 == 0 ? 64 : terms % 32 == 0 ? 32 : 16;
   int64_t tileColumns = std::min<int64_t>(columns, 16);
+  auto maskPayload = [&](Value payload, const weft::x86::ArrayStorage &source, Value offset) -> Value {
+    if (!maskInputs) return payload;
+    auto type = cast<VectorType>(payload.getType());
+    Value bytes = vector::LoadOp::create(b, loc, type.clone(b.getI8Type()), source.valid, offset);
+    Value mask = arith::TruncIOp::create(b, loc, type.clone(b.getI1Type()), bytes);
+    Value zero = arith::ConstantOp::create(b, loc, type,
+        DenseElementsAttr::get(type, b.getZeroAttr(type.getElementType())));
+    return arith::SelectOp::create(b, loc, mask, payload, zero);
+  };
+  Value leftData = left.data;
+  if (leftReductionFirst) {
+    // Transpose the immutable snapshot in bounded register rectangles. Reads
+    // stay at the contraction, and no author or externally aliased storage is
+    // changed. Partial snapshots are zeroed within the same transpose.
+    Type element = cast<MemRefType>(left.data.getType()).getElementType();
+    auto allocation = memref::AllocOp::create(b, loc,
+        MemRefType::get({ShapedType::kDynamic}, element), index(b, loc, rows * terms));
+    allocation->setAttr("alignment", b.getI64IntegerAttr(64));
+    allocation->setAttr("weft.x86.matrix_operand", b.getStringAttr("left-reduction-last"));
+    leftData = allocation;
+    int64_t rowPacket = std::gcd(rows, int64_t(8));
+    int64_t termPacket = std::gcd(terms, int64_t(8));
+    auto rowLoop = scf::ForOp::create(b, loc, index(b, loc, 0), index(b, loc, rows), index(b, loc, rowPacket));
+    OpBuilder::InsertionGuard rowGuard(b);
+    b.setInsertionPointToStart(rowLoop.getBody());
+    auto termLoop = scf::ForOp::create(b, loc, index(b, loc, 0), index(b, loc, terms), index(b, loc, termPacket));
+    b.setInsertionPointToStart(termLoop.getBody());
+    Type bits = integerDot ? Type(b.getI8Type()) : Type(b.getI16Type());
+    auto rectangleType = VectorType::get({rowPacket * termPacket}, bits);
+    Value rectangle = arith::ConstantOp::create(b, loc, rectangleType,
+        DenseElementsAttr::get(rectangleType, b.getIntegerAttr(bits, 0)));
+    for (int64_t term = 0; term < termPacket; ++term) {
+      Value k = arith::AddIOp::create(b, loc, termLoop.getInductionVar(), index(b, loc, term));
+      Value offset = arith::AddIOp::create(b, loc,
+          arith::MulIOp::create(b, loc, k, index(b, loc, rows)), rowLoop.getInductionVar());
+      Value payload = vector::LoadOp::create(b, loc, VectorType::get({rowPacket}, element), left.data, offset);
+      payload = maskPayload(payload, left, offset);
+      if (!integerDot) payload = arith::BitcastOp::create(b, loc, VectorType::get({rowPacket}, bits), payload);
+      rectangle = vector::InsertStridedSliceOp::create(b, loc, payload, rectangle,
+          ArrayRef<int64_t>{term * rowPacket}, ArrayRef<int64_t>{1});
+    }
+    for (int64_t row = 0; row < rowPacket; ++row) {
+      SmallVector<int64_t> order;
+      for (int64_t term = 0; term < termPacket; ++term) order.push_back(term * rowPacket + row);
+      Value payload = vector::ShuffleOp::create(b, loc, rectangle, rectangle, order);
+      if (!integerDot) payload = arith::BitcastOp::create(b, loc, VectorType::get({termPacket}, element), payload);
+      Value m = arith::AddIOp::create(b, loc, rowLoop.getInductionVar(), index(b, loc, row));
+      Value offset = arith::AddIOp::create(b, loc,
+          arith::MulIOp::create(b, loc, m, index(b, loc, terms)), termLoop.getInductionVar());
+      vector::StoreOp::create(b, loc, payload, leftData, offset);
+    }
+  } else if (maskInputs) {
+    Type element = cast<MemRefType>(left.data.getType()).getElementType();
+    auto allocation = memref::AllocOp::create(b, loc,
+        MemRefType::get({ShapedType::kDynamic}, element), index(b, loc, rows * terms));
+    allocation->setAttr("alignment", b.getI64IntegerAttr(64));
+    leftData = allocation;
+    int64_t packet = std::gcd(rows * terms, int64_t(target.vectorBits / 8));
+    auto loop = scf::ForOp::create(b, loc, index(b, loc, 0), index(b, loc, rows * terms), index(b, loc, packet));
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPointToStart(loop.getBody());
+    Value offset = loop.getInductionVar();
+    Value payload = vector::LoadOp::create(b, loc, VectorType::get({packet}, element), left.data, offset);
+    vector::StoreOp::create(b, loc, maskPayload(payload, left, offset), leftData, offset);
+  }
   auto packedType = MemRefType::get({ShapedType::kDynamic}, b.getI32Type());
   auto allocation = memref::AllocOp::create(b, loc, packedType, index(b, loc, columns * terms / group));
   allocation->setAttr("alignment", b.getI64IntegerAttr(64));
@@ -135,6 +201,41 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
       auto store = vector::StoreOp::create(b, loc, selected, packed, index(b, loc, first));
       store->setAttr("weft.x86.amx_pack", b.getUnitAttr());
     }
+  } else if (rightReductionFirst) {
+    // Source [K,N] is already contiguous along B's tile row. Interleave a
+    // bounded group of K rows directly into the packed AMX row: a full [N,K]
+    // intermediate would add a second memory round trip and longer residency.
+    auto packing = scf::ForOp::create(b, loc, index(b, loc, 0), index(b, loc, terms), index(b, loc, group));
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPointToStart(packing.getBody());
+    auto columnLoop = scf::ForOp::create(b, loc, index(b, loc, 0), index(b, loc, columns), index(b, loc, tileColumns));
+    b.setInsertionPointToStart(columnLoop.getBody());
+    Type bits = integerDot ? Type(b.getI8Type()) : Type(b.getI16Type());
+    Type payloadType = cast<MemRefType>(right.data.getType()).getElementType();
+    auto rectangleType = VectorType::get({tileColumns * group}, bits);
+    Value rectangle = arith::ConstantOp::create(b, loc, rectangleType,
+        DenseElementsAttr::get(rectangleType, b.getIntegerAttr(bits, 0)));
+    for (int64_t member = 0; member < group; ++member) {
+      Value k = arith::AddIOp::create(b, loc, packing.getInductionVar(), index(b, loc, member));
+      Value offset = arith::AddIOp::create(b, loc,
+          arith::MulIOp::create(b, loc, k, index(b, loc, columns)), columnLoop.getInductionVar());
+      Value payload = vector::LoadOp::create(b, loc, VectorType::get({tileColumns}, payloadType), right.data, offset);
+      payload = maskPayload(payload, right, offset);
+      if (!integerDot) payload = arith::BitcastOp::create(b, loc, VectorType::get({tileColumns}, bits), payload);
+      rectangle = vector::InsertStridedSliceOp::create(b, loc, payload, rectangle,
+          ArrayRef<int64_t>{member * tileColumns}, ArrayRef<int64_t>{1});
+    }
+    SmallVector<int64_t> order;
+    for (int64_t column = 0; column < tileColumns; ++column)
+      for (int64_t member = 0; member < group; ++member) order.push_back(member * tileColumns + column);
+    Value interleaved = vector::ShuffleOp::create(b, loc, rectangle, rectangle, order);
+    Value words = vector::BitCastOp::create(b, loc, VectorType::get({tileColumns}, b.getI32Type()), interleaved);
+    Value offset = arith::AddIOp::create(b, loc,
+        arith::MulIOp::create(b, loc, columnLoop.getInductionVar(), index(b, loc, terms / group)),
+        arith::MulIOp::create(b, loc,
+            arith::DivUIOp::create(b, loc, packing.getInductionVar(), index(b, loc, group)), index(b, loc, tileColumns)));
+    vector::StoreOp::create(b, loc, words, packed, offset);
+    allocation->setAttr("weft.x86.matrix_operand", b.getStringAttr("right-reduction-first-to-packed"));
   } else {
     // A memory word holds adjacent K elements. Columns are contiguous in the
     // tile's VNNI row; all packing remains inside this contraction invocation.
@@ -154,6 +255,7 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
               arith::MulIOp::create(b, loc, packing.getInductionVar(), index(b, loc, group)));
           Type inputType = integerDot ? Type(b.getI8Type()) : Type(b.getBF16Type());
           Value pairs = vector::LoadOp::create(b, loc, VectorType::get({pairsPerPacket * group}, inputType), right.data, source);
+          pairs = maskPayload(pairs, right, source);
           Value bits = integerDot ? pairs : Value(arith::BitcastOp::create(b, loc,
               VectorType::get({pairsPerPacket * group}, b.getI16Type()), pairs));
           Value words = vector::BitCastOp::create(b, loc, VectorType::get({pairsPerPacket}, b.getI32Type()), bits);
@@ -219,7 +321,7 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
         Value coordinate = arith::AddIOp::create(b, loc, rowTiles.getInductionVar(), index(b, loc, row * tileRows));
         Value offset = arith::AddIOp::create(b, loc, reduction.getInductionVar(),
             arith::MulIOp::create(b, loc, coordinate, index(b, loc, terms)));
-        transfer(module, b, loc, target, left.data, offset, terms * bytesPerElement, row, false,
+        transfer(module, b, loc, target, leftData, offset, terms * bytesPerElement, row, false,
                  tileRows, reductionTile * bytesPerElement);
       }
       for (int64_t column = 0; column < columnCopies; ++column) {
@@ -262,6 +364,7 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
       }
   }
   intrinsic(module, b, loc, "llvm.x86.tilerelease", {});
+  if (maskInputs) return;
   auto valid = scf::ForOp::create(b, loc, index(b, loc, 0), index(b, loc, rows * columns), index(b, loc, 1));
   {
     OpBuilder::InsertionGuard guard(b); b.setInsertionPointToStart(valid.getBody());
@@ -272,25 +375,30 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
 void weft::x86::materializeAMXBFloat(ModuleOp module, OpBuilder &b, Location loc,
                                     const X86Target &target, const ArrayStorage &left,
                                     const ArrayStorage &right, const ArrayStorage &output,
-                                    int64_t rows, int64_t columns, int64_t terms) {
-  materializeAMX(module, b, loc, target, left, right, output, rows, columns, terms, false, false, false, {});
+                                    int64_t rows, int64_t columns, int64_t terms,
+                                    bool leftReductionFirst, bool rightReductionFirst) {
+  materializeAMX(module, b, loc, target, left, right, output, rows, columns, terms, false, false, false, {},
+                 false, leftReductionFirst, rightReductionFirst);
 }
 
 void weft::x86::materializeAMXInteger(ModuleOp module, OpBuilder &b, Location loc,
                                     const X86Target &target, const ArrayStorage &left,
                                     const ArrayStorage &right, const ArrayStorage &output,
                                     int64_t rows, int64_t columns, int64_t terms,
-                                    bool leftUnsigned, bool rightUnsigned) {
-  materializeAMX(module, b, loc, target, left, right, output, rows, columns, terms, true, leftUnsigned, rightUnsigned, {});
+                                    bool leftUnsigned, bool rightUnsigned,
+                                    bool leftReductionFirst, bool rightReductionFirst, bool maskInputs) {
+  materializeAMX(module, b, loc, target, left, right, output, rows, columns, terms, true, leftUnsigned, rightUnsigned, {},
+                 false, leftReductionFirst, rightReductionFirst, maskInputs);
 }
 
 Value weft::x86::materializeAMXIntegerFixed(ModuleOp module, OpBuilder &b, Location loc,
                                          const X86Target &target, const ArrayStorage &left,
                                          Value right, const ArrayStorage &output,
                                          int64_t rows, int64_t columns, int64_t terms,
-                                         bool leftUnsigned, bool rightUnsigned, bool tiledOutput) {
+                                         bool leftUnsigned, bool rightUnsigned, bool tiledOutput,
+                                         bool leftReductionFirst, bool maskInputs) {
   materializeAMX(module, b, loc, target, left, {}, output, rows, columns, terms,
-                 true, leftUnsigned, rightUnsigned, right, tiledOutput);
+                 true, leftUnsigned, rightUnsigned, right, tiledOutput, leftReductionFirst, false, maskInputs);
   auto type = VectorType::get({rows * columns}, b.getI32Type());
   Value result = vector::LoadOp::create(b, loc, type, output.data, index(b, loc, 0));
   if (!tiledOutput) return result;

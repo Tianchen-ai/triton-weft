@@ -4,6 +4,27 @@
 
 using namespace weft::analysis;
 
+std::optional<MatrixAxes> weft::analysis::matrixAxes(
+    LogicalDomain left, LogicalDomain right, LogicalDomain output,
+    llvm::ArrayRef<int64_t> reductionAxes) {
+  if (reductionAxes.size() != 1 || output.axes.size() != 2 ||
+      output.shape.size() != 2 || output.axes[0] == output.axes[1] ||
+      llvm::is_contained(output.axes, reductionAxes[0])) return {};
+  auto position = [&](LogicalDomain input, unsigned side) -> std::optional<unsigned> {
+    if (input.axes.size() != 2 || input.shape.size() != 2 ||
+        llvm::any_of(input.shape, [](int64_t extent) { return extent <= 0; })) return {};
+    auto found = llvm::find(input.axes, reductionAxes[0]);
+    if (found == input.axes.end()) return {};
+    unsigned reduced = found - input.axes.begin();
+    if (input.axes[1 - reduced] != output.axes[side] ||
+        input.shape[1 - reduced] != output.shape[side]) return {};
+    return reduced;
+  };
+  auto lhs = position(left, 0), rhs = position(right, 1);
+  if (!lhs || !rhs || left.shape[*lhs] != right.shape[*rhs]) return {};
+  return MatrixAxes{*lhs, *rhs, output.shape[0], output.shape[1], left.shape[*lhs]};
+}
+
 std::optional<GroupedAxes> weft::analysis::groupedAxes(
     llvm::ArrayRef<LogicalDomain> inputs, LogicalDomain output, int64_t group) {
   auto valid = [](LogicalDomain domain) {
