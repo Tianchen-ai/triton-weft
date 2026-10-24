@@ -21,7 +21,7 @@ add_library(WeftX86Target STATIC
   Lookups.cpp
   LocalStorage.cpp
   SnapshotLoads.cpp)
-target_link_libraries(WeftX86Target PUBLIC WeftKernelDialect WeftX86Platform WeftSourceSpecialization
+target_link_libraries(WeftX86Target PUBLIC WeftKernelDialect WeftX86Platform WeftSourceSpecialization WeftAnalysis
   LLVMTargetParser
   MLIRAnalysis MLIRArithDialect MLIRFuncDialect MLIRSCFDialect MLIRMathDialect MLIRVectorDialect
   MLIRLLVMDialect MLIRTransforms MLIRArithToLLVM MLIRMathToLLVM MLIRVectorToLLVM

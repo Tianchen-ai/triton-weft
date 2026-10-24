@@ -5,6 +5,7 @@
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
 #include "Weft/Dialect/RISCV/IR/Memory.h"
 #include "Weft/Target/RISCVTargetProfile.h"
+#include "Weft/Analysis/IntegerFacts.h"
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -45,10 +46,7 @@ struct FieldFacts {
   llvm::StringRef order = "none";
 };
 
-struct IntegerRange {
-  int64_t minimum;
-  int64_t maximum;
-};
+using IntegerRange = weft::analysis::IntegerRange;
 
 struct WidenDotLaneSlicePlan {
   int64_t reductionLanes = 0;

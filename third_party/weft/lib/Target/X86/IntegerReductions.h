@@ -20,9 +20,9 @@ std::optional<IntegerPairResult> selectX86IntegerPairs(
     mlir::IntegerType lhsElement, mlir::IntegerType rhsElement,
     unsigned resultBits, unsigned vectorBits);
 
-// Four adjacent products, with exact modular i32 accumulation. Signed bytes
-// use an explicit unsigned bias and correction; no saturating intermediate.
-std::optional<IntegerPairResult> selectX86ByteDotGroups(
+// Four adjacent products in a machine i32 carrier. Numerical proofs choose
+// VNNI bytes or exact AVX2 pairs; callers restore a narrower source boundary.
+std::optional<IntegerPairResult> selectX86IntegerQuads(
     mlir::ModuleOp module, mlir::OpBuilder &builder, mlir::Location location,
     mlir::Value lhs, mlir::Value rhs, mlir::Value lhsValid, mlir::Value rhsValid,
     mlir::IntegerType lhsElement, mlir::IntegerType rhsElement,

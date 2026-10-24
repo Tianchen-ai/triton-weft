@@ -1,5 +1,6 @@
 #include "Weft/Target/X86Compiler.h"
 #include "Weft/Target/X86Target.h"
+#include "Weft/Analysis/IntegerFacts.h"
 #include "IntegerReductions.h"
 #include "IndexedValues.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -19,38 +20,70 @@ struct NarrowInteger {
   bool isUnsigned;
 };
 
-// Bound unsigned payload bits, independently of validity. A declared U8 may
-// carry a narrower domain after a mask; lane permutations do not widen it.
-uint64_t unsignedMaximum(Value value, unsigned width, unsigned depth = 0) {
-  if (width >= 64) return UINT64_MAX;
-  uint64_t full = llvm::maskTrailingOnes<uint64_t>(width);
-  if (depth == 12) return full;
-  auto bound = [&](Value input) {
-    return unsignedMaximum(input, cast<IntegerType>(getElementTypeOrSelf(input.getType())).getWidth(), depth + 1);
-  };
-  if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
-    if (auto integer = dyn_cast<IntegerAttr>(constant.getValue())) return integer.getValue().getZExtValue();
-    if (auto elements = dyn_cast<DenseIntElementsAttr>(constant.getValue())) {
-      uint64_t maximum = 0;
-      for (APInt number : elements.getValues<APInt>()) maximum = std::max(maximum, number.getZExtValue());
-      return maximum;
-    }
+std::optional<weft::analysis::IntegerRange> numericRange(Value value, IntegerType type) {
+  using Kind = weft::analysis::IntegerExpressionKind;
+  return weft::analysis::integerRange(value, type, [](Value value)
+      -> std::optional<weft::analysis::IntegerExpression> {
+    auto call = value.getDefiningOp<func::CallOp>();
+    if (!call) return std::nullopt;
+    auto element = weft::analysis::integerElementType(value.getType());
+    if (!element) return std::nullopt;
+    auto signedType = [&](unsigned bits) { return IntegerType::get(value.getContext(), bits, IntegerType::Signed); };
+    auto unsignedType = [&](unsigned bits) { return IntegerType::get(value.getContext(), bits, IntegerType::Unsigned); };
+    weft::analysis::IntegerExpression result{signedType(element.getWidth())};
+    if (call.getCallee() == "llvm.x86.avx2.pshuf.b" || call.getCallee() == "llvm.x86.avx512.pshuf.b.512") {
+      result.type = unsignedType(element.getWidth()); result.kind = Kind::ZeroOr;
+      result.inputs = {call.getOperand(0)}; result.interpretations = {result.type};
+    } else if (call.getCallee() == "llvm.x86.avx512.vpdpbusd.128" ||
+               call.getCallee() == "llvm.x86.avx512.vpdpbusd.256" ||
+               call.getCallee() == "llvm.x86.avx512.vpdpbusd.512") {
+      result.kind = Kind::ProductSum; result.group = 4;
+      result.inputs = {call.getOperand(1), call.getOperand(2), call.getOperand(0)};
+      result.interpretations = {unsignedType(8), signedType(8), signedType(32)};
+    } else if (call.getCallee() == "llvm.x86.ssse3.pmadd.ub.sw.128" ||
+               call.getCallee() == "llvm.x86.avx2.pmadd.ub.sw" ||
+               call.getCallee() == "llvm.x86.avx512.pmaddubs.w.512") {
+      result.kind = Kind::ProductSum; result.group = 2;
+      result.inputs = {call.getOperand(0), call.getOperand(1)};
+      result.interpretations = {unsignedType(8), signedType(8)};
+    } else if (call.getCallee() == "llvm.x86.sse2.pmadd.wd" ||
+               call.getCallee() == "llvm.x86.avx2.pmadd.wd" ||
+               call.getCallee() == "llvm.x86.avx512.pmaddw.d.512") {
+      result.kind = Kind::ProductSum; result.group = 2;
+      result.inputs = {call.getOperand(0), call.getOperand(1)};
+      result.interpretations = {signedType(16), signedType(16)};
+    } else return std::nullopt;
+    return result;
+  });
+}
+
+uint64_t unsignedMaximum(Value value, unsigned width) {
+  auto type = IntegerType::get(value.getContext(), width, IntegerType::Unsigned);
+  auto range = numericRange(value, type);
+  return range ? static_cast<uint64_t>(range->maximum) : llvm::maskTrailingOnes<uint64_t>(width);
+}
+
+bool exactSaturatingPairs(Value lhs, Value rhs, IntegerType left, IntegerType right) {
+  auto a = numericRange(lhs, left), c = numericRange(rhs, right);
+  auto accumulator = IntegerType::get(lhs.getContext(), 16, IntegerType::Signed);
+  return a && c && weft::analysis::saturatingProductSumIsExact(*a, *c, 2, accumulator);
+}
+
+void foldProvenIntegerRestorations(ModuleOp module, IRRewriter &b) {
+  SmallVector<Operation *> extensions;
+  module.walk([&](Operation *op) {
+    if (isa<arith::ExtSIOp, arith::ExtUIOp>(op)) extensions.push_back(op);
+  });
+  for (Operation *op : extensions) {
+    auto truncate = op->getOperand(0).getDefiningOp<arith::TruncIOp>();
+    if (!truncate || truncate.getIn().getType() != op->getResult(0).getType()) continue;
+    auto source = weft::analysis::integerElementType(truncate.getIn().getType());
+    auto narrow = weft::analysis::integerElementType(truncate.getType());
+    auto sign = isa<arith::ExtUIOp>(op) ? IntegerType::Unsigned : IntegerType::Signed;
+    auto range = numericRange(truncate.getIn(), IntegerType::get(op->getContext(), source.getWidth(), sign));
+    if (range && range->fits(IntegerType::get(op->getContext(), narrow.getWidth(), sign)))
+      b.replaceOp(op, truncate.getIn());
   }
-  if (auto mask = value.getDefiningOp<arith::AndIOp>()) return std::min(bound(mask.getLhs()), bound(mask.getRhs()));
-  if (auto shuffle = value.getDefiningOp<vector::ShuffleOp>())
-    return std::max(bound(shuffle.getV1()), bound(shuffle.getV2()));
-  if (auto broadcast = value.getDefiningOp<vector::BroadcastOp>()) return bound(broadcast.getSource());
-  if (auto extract = value.getDefiningOp<vector::ExtractStridedSliceOp>()) return bound(extract.getSource());
-  if (auto insert = value.getDefiningOp<vector::InsertStridedSliceOp>())
-    return std::max(bound(insert.getValueToStore()), bound(insert.getDest()));
-  if (auto lookup = value.getDefiningOp<func::CallOp>(); lookup &&
-      (lookup.getCallee() == "llvm.x86.avx2.pshuf.b" ||
-       lookup.getCallee() == "llvm.x86.avx512.pshuf.b.512"))
-    return bound(lookup.getOperand(0)); // A selected table byte or zero.
-  if (auto select = value.getDefiningOp<arith::SelectOp>()) return std::max(bound(select.getTrueValue()), bound(select.getFalseValue()));
-  if (auto extend = value.getDefiningOp<arith::ExtUIOp>()) return bound(extend.getIn());
-  if (auto truncate = value.getDefiningOp<arith::TruncIOp>()) return std::min(full, bound(truncate.getIn()));
-  return full;
 }
 
 std::optional<NarrowInteger> extension(Value value) {
@@ -510,7 +543,7 @@ public:
           return IntegerType::get(&getContext(), input.width,
               input.isUnsigned ? IntegerType::Unsigned : IntegerType::Signed);
         };
-        auto selected = weft::selectX86ByteDotGroups(getOperation(), b, loc,
+        auto selected = weft::selectX86IntegerQuads(getOperation(), b, loc,
             left->value, right->value, valid, valid, integerType(*left), integerType(*right), target);
         if (selected) {
           Value result = vector::ReductionOp::create(b, loc, vector::CombiningKind::ADD, selected->value);
@@ -522,11 +555,9 @@ public:
       bool bytes = false;
       if (!left->isUnsigned && right->isUnsigned) std::swap(left, right);
       if (left->isUnsigned && !right->isUnsigned && left->width <= 8 && right->width <= 8) {
-        int64_t umax = unsignedMaximum(left->value, left->width);
-        int64_t magnitude = int64_t(1) << (right->width - 1);
-        // PMADDUBSW saturates. Select it only when the entire declared input
-        // range proves that neither sign of a pair sum can saturate.
-        bytes = 2 * umax * magnitude <= 32768 && 2 * umax * (magnitude - 1) <= 32767;
+        bytes = exactSaturatingPairs(left->value, right->value,
+            IntegerType::get(&getContext(), left->width, IntegerType::Unsigned),
+            IntegerType::get(&getContext(), right->width, IntegerType::Signed));
       }
       auto fitsSignedWord = [](const NarrowInteger &input) {
         return input.width <= (input.isUnsigned ? 15u : 16u);
@@ -593,29 +624,47 @@ public:
     combineReductionGroups(getOperation(), b);
     coalesceByteDotMasks(getOperation(), b);
     foldDotAccumulators(getOperation(), b);
+    foldProvenIntegerRestorations(getOperation(), b);
   }
 };
 } // namespace
 
-std::optional<weft::IntegerPairResult> weft::selectX86ByteDotGroups(
+static std::optional<weft::IntegerPairResult> selectByteDotGroups(
     ModuleOp module, OpBuilder &b, Location loc, Value lhs, Value rhs,
     Value lhsValid, Value rhsValid, IntegerType lhsElement,
-    IntegerType rhsElement, const X86Target &target) {
+    IntegerType rhsElement, const weft::X86Target &target) {
   if (!target.hasByteDot()) return {};
   auto type = dyn_cast<VectorType>(lhs.getType());
   if (!type || type.getRank() != 1 || type.isScalable() ||
       cast<VectorType>(rhs.getType()).getShape() != type.getShape() ||
-      type.getNumElements() % 4 || lhsElement.getWidth() > 8 || rhsElement.getWidth() > 8)
+      type.getNumElements() % 4)
     return {};
+  auto leftRange = numericRange(lhs, lhsElement), rightRange = numericRange(rhs, rhsElement);
+  auto signedByte = IntegerType::get(b.getContext(), 8, IntegerType::Signed);
+  auto unsignedByte = IntegerType::get(b.getContext(), 8, IntegerType::Unsigned);
+  auto machineElement = [&](IntegerType source, std::optional<weft::analysis::IntegerRange> range) {
+    if (source.getWidth() <= 8) return source;
+    if (range && range->fits(unsignedByte)) return unsignedByte;
+    if (range && range->fits(signedByte)) return signedByte;
+    return IntegerType();
+  };
+  lhsElement = machineElement(lhsElement, leftRange);
+  rhsElement = machineElement(rhsElement, rightRange);
+  if (!lhsElement || !rhsElement) return {};
   auto isUnsigned = [](IntegerType t) { return t.isUnsigned() || t.getWidth() == 1; };
   // Put an unsigned operand first when possible; a narrow unsigned rhs still
   // fits signed i8. Full U8 x U8 does not fit this instruction's contract.
   if (!isUnsigned(lhsElement) && isUnsigned(rhsElement)) {
     std::swap(lhs, rhs); std::swap(lhsValid, rhsValid); std::swap(lhsElement, rhsElement);
+    std::swap(leftRange, rightRange);
   }
   if (isUnsigned(rhsElement) && rhsElement.getWidth() == 8) {
-    if (isUnsigned(lhsElement) && lhsElement.getWidth() < 8) {
+    if (rightRange && rightRange->fits(signedByte)) {
+      rhsElement = signedByte;
+    } else if (isUnsigned(lhsElement) && leftRange && leftRange->fits(signedByte)) {
       std::swap(lhs, rhs); std::swap(lhsValid, rhsValid); std::swap(lhsElement, rhsElement);
+      std::swap(leftRange, rightRange);
+      rhsElement = signedByte;
     } else return {};
   }
   int64_t count = type.getNumElements();
@@ -629,7 +678,10 @@ std::optional<weft::IntegerPairResult> weft::selectX86ByteDotGroups(
   Value active = arith::AndIOp::create(b, loc, lhsValid, rhsValid);
   auto byteType = type.clone(b.getI8Type());
   auto convert = [&](Value data, IntegerType input) -> Value {
-    if (input.getWidth() != 8)
+    unsigned width = cast<VectorType>(data.getType()).getElementTypeBitWidth();
+    if (width > 8)
+      data = arith::TruncIOp::create(b, loc, byteType, data);
+    else if (width < 8)
       data = isUnsigned(input) ? Value(arith::ExtUIOp::create(b, loc, byteType, data)) :
                                 Value(arith::ExtSIOp::create(b, loc, byteType, data));
     return arith::SelectOp::create(b, loc, active, data, constant(byteType, 0));
@@ -673,7 +725,7 @@ std::optional<weft::IntegerPairResult> weft::selectX86ByteDotGroups(
     Value selected = vector::ShuffleOp::create(b, loc, active, active, indices);
     valid = valid ? Value(arith::OrIOp::create(b, loc, valid, selected)) : selected;
   }
-  return IntegerPairResult{result, valid};
+  return weft::IntegerPairResult{result, valid};
 }
 
 std::optional<weft::IntegerPairResult> weft::selectX86IntegerPairs(
@@ -695,11 +747,9 @@ std::optional<weft::IntegerPairResult> weft::selectX86IntegerPairs(
     }
     if (!lhsElement.isUnsigned() || !rhsElement.isSigned() ||
         lhsElement.getWidth() > 8 || rhsElement.getWidth() > 8) return {};
-    int64_t umax = unsignedMaximum(lhs, lhsElement.getWidth());
-    int64_t magnitude = int64_t(1) << (rhsElement.getWidth() - 1);
     // The selected instruction saturates; prove that its entire input domain
     // equals the author's wrapping i16 pair sum before selecting it.
-    if (2 * umax * magnitude > 32768 || 2 * umax * (magnitude - 1) > 32767) return {};
+    if (!exactSaturatingPairs(lhs, rhs, lhsElement, rhsElement)) return {};
   } else {
     auto fits = [](IntegerType type) {
       return type.getWidth() <= (type.isUnsigned() ? 15u : 16u);
@@ -758,6 +808,40 @@ std::optional<weft::IntegerPairResult> weft::selectX86IntegerPairs(
   Value first = vector::ShuffleOp::create(b, loc, valid, valid, even);
   Value second = vector::ShuffleOp::create(b, loc, valid, valid, odd);
   return IntegerPairResult{output, arith::OrIOp::create(b, loc, first, second)};
+}
+
+std::optional<weft::IntegerPairResult> weft::selectX86IntegerQuads(
+    ModuleOp module, OpBuilder &b, Location loc, Value lhs, Value rhs,
+    Value lhsValid, Value rhsValid, IntegerType lhsElement,
+    IntegerType rhsElement, const X86Target &target) {
+  auto input = dyn_cast<VectorType>(lhs.getType());
+  if (!input || input.getRank() != 1 || input.isScalable() || input.getNumElements() % 4)
+    return {};
+  if (auto dot = selectByteDotGroups(module, b, loc, lhs, rhs, lhsValid, rhsValid,
+                                    lhsElement, rhsElement, target))
+    return dot;
+  // PMADDUBSW is only selected with a proof that saturation is unreachable.
+  // Otherwise signed-word products retain the complete byte/word domain.
+  auto pairs = selectX86IntegerPairs(module, b, loc, lhs, rhs, lhsValid, rhsValid,
+                                     lhsElement, rhsElement, 16, target.vectorBits);
+  if (pairs) {
+    auto wide = cast<VectorType>(pairs->value.getType()).clone(b.getI32Type());
+    pairs->value = arith::ExtSIOp::create(b, loc, wide, pairs->value);
+  } else {
+    pairs = selectX86IntegerPairs(module, b, loc, lhs, rhs, lhsValid, rhsValid,
+                                  lhsElement, rhsElement, 32, target.vectorBits);
+  }
+  if (!pairs) return {};
+  SmallVector<int64_t> even, odd;
+  for (int64_t i = 0; i < input.getNumElements() / 2; i += 2) {
+    even.push_back(i); odd.push_back(i + 1);
+  }
+  auto select = [&](Value value, ArrayRef<int64_t> indices) -> Value {
+    return vector::ShuffleOp::create(b, loc, value, value, indices);
+  };
+  Value sum = arith::AddIOp::create(b, loc, select(pairs->value, even), select(pairs->value, odd));
+  Value active = arith::OrIOp::create(b, loc, select(pairs->valid, even), select(pairs->valid, odd));
+  return IntegerPairResult{sum, active};
 }
 
 std::unique_ptr<Pass> weft::createX86IntegerReductionPass() {

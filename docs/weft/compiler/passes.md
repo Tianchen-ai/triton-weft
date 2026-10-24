@@ -4,6 +4,11 @@
 `lane_operand` 等中间属性附着在具体 operation 上，并在其消费者 pass 中删除；它们不是
 module 外的 assignment 表，也不构成新的 IR 层。
 
+整数范围、转换与乘积和溢出的证明由 `Weft/Analysis/IntegerFacts` 与 x86 共用。
+RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改变数值范围，
+窄化或潜在回绕不能继承未经证明的窄区间。查询只在单次有界遍历内保存 memo，
+不会跨 pass 保留随 SSA 改写失效的事实。未知 producer 和超出分析位宽的值不提供证明。
+
 ## 1. 固定顺序
 
 ```text

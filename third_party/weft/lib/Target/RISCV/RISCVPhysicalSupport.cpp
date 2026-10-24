@@ -2084,142 +2084,45 @@ std::optional<riscv_internal::IntegerRange>
 riscv_internal::integerRange(mlir::Value value, unsigned depth) {
   if (depth > 16)
     return std::nullopt;
-  mlir::Value source = stripRepresentationConversions(value);
-  if (source != value)
-    return integerRange(source, depth + 1);
-  auto type = mlir::dyn_cast<mlir::IntegerType>(logicalElement(value.getType()));
-  if (!type || type.getWidth() == 0 || type.getWidth() >= 63)
-    return std::nullopt;
-  const __int128 typeMinimum =
-      type.isSigned() ? -(__int128{1} << (type.getWidth() - 1)) : 0;
-  const __int128 typeMaximum =
-      type.isSigned() ? (__int128{1} << (type.getWidth() - 1)) - 1
-                      : (__int128{1} << type.getWidth()) - 1;
-  auto checkedRange = [&](const __int128 minimum,
-                          const __int128 maximum)
-      -> std::optional<IntegerRange> {
-    if (minimum < typeMinimum || maximum > typeMaximum || minimum > maximum)
+  using Kind = analysis::IntegerExpressionKind;
+  auto rootType = mlir::dyn_cast<mlir::IntegerType>(logicalElement(value.getType()));
+  if (rootType && rootType.isSignless())
+    rootType = mlir::IntegerType::get(rootType.getContext(), rootType.getWidth(), mlir::IntegerType::Unsigned);
+  return analysis::integerRange(value, rootType, [](mlir::Value input)
+      -> std::optional<analysis::IntegerExpression> {
+    auto type = mlir::dyn_cast<mlir::IntegerType>(logicalElement(input.getType()));
+    if (!type) return std::nullopt;
+    // Physical index carriers retain their established unsigned interpretation.
+    if (type.isSignless())
+      type = mlir::IntegerType::get(type.getContext(), type.getWidth(), mlir::IntegerType::Unsigned);
+    analysis::IntegerExpression result{type};
+    auto preserve = [&](mlir::Value source, Kind kind = Kind::Preserve) {
+      result.kind = kind; result.inputs = {source};
+    };
+    auto source = stripRepresentationConversions(input);
+    if (source != input) preserve(source);
+    else if (auto constant = input.getDefiningOp<riscv::ConstantOp>()) {
+      auto integer = mlir::dyn_cast<mlir::IntegerAttr>(constant.getValue());
+      if (integer && analysis::integerTypeRange(type)) {
+        int64_t number = type.isSigned() ? integer.getValue().getSExtValue() : integer.getValue().getZExtValue();
+        result.kind = Kind::Known; result.known = IntegerRange{number, number};
+      }
+    } else if (auto iota = input.getDefiningOp<riscv::IotaOp>()) {
+      if (iota.getEnd() > iota.getStart() && iota.getEnd() - 1 <= uint64_t(INT64_MAX)) {
+        result.kind = Kind::Known;
+        result.known = IntegerRange{static_cast<int64_t>(iota.getStart()), static_cast<int64_t>(iota.getEnd() - 1)};
+      }
+    } else if (auto op = input.getDefiningOp<riscv::RVVAxisBroadcastOp>()) preserve(op.getInput());
+    else if (auto op = input.getDefiningOp<riscv::WidenOp>()) preserve(op.getInput(), Kind::Cast);
+    else if (auto op = input.getDefiningOp<riscv::CastOp>()) preserve(op.getInput(), Kind::Cast);
+    else if (auto op = input.getDefiningOp<riscv::NarrowOp>()) preserve(op.getInput(), op.getSaturate() ? Kind::Saturate : Kind::Cast);
+    else if (auto op = input.getDefiningOp<riscv::ExtractOp>()) preserve(op.getInput());
+    else if (auto op = input.getDefiningOp<riscv::BinaryOp>()) {
+      result.kind = analysis::integerBinaryKind(op.getKind()); result.inputs = {op.getLhs(), op.getRhs()};
+    } else if (auto *op = input.getDefiningOp(); op && op->getName().getDialectNamespace() != "weft_riscv")
       return std::nullopt;
-    return IntegerRange{static_cast<int64_t>(minimum),
-                        static_cast<int64_t>(maximum)};
-  };
-  auto constantRange = [&](mlir::Attribute attribute)
-      -> std::optional<IntegerRange> {
-    auto integer = mlir::dyn_cast_or_null<mlir::IntegerAttr>(attribute);
-    if (!integer)
-      return std::nullopt;
-    const int64_t constant = type.isSigned() ? integer.getValue().getSExtValue()
-                                             : integer.getValue().getZExtValue();
-    return IntegerRange{constant, constant};
-  };
-  if (auto constant = value.getDefiningOp<riscv::ConstantOp>())
-    if (auto range = constantRange(constant.getValue()))
-      return range;
-  if (auto constant = value.getDefiningOp<mlir::arith::ConstantOp>())
-    if (auto range = constantRange(constant.getValue()))
-      return range;
-  if (auto iota = value.getDefiningOp<riscv::IotaOp>())
-    if (iota.getEnd() > iota.getStart())
-      if (auto range = checkedRange(iota.getStart(), iota.getEnd() - 1))
-        return range;
-  if (auto broadcast = value.getDefiningOp<riscv::RVVAxisBroadcastOp>())
-    if (auto range = integerRange(broadcast.getInput(), depth + 1))
-      return checkedRange(range->minimum, range->maximum);
-  if (auto widen = value.getDefiningOp<riscv::WidenOp>())
-    if (auto range = integerRange(widen.getInput(), depth + 1))
-      return range;
-  if (auto cast = value.getDefiningOp<riscv::CastOp>())
-    if (auto range = integerRange(cast.getInput(), depth + 1))
-      if (auto checked = checkedRange(range->minimum, range->maximum))
-        return checked;
-  if (auto narrow = value.getDefiningOp<riscv::NarrowOp>())
-    if (!narrow.getSaturate())
-      if (auto range = integerRange(narrow.getInput(), depth + 1))
-        if (auto checked = checkedRange(range->minimum, range->maximum))
-          return checked;
-  // A typed logical extract selects elements without changing their numeric
-  // interpretation.  Its result range is therefore a subset of the input
-  // range, independent of the selected coordinates or physical layout.
-  if (auto extract = value.getDefiningOp<riscv::ExtractOp>())
-    if (auto range = integerRange(extract.getInput(), depth + 1))
-      if (auto checked = checkedRange(range->minimum, range->maximum))
-        return checked;
-  if (auto binary = value.getDefiningOp<riscv::BinaryOp>()) {
-    auto lhs = integerRange(binary.getLhs(), depth + 1);
-    auto rhs = integerRange(binary.getRhs(), depth + 1);
-    if (lhs && rhs) {
-      if (binary.getKind() == "add")
-        if (auto range = checkedRange(
-                static_cast<__int128>(lhs->minimum) + rhs->minimum,
-                static_cast<__int128>(lhs->maximum) + rhs->maximum))
-          return range;
-      if (binary.getKind() == "sub")
-        if (auto range = checkedRange(
-                static_cast<__int128>(lhs->minimum) - rhs->maximum,
-                static_cast<__int128>(lhs->maximum) - rhs->minimum))
-          return range;
-      if (binary.getKind() == "mul") {
-        const __int128 candidates[] = {
-            static_cast<__int128>(lhs->minimum) * rhs->minimum,
-            static_cast<__int128>(lhs->minimum) * rhs->maximum,
-            static_cast<__int128>(lhs->maximum) * rhs->minimum,
-            static_cast<__int128>(lhs->maximum) * rhs->maximum};
-        if (auto range = checkedRange(
-                *std::min_element(std::begin(candidates), std::end(candidates)),
-                *std::max_element(std::begin(candidates), std::end(candidates))))
-          return range;
-      }
-      if (binary.getKind() == "and") {
-        const IntegerRange *mask =
-            rhs->minimum == rhs->maximum && rhs->minimum >= 0 ? &*rhs
-            : lhs->minimum == lhs->maximum && lhs->minimum >= 0 ? &*lhs
-                                                                  : nullptr;
-        if (mask)
-          if (auto range = checkedRange(0, mask->maximum))
-            return range;
-      }
-      if (binary.getKind() == "or" && lhs->minimum >= 0 &&
-          rhs->minimum >= 0) {
-        auto coveringMask = [](int64_t maximum) {
-          uint64_t value = static_cast<uint64_t>(maximum);
-          value |= value >> 1;
-          value |= value >> 2;
-          value |= value >> 4;
-          value |= value >> 8;
-          value |= value >> 16;
-          value |= value >> 32;
-          return value;
-        };
-        const __int128 maximum =
-            static_cast<__int128>(coveringMask(lhs->maximum) |
-                                  coveringMask(rhs->maximum));
-        if (auto range = checkedRange(0, maximum))
-          return range;
-      }
-      if (binary.getKind() == "shl" && lhs->minimum >= 0 &&
-          rhs->minimum == rhs->maximum && rhs->minimum >= 0 &&
-          rhs->minimum < static_cast<int64_t>(type.getWidth()))
-        if (auto range = checkedRange(
-                static_cast<__int128>(lhs->minimum) << rhs->minimum,
-                static_cast<__int128>(lhs->maximum) << rhs->minimum))
-          return range;
-      if (binary.getKind() == "shr" && lhs->minimum >= 0 &&
-          rhs->minimum == rhs->maximum && rhs->minimum >= 0 &&
-          rhs->minimum < static_cast<int64_t>(type.getWidth()))
-        if (auto range = checkedRange(lhs->minimum >> rhs->minimum,
-                                      lhs->maximum >> rhs->minimum))
-          return range;
-      if (binary.getKind() == "div" && lhs->minimum >= 0 && rhs->minimum > 0)
-        if (auto range = checkedRange(lhs->minimum / rhs->maximum,
-                                      lhs->maximum / rhs->minimum))
-          return range;
-    }
-  }
-  if (type.isSigned()) {
-    const int64_t bound = int64_t{1} << (type.getWidth() - 1);
-    return IntegerRange{-bound, bound - 1};
-  }
-  return IntegerRange{0, (int64_t{1} << type.getWidth()) - 1};
+    return result;
+  });
 }
 
 std::optional<int64_t>

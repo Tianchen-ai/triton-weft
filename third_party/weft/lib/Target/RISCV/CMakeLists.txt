@@ -94,6 +94,7 @@ add_library(WeftRISCVTarget STATIC
 
 target_include_directories(WeftRISCVTarget PRIVATE ${WEFT_RISCV_EXTENSION_REGISTRY_DIR})
 target_link_libraries(WeftRISCVTarget PUBLIC
+  WeftAnalysis
   WeftSourceSpecialization
   WeftRISCVPlatform
   WeftRISCVContracts

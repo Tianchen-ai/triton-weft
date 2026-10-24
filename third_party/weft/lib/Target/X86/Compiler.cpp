@@ -2312,7 +2312,7 @@ private:
         }
       }
     }
-    if ((group == 2 || (group == 4 && target.hasByteDot())) && sources.size() == 2 &&
+    if ((group == 2 || group == 4) && sources.size() == 2 &&
         shape(sources[0].getType()).back() == outputShape.back() * group &&
         shape(sources[1].getType()).back() == outputShape.back() * group) {
       auto lhsElement = dyn_cast<IntegerType>(element(sources[0].getType()));
@@ -2329,9 +2329,16 @@ private:
         Value lhsValid = broadcast(loc, valid(sources[0], loc), maskType(sources[0].getType()), maskType(lhsType));
         Value rhsValid = broadcast(loc, valid(sources[1], loc), maskType(sources[1].getType()), maskType(rhsType));
         std::optional<weft::IntegerPairResult> selected;
-        if (group == 4 && resultElement.getWidth() == 32)
-          selected = weft::selectX86ByteDotGroups(module, b, loc, lhs, rhs, lhsValid, rhsValid,
+        if (group == 4 && resultElement.getWidth() <= 32) {
+          selected = weft::selectX86IntegerQuads(module, b, loc, lhs, rhs, lhsValid, rhsValid,
               lhsElement, rhsElement, target);
+          // A wider modular sum realizes the same low bits. Restore the
+          // author's boundary before any later widening or floating conversion.
+          if (selected && resultElement.getWidth() < 32)
+            selected->value = arith::TruncIOp::create(b, loc,
+                cast<VectorType>(selected->value.getType()).clone(b.getIntegerType(resultElement.getWidth())),
+                selected->value);
+        }
         if (group == 2)
           selected = weft::selectX86IntegerPairs(module, b, loc, lhs, rhs, lhsValid, rhsValid,
               lhsElement, rhsElement, resultElement.getWidth(), target.vectorBits);
@@ -2911,7 +2918,7 @@ private:
               operands.push_back(permute(loc, mapped(source), indices, pairType.clone(scalar(source.getType()))));
               predicates.push_back(permute(loc, valid(source, loc), indices, pairType));
             }
-            auto group = weft::selectX86ByteDotGroups(module, b, loc, operands[0], operands[1],
+            auto group = weft::selectX86IntegerQuads(module, b, loc, operands[0], operands[1],
                 predicates[0], predicates[1], lhsInteger, rhsInteger, target);
             assert(group && "the byte contraction candidate satisfies the local instruction contract");
             partial = arith::AddIOp::create(b, loc, partial, group->value);

@@ -21,6 +21,7 @@ endif()
 
 if(NOT TRITON_WEFT_RUNTIME_ONLY)
   add_subdirectory(Dialect)
+  add_subdirectory(Analysis)
   add_subdirectory(Target)
 endif()
 add_library(WeftX86Platform STATIC Target/X86/Target.cpp)
