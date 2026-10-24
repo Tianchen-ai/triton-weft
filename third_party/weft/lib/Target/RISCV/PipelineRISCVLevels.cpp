@@ -14,7 +14,7 @@ void copyLoopAttributes(scf::ForOp source, Operation *target, bool levelIdentity
   for (NamedAttribute attribute : source->getAttrs()) {
     auto name = attribute.getName();
     if (name == "weft.riscv.schedule" || name == "weft.riscv.pipeline_peak") continue;
-    if (!levelIdentity && name == "weft.riscv.level") continue;
+    if (!levelIdentity && (name == "weft.riscv.level" || name == "weft.riscv.validity_slots")) continue;
     if (!isa<scf::ForOp>(target) &&
         (name == "weft.riscv.unroll_factor" || name == "weft.riscv.unroll_order")) continue;
     target->setAttr(name, attribute.getValue());

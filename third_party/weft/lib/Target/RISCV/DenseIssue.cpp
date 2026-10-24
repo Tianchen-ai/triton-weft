@@ -1,4 +1,5 @@
 #include "DenseIssue.h"
+#include "Weft/Analysis/ReductionIdentity.h"
 #include "LocalMemory.h"
 #include "RISCVPhysicalSupport.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
@@ -160,11 +161,8 @@ std::optional<DenseIssueCost> riscv_internal::denseIssueCost(
 
 Value riscv_internal::denseReductionSeed(IRRewriter &b, Location loc,
     riscv::ValueType accumulator, StringRef kind) {
-  double neutral = kind == "max" ? -std::numeric_limits<double>::infinity()
-      : kind == "min" ? std::numeric_limits<double>::infinity() : 0.0;
   Type element = accumulator.getElementType();
-  TypedAttr identity = isa<IntegerType>(element) ? TypedAttr(b.getIntegerAttr(element, 0))
-                                            : TypedAttr(b.getFloatAttr(element, neutral));
+  TypedAttr identity = analysis::reductionIdentity(element, kind);
   Value scalar = riscv::ConstantOp::create(b, loc, element, identity);
   return riscv::RVVSplatOp::create(b, loc, accumulator, scalar,
       leaf(b, "rvv", "splat", "rvv.splat", "rvv.splat", 0, accumulator.getLayout().getRegisterGroups()));

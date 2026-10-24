@@ -1459,9 +1459,9 @@ Emitter::compileRVVStreamFinalize(riscv::RVVStreamFinalizeOp operation) {
                          : operation.getKind() == "max" ? "vfredmax"
                          : operation.getKind() == "min" ? "vfredmin"
                                                         : "vfredusum";
-  const std::string initial = operation.getKind() == "max" ? "(-INFINITY)"
-                              : operation.getKind() == "min" ? "INFINITY"
-                                                               : "0";
+  auto neutral = reductionIdentityLiteral(element, operation.getKind());
+  if (!neutral) return fail(operation, "stream finalize has no numerical identity");
+  const std::string initial = *neutral;
   Binding result;
   result.kind = input.parts.size() == 1 ? Binding::Kind::Scalar
                                         : Binding::Kind::ScalarTuple;

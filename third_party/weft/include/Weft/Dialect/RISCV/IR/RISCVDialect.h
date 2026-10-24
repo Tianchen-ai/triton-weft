@@ -34,6 +34,10 @@ usedInstructionExtensions(KernelOp kernel);
 
 bool knownIndexMultipleOf(mlir::Value value, int64_t divisor, unsigned depth = 0);
 
+/// Source handoffs keep their identity when physical validity companions are
+/// appended. Each companion names a preceding numerical slot, not a new birth.
+mlir::LogicalResult verifyValidityHandoffs(mlir::Operation *operation, int64_t sourceCount);
+
 /// Returns whether an RVV layout is executable under the complete target
 /// register contract, including fractional LMUL, VLMAX, and register groups.
 bool supportsRVVLayout(TargetAttr target, LayoutAttr layout);

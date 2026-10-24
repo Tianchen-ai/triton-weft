@@ -16,6 +16,7 @@ add_library(WeftRISCVTarget STATIC
   ConvertWeftToRISCV.cpp
   MaterializeRISCVReductions.cpp
   MaterializeRISCVGroupedArithmetic.cpp
+  MaterializeRISCVNumericConversions.cpp
   NumericalValidity.cpp
   MaterializeRISCVAtomics.cpp
   FinalizeRISCVHelpers.cpp

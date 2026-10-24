@@ -1,4 +1,5 @@
 #include "NumericalValidity.h"
+#include "Weft/Analysis/ReductionIdentity.h"
 #include "RISCVPhysicalSupport.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -109,6 +110,7 @@ class ValidityPropagation {
   int64_t &nextAxis;
   DenseMap<std::pair<int64_t, int64_t>, int64_t> predicateAxes;
   DenseMap<Operation *, SmallVector<unsigned>> controlSlots;
+  DenseMap<Operation *, SmallVector<unsigned>> whileInitialSlots;
   SmallVector<int64_t> completeAxes(riscv::ValueType type) {
     SmallVector<int64_t> axes;
     for (auto [axis, extent] : llvm::zip(type.getAxisIds().asArrayRef(), type.getShape().asArrayRef())) {
@@ -163,10 +165,32 @@ class ValidityPropagation {
             add(loop.getRegionIterArg(slot));
             add(loop.getResult(slot));
           }
+        } else if (auto loop = dyn_cast<riscv::LoopOp>(owner)) {
+          if (position >= 2) {
+            unsigned slot = position - 2;
+            add(loop.getBody().front().getArgument(slot + 1));
+            add(loop.getResult(slot));
+          }
+        } else if (auto yield = dyn_cast<riscv::YieldOp>(owner)) {
+          auto loop = cast<riscv::LoopOp>(yield->getParentOp());
+          add(loop.getResult(position));
+          add(loop.getBody().front().getArgument(position + 1));
+        } else if (auto loop = dyn_cast<scf::WhileOp>(owner)) {
+          add(loop.getBeforeArguments()[position]);
+        } else if (auto condition = dyn_cast<scf::ConditionOp>(owner)) {
+          if (position > 0) {
+            auto loop = cast<scf::WhileOp>(condition->getParentOp());
+            add(loop.getAfterArguments()[position - 1]);
+            add(loop.getResult(position - 1));
+          }
         } else if (auto yield = dyn_cast<scf::YieldOp>(owner)) {
           Operation *parent = yield->getParentOp();
-          if (position < parent->getNumResults()) add(parent->getResult(position));
-          if (auto loop = dyn_cast<scf::ForOp>(parent)) add(loop.getRegionIterArg(position));
+          if (auto loop = dyn_cast<scf::WhileOp>(parent)) {
+            add(loop.getBeforeArguments()[position]);
+          } else {
+            if (position < parent->getNumResults()) add(parent->getResult(position));
+            if (auto loop = dyn_cast<scf::ForOp>(parent)) add(loop.getRegionIterArg(position));
+          }
         } else if (auto ret = dyn_cast<riscv::HelperReturnOp>(owner)) {
           add(ret->getParentOfType<riscv::HelperOp>().getResult(position));
         } else if (!isa<scf::IfOp, riscv::HelperOp>(owner)) {
@@ -230,6 +254,97 @@ class ValidityPropagation {
     for (Value mask : inputs) result = conjunction(result, mask, type, op->getLoc());
     return result;
   }
+  LogicalResult reduce(riscv::ReduceOp op) {
+    auto input = cast<riscv::ValueType>(op.getInput().getType());
+    auto element = input.getElementType();
+    TypedAttr identity = analysis::reductionIdentity(element, op.getKind());
+    if (!identity) return op.emitError("numeric validity reduction requires a defined numerical identity");
+    Location loc = op.getLoc();
+    auto axes = completeAxes(input);
+    auto privateInput = domainType(b, element, input.getShape().asArrayRef(), axes);
+    Value mask = rename(masks.lookup(op.getInput()), input, axes, loc);
+    Value neutral = riscv::ConstantOp::create(b, loc, element, identity);
+    Value filled = riscv::SelectOp::create(b, loc, privateInput, mask,
+        rename(op.getInput(), input, axes, loc), neutral, unselectedLeaf(b));
+    SmallVector<int64_t> shape(input.getShape().asArrayRef());
+    shape.erase(shape.begin() + op.getAxis());
+    axes.erase(axes.begin() + op.getAxis());
+    auto resultType = [&](Type element) -> Type {
+      return shape.empty() ? element : Type(domainType(b, element, shape, axes));
+    };
+    Value reduced = riscv::ReduceOp::create(b, loc, resultType(element), filled,
+        op.getKindAttr(), op.getAxisAttr(), unselectedLeaf(b));
+    auto byte = IntegerType::get(b.getContext(), 8, IntegerType::Unsigned);
+    auto maskType = cast<riscv::ValueType>(mask.getType());
+    Value bytes = riscv::CastOp::create(b, loc,
+        domainType(b, byte, maskType.getShape().asArrayRef(), maskType.getAxisIds().asArrayRef()),
+        mask, unselectedLeaf(b));
+    Value any = riscv::ReduceOp::create(b, loc, resultType(byte), bytes,
+        "max", op.getAxis(), unselectedLeaf(b));
+    Value zero = riscv::ConstantOp::create(b, loc, byte, b.getIntegerAttr(byte, 0));
+    Value active = riscv::CompareOp::create(b, loc, resultType(b.getI1Type()), any, zero, "ne", unselectedLeaf(b));
+    if (auto output = dyn_cast<riscv::ValueType>(op.getResult().getType())) {
+      reduced = restore(reduced, output, loc);
+      active = restore(active, cast<riscv::ValueType>(predicateType(b, output)), loc);
+    }
+    masks[reduced] = active;
+    copyOrigin(op, reduced.getDefiningOp());
+    b.replaceOp(op, reduced);
+    return success();
+  }
+  LogicalResult store(riscv::StoreOp op) {
+    auto valueType = dyn_cast<riscv::ValueType>(op.getValue().getType());
+    Value active = combined(op, op.getValue().getType());
+    if (!valueType) {
+      auto branch = scf::IfOp::create(b, op.getLoc(), active, false);
+      op->moveBefore(branch.thenBlock()->getTerminator());
+      return success();
+    }
+    auto memory = dyn_cast<riscv::MemDescType>(op.getRegion().getType());
+    if (!memory || memory.getShape() != valueType.getShape() || memory.getAxisIds() != valueType.getAxisIds())
+      return op.emitError("masked store requires matching value and destination logical coordinates");
+    Location loc = op.getLoc();
+    SmallVector<Value> coordinates;
+    SmallVector<Attribute> selectors(valueType.getShape().size(), b.getStringAttr("index"));
+    auto scalarMemory = riscv::MemDescType::get(b.getContext(), memory.getEncoding(),
+        b.getDenseI64ArrayAttr({}), b.getDenseI64ArrayAttr({}), b.getDenseI64ArrayAttr({}), b.getDenseI64ArrayAttr({}),
+        memory.getAlignment(), "slice", memory.getAccess(), memory.getAliasSet(), memory.getLayoutIdentity(),
+        memory.getStorageBits(), memory.getElements(), memory.getInterleaveRows());
+    auto visit = [&](auto &&visit, unsigned dimension) -> LogicalResult {
+      if (dimension != valueType.getShape().size()) {
+        Value lower = arith::ConstantIndexOp::create(b, loc, 0);
+        Value step = arith::ConstantIndexOp::create(b, loc, 1);
+        Value upper = riscv::ExtentOp::create(b, loc, b.getIndexType(), op.getRegion(), dimension);
+        if (valueType.getShape()[dimension] > 0) {
+          Value capacity = arith::ConstantIndexOp::create(b, loc, valueType.getShape()[dimension]);
+          upper = b.createOrFold<arith::MinUIOp>(loc, upper, capacity);
+        }
+        auto loop = scf::ForOp::create(b, loc, lower, upper, step);
+        copyOrigin(op, loop);
+        OpBuilder::InsertionGuard guard(b);
+        b.setInsertionPointToStart(loop.getBody());
+        coordinates.push_back(loop.getInductionVar());
+        LogicalResult result = visit(visit, dimension + 1);
+        coordinates.pop_back();
+        return result;
+      }
+      Value predicate = riscv::ExtractOp::create(b, loc, b.getI1Type(), active, coordinates,
+          b.getArrayAttr(selectors), unassignedAccess(b), unselectedLeaf(b));
+      auto branch = scf::IfOp::create(b, loc, predicate, false);
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(branch.thenBlock());
+      Value value = riscv::ExtractOp::create(b, loc, valueType.getElementType(), op.getValue(), coordinates,
+          b.getArrayAttr(selectors), unassignedAccess(b), unselectedLeaf(b));
+      Value address = riscv::SliceOp::create(b, loc, scalarMemory, op.getRegion(), coordinates, b.getArrayAttr(selectors));
+      auto stored = riscv::StoreOp::create(b, loc, value, address, unassignedAccess(b),
+          unselectedLeaf(b), riscv::FieldStorePlanAttr());
+      copyOrigin(op, stored);
+      return success();
+    };
+    if (failed(visit(visit, 0))) return failure();
+    b.eraseOp(op);
+    return success();
+  }
 public:
   ValidityPropagation(IRRewriter &b, DenseMap<Value, Value> &masks, int64_t &nextAxis)
       : b(b), masks(masks), nextAxis(nextAxis) {}
@@ -259,6 +374,32 @@ public:
         b.replaceOp(loop, next.getResults().take_front(originalCount));
         continue;
       }
+      if (auto loop = dyn_cast<riscv::LoopOp>(op)) {
+        auto slots = carriedMasks(op);
+        if (slots.empty()) continue;
+        b.setInsertionPoint(op);
+        SmallVector<Value> initial(loop.getCarried());
+        SmallVector<Type> types(loop.getResultTypes());
+        for (unsigned slot : slots) {
+          initial.push_back(knownOrFull(loop.getCarried()[slot], op->getLoc()));
+          types.push_back(predicateType(b, loop.getResult(slot).getType()));
+        }
+        auto next = riscv::LoopOp::create(b, op->getLoc(), types, loop.getDomain(), loop.getParentPoint(), initial,
+            loop.getStateBirthCount(), loop.getStagedBirthCount(), loop.getHandoffCount(), loop.getSchedule());
+        next->setAttrs(loop->getAttrs());
+        SmallVector<int64_t> identities(slots.begin(), slots.end());
+        next->setAttr("weft.riscv.validity_slots", b.getDenseI64ArrayAttr(identities));
+        next.getBody().takeBody(loop.getBody());
+        unsigned originalCount = loop.getNumResults();
+        for (auto [position, slot] : llvm::enumerate(slots)) {
+          auto mask = next.getBody().front().addArgument(predicateType(b, loop.getResult(slot).getType()), op->getLoc());
+          masks[next.getBody().front().getArgument(slot + 1)] = mask;
+          masks[next.getResult(slot)] = next.getResult(originalCount + position);
+        }
+        controlSlots[next] = slots;
+        b.replaceOp(loop, next.getResults().take_front(originalCount));
+        continue;
+      }
       if (auto branch = dyn_cast<scf::IfOp>(op)) {
         auto slots = carriedMasks(op);
         if (slots.empty()) continue;
@@ -275,6 +416,46 @@ public:
         controlSlots[next] = slots;
         b.replaceOp(branch, next.getResults().take_front(originalCount));
         continue;
+      }
+      if (auto loop = dyn_cast<scf::WhileOp>(op)) {
+        auto outputSlots = carriedMasks(op);
+        SmallVector<unsigned> inputSlots;
+        for (auto [position, argument] : llvm::enumerate(loop.getBeforeArguments()))
+          if (affected.contains(argument)) inputSlots.push_back(position);
+        if (inputSlots.empty() && outputSlots.empty()) continue;
+        b.setInsertionPoint(op);
+        SmallVector<Value> initial(loop.getInits());
+        SmallVector<Type> types(loop.getResultTypes());
+        for (unsigned slot : inputSlots) initial.push_back(knownOrFull(loop.getInits()[slot], op->getLoc()));
+        for (unsigned slot : outputSlots) types.push_back(predicateType(b, loop.getResult(slot).getType()));
+        auto next = scf::WhileOp::create(b, op->getLoc(), types, initial);
+        next->setAttrs(loop->getAttrs());
+        next.getBefore().takeBody(loop.getBefore());
+        next.getAfter().takeBody(loop.getAfter());
+        unsigned originalCount = loop.getNumResults();
+        for (unsigned slot : inputSlots) {
+          auto argument = next.getBeforeArguments()[slot];
+          masks[argument] = next.getBefore().front().addArgument(predicateType(b, argument.getType()), op->getLoc());
+        }
+        for (auto [position, slot] : llvm::enumerate(outputSlots)) {
+          auto argument = next.getAfterArguments()[slot];
+          masks[argument] = next.getAfter().front().addArgument(predicateType(b, argument.getType()), op->getLoc());
+          masks[next.getResult(slot)] = next.getResult(originalCount + position);
+        }
+        controlSlots[next] = outputSlots;
+        whileInitialSlots[next] = inputSlots;
+        b.replaceOp(loop, next.getResults().take_front(originalCount));
+        continue;
+      }
+      if (auto condition = dyn_cast<scf::ConditionOp>(op)) {
+        auto found = controlSlots.find(op->getParentOp());
+        if (found != controlSlots.end()) {
+          b.setInsertionPoint(op);
+          SmallVector<Value> values(condition.getArgs());
+          for (unsigned slot : found->second) values.push_back(knownOrFull(condition.getArgs()[slot], op->getLoc()));
+          condition.getArgsMutable().assign(values);
+          continue;
+        }
       }
       if (auto helper = dyn_cast<riscv::HelperOp>(op)) {
         auto slots = carriedMasks(op);
@@ -295,11 +476,12 @@ public:
         b.replaceOp(helper, next.getResults().take_front(originalCount));
         continue;
       }
-      if (isa<scf::YieldOp, riscv::HelperReturnOp>(op)) {
+      if (isa<scf::YieldOp, riscv::YieldOp, riscv::HelperReturnOp>(op)) {
         Operation *owner = isa<riscv::HelperReturnOp>(op) ?
             op->getParentOfType<riscv::HelperOp>().getOperation() : op->getParentOp();
-        auto found = controlSlots.find(owner);
-        if (found != controlSlots.end()) {
+        auto &slotMap = isa<scf::WhileOp>(owner) ? whileInitialSlots : controlSlots;
+        auto found = slotMap.find(owner);
+        if (found != slotMap.end()) {
           b.setInsertionPoint(op);
           SmallVector<Value> values(op->getOperands());
           for (unsigned slot : found->second) values.push_back(knownOrFull(op->getOperand(slot), op->getLoc()));
@@ -320,11 +502,9 @@ public:
         atomic.getMaskMutable().assign(mask);
         masks[atomic.getResult()] = mask;
       } else if (auto store = dyn_cast<riscv::StoreOp>(op)) {
-        if (isa<riscv::ValueType>(store.getValue().getType()))
-          return store.emitError("grouped validity requires an explicit masked shaped store program");
-        Value mask = combined(op, store.getValue().getType());
-        auto branch = scf::IfOp::create(b, loc, mask, false);
-        store->moveBefore(branch.thenBlock()->getTerminator());
+        if (failed(this->store(store))) return failure();
+      } else if (auto reduction = dyn_cast<riscv::ReduceOp>(op)) {
+        if (failed(reduce(reduction))) return failure();
       } else if (auto extract = dyn_cast<riscv::ExtractOp>(op)) {
         Value source = masks.lookup(extract.getInput());
         if (!source) return extract.emitError("numeric validity through an indexed operand requires a complete projection");

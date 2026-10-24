@@ -1451,8 +1451,11 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
                                      : std::string();
     if (stem.empty())
       return {};
-    if (carrierOf(binary.getResult().getType()) != "rvv")
+    if (carrierOf(binary.getResult().getType()) != "rvv") {
+      if ((element.isF32() || element.isF64()) && (binary.getKind() == "max" || binary.getKind() == "min"))
+        return "scalar.f" + binary.getKind().str() + (element.isF64() ? ".d" : ".s");
       return ("scalar." + binary.getKind()).str();
+    }
     const bool lhsVector = carrierOf(binary.getLhs().getType()) == "rvv";
     const bool rhsVector = carrierOf(binary.getRhs().getType()) == "rvv";
     if (riscv::needsRVVAxisBroadcast(binary.getLhs().getType(), binary.getResult().getType()) ||
@@ -1631,9 +1634,7 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
     llvm::StringRef carrier = input.getLayout().getCarrier();
     if (carrier == "scalar") {
       auto layout = input.getLayout();
-      const bool singleton = (reduce.getKind() == "add" ||
-          ((reduce.getKind() == "max" || reduce.getKind() == "min") &&
-           mlir::isa<mlir::FloatType>(input.getElementType()))) &&
+      const bool singleton = (reduce.getKind() == "add" || reduce.getKind() == "max" || reduce.getKind() == "min") &&
           staticProduct(input.getShape().asArrayRef()) == 1 &&
           llvm::all_of(llvm::ArrayRef<mlir::DenseI64ArrayAttr>{
                         layout.getTimeFactors(), layout.getLaneFactors(),

@@ -1,6 +1,7 @@
 #include "Weft/Target/X86Compiler.h"
 #include "Weft/Target/SourceSpecialization.h"
 #include "Weft/Analysis/LogicalAxes.h"
+#include "Weft/Analysis/ReductionIdentity.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/Kernel/IR/KernelInterface.h"
 #include "Storage.h"
@@ -2030,18 +2031,9 @@ private:
     int64_t axis = op.getAxis(), extent = dimensions[axis];
     Type result = physicalType(op.getResult().getType());
     Type inputType = physicalType(op.getInput().getType()), elem = scalar(op.getInput().getType());
-    Value identity = zero(op.getLoc(), inputType);
-    if (op.getKind() == "max" || op.getKind() == "min") {
-      bool maximum = op.getKind() == "max";
-      if (auto fp = dyn_cast<FloatType>(elem))
-        identity = constant(op.getLoc(), inputType, b.getFloatAttr(fp, std::numeric_limits<double>::quiet_NaN()));
-      else {
-        unsigned width = elem.getIntOrFloatBitWidth();
-        APInt bits = maximum ? (unsignedType(op.getInput().getType()) ? APInt::getMinValue(width) : APInt::getSignedMinValue(width)) :
-                              (unsignedType(op.getInput().getType()) ? APInt::getMaxValue(width) : APInt::getSignedMaxValue(width));
-        identity = constant(op.getLoc(), inputType, b.getIntegerAttr(elem, bits));
-      }
-    }
+    auto neutral = weft::analysis::reductionIdentity(elem, op.getKind(), unsignedType(op.getInput().getType()));
+    if (!neutral) return unsupported(op, "unsupported x86 reduction identity: ") << op.getKind();
+    Value identity = constant(op.getLoc(), inputType, neutral);
     Value validity = valid(op.getInput(), op.getLoc());
     Value input = arith::SelectOp::create(b, op.getLoc(), validity, mapped(op.getInput()), identity);
     bool floating = isa<FloatType>(elem), unsignedInput = unsignedType(op.getInput().getType());
@@ -3864,17 +3856,9 @@ private:
     Type elem = scalar(op.getResult().getType()); bool fp = isa<FloatType>(elem), uns = unsignedType(op.getResult().getType());
     StringRef name = op.getKind() == "add" ? (fp ? "arith.addf" : "arith.addi") : op.getKind() == "max" ?
         (fp ? "arith.maxnumf" : uns ? "arith.maxui" : "arith.maxsi") : (fp ? "arith.minnumf" : uns ? "arith.minui" : "arith.minsi");
-    Value identity = zero(loc, elem);
-    if (op.getKind() != "add") {
-      bool maximum = op.getKind() == "max";
-      if (fp) identity = constant(loc, elem, b.getFloatAttr(elem, std::numeric_limits<double>::quiet_NaN()));
-      else {
-        unsigned bits = elem.getIntOrFloatBitWidth();
-        APInt value = maximum ? (uns ? APInt::getMinValue(bits) : APInt::getSignedMinValue(bits)) :
-            (uns ? APInt::getMaxValue(bits) : APInt::getSignedMaxValue(bits));
-        identity = constant(loc, elem, b.getIntegerAttr(elem, value));
-      }
-    }
+    auto neutral = weft::analysis::reductionIdentity(elem, op.getKind(), uns);
+    if (!neutral) return unsupported(op, "unsupported x86 reduction identity: ") << op.getKind();
+    Value identity = constant(loc, elem, neutral);
     bool packetReduction = (elem.isF32() || elem.isF64() || (isa<IntegerType>(elem) && elem.getIntOrFloatBitWidth() >= 8)) &&
                            isa<MemRefType>(mapped(op.getInput()).getType());
     auto reducePacket = [&](ValueRange coordinates) {

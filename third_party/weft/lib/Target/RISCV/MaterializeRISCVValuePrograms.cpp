@@ -767,7 +767,32 @@ private:
 
   LogicalResult extraction(riscv::ExtractOp op, Value source) {
     auto type = dyn_cast<riscv::ValueType>(op.getResult().getType());
-    if (!type || op->hasAttr("index_pattern")) return success();
+    if (op->hasAttr("index_pattern")) return success();
+    if (!type) {
+      if (!llvm::all_of(op.getSelectors(), [](Attribute selector) {
+            return cast<StringAttr>(selector).getValue() == "index";
+          })) return op.emitError("scalar projection requires one index for every source axis");
+      FailureOr<Value> input = failure();
+      {
+        OpBuilder::InsertionGuard guard(b);
+        // The scalar coordinate can select different register replicas. Make
+        // the immutable SSA value addressable once at its producer, before the
+        // consumer's lane loops; never reload the source View or spill per lane.
+        Operation *producer = source.getDefiningOp();
+        if (producer) b.setInsertionPointAfter(producer);
+        else b.setInsertionPoint(op);
+        input = sourceView(source, producer ? producer : op.getOperation());
+      }
+      if (failed(input)) return failure();
+      b.setInsertionPoint(op);
+      SmallVector<Value> coordinates(op.getIndices());
+      Value region = address(*input, coordinates, op);
+      auto loaded = riscv::LoadOp::create(b, op.getLoc(), op.getResult().getType(), region, Value(),
+          riscv_internal::unassignedAccess(b), riscv_internal::unselectedLeaf(b));
+      riscv_internal::copyOrigin(op, loaded);
+      b.replaceOp(op, loaded.getResult());
+      return success();
+    }
     for (Attribute attribute : op.getSelectors()) {
       auto kind = cast<StringAttr>(attribute).getValue();
       if (kind != "all" && kind != "index" && kind != "gather") return success();

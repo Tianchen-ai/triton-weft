@@ -1,4 +1,5 @@
 #include "Emitter.h"
+#include "Weft/Analysis/ReductionIdentity.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 
 namespace weft::riscv_emission {
@@ -1616,6 +1617,18 @@ mlir::LogicalResult Emitter::compileWidenOperation(ConversionOp operation) {
   return mlir::success();
 }
 
+std::optional<std::string> Emitter::reductionIdentityLiteral(mlir::Type element, llvm::StringRef kind) {
+  auto identity = analysis::reductionIdentity(element, kind);
+  if (!identity) return std::nullopt;
+  if (auto fp = mlir::dyn_cast<mlir::FloatAttr>(identity))
+    return fp.getValue().isNaN() ? "NAN" : "0.0";
+  auto type = scalarCType(element);
+  if (!type) return std::nullopt;
+  llvm::SmallString<32> digits;
+  mlir::cast<mlir::IntegerAttr>(identity).getValue().toString(digits, 16, false);
+  return "((" + *type + ")UINT64_C(0x" + digits.str().str() + "))";
+}
+
 mlir::LogicalResult Emitter::compileReduce(riscv::ReduceOp operation) {
   Binding input = bindings.lookup(operation.getInput());
   auto inputType = mlir::dyn_cast<riscv::ValueType>(operation.getInput().getType());
@@ -1656,11 +1669,14 @@ mlir::LogicalResult Emitter::compileReduce(riscv::ReduceOp operation) {
                                   ? materialized->scalar
                                   : materialized->parts.front();
     const std::string name = fresh("reduce_scalar");
-    const std::string identity = selectedKind == "add" ? "0"
-        : selectedKind == "max" ? "-INFINITY" : "INFINITY";
+    auto neutral = reductionIdentityLiteral(inputType.getElementType(), selectedKind);
+    if (!neutral) return fail(operation, "singleton reduction has no numerical identity");
+    const std::string identity = *neutral;
     std::string expression;
     if (selectedKind == "add")
       expression = "(" + *scalarType + ")0 + " + value;
+    else if (mlir::isa<mlir::IntegerType>(inputType.getElementType()))
+      expression = value;
     else {
       const std::string function = std::string(selectedKind == "max" ? "fmax" : "fmin") +
           (inputType.getElementType().isF64() ? "" : "f");
@@ -1762,7 +1778,11 @@ mlir::LogicalResult Emitter::compileReduce(riscv::ReduceOp operation) {
         if (arithmetic)
           line(accumulator + " = (" + *scalarType + ")(" + accumulator +
                " + " + materialized->parts[inputRegister] + ");");
-        else
+        else if (mlir::isa<mlir::FloatType>(inputType.getElementType())) {
+          std::string function = std::string(kind == "max" ? "fmax" : "fmin") +
+              (inputType.getElementType().isF64() ? "" : "f");
+          line(accumulator + " = " + function + "(" + accumulator + ", " + materialized->parts[inputRegister] + ");");
+        } else
           line(accumulator + " = (" + accumulator + ") " +
                std::string(kind == "max" ? ">" : "<") + " (" +
                materialized->parts[inputRegister] + ") ? (" + accumulator +
@@ -1815,6 +1835,8 @@ mlir::LogicalResult Emitter::compileReduce(riscv::ReduceOp operation) {
       instruction = floating ? "vfadd" : "vadd";
     else if ((kind == "max" || kind == "min") && floating)
       instruction = kind == "max" ? "vfmax" : "vfmin";
+    else if ((kind == "max" || kind == "min") && integer)
+      instruction = std::string(kind == "max" ? "vmax" : "vmin") + (integer.isUnsigned() ? "u" : "");
     else
       return fail(operation,
                   "register-axis reduction implements add and floating max/min");
@@ -1901,16 +1923,9 @@ mlir::LogicalResult Emitter::compileReduce(riscv::ReduceOp operation) {
       std::string(floating ? "vfloat" : unsignedInteger ? "vuint" : "vint") +
       std::to_string(sew) + "m1_t";
   llvm::StringRef kind = selectedKind;
-  std::string initial;
-  if (kind == "add")
-    initial = "0";
-  else if (kind == "max" && floating)
-    initial = "-INFINITY";
-  else if (kind == "min" && floating)
-    initial = "INFINITY";
-  else
-    return fail(operation,
-                "current wide reduce implements add and floating max/min");
+  auto neutral = reductionIdentityLiteral(element, kind);
+  if (!neutral) return fail(operation, "wide reduction has no numerical identity");
+  std::string initial = *neutral;
   const int64_t resultParts = registerPartCount(operation.getResult());
   const int64_t streams = streamPartCount(operation.getInput());
   if (resultParts <= 0 || streams <= 0)
@@ -1929,7 +1944,8 @@ mlir::LogicalResult Emitter::compileReduce(riscv::ReduceOp operation) {
                      : kind == "max" ? "vfredmax"
                                        : "vfredmin";
   else
-    horizontalStem = "vredsum";
+    horizontalStem = kind == "add" ? "vredsum" : kind == "max" ?
+        (unsignedInteger ? "vredmaxu" : "vredmax") : (unsignedInteger ? "vredminu" : "vredmin");
   for (int64_t resultPart = 0; resultPart < resultParts; ++resultPart) {
     auto sourceRegister = projectRegisterPart(
         operation.getInput(), operation.getResult(), resultPart);
@@ -1964,7 +1980,8 @@ mlir::LogicalResult Emitter::compileReduce(riscv::ReduceOp operation) {
       const std::string combineStem =
           floating ? (kind == "add" ? "vfadd" : kind == "max" ? "vfmax"
                                                               : "vfmin")
-                   : "vadd";
+                   : kind == "add" ? "vadd" : kind == "max" ?
+                       (unsignedInteger ? "vmaxu" : "vmax") : (unsignedInteger ? "vminu" : "vmin");
       std::string combined = fresh("reduce_streams");
       line(vectorTypeName + " " + combined + " = " +
            materialized->parts[first] + ";");
@@ -2149,6 +2166,12 @@ mlir::LogicalResult Emitter::compileBinary(riscv::BinaryOp operation) {
     if (!kind.consume_front("scalar."))
       return fail(operation,
                   "scalar-tuple binary has no exact selected scalar instruction");
+    const bool selectedFloatExtremum = kind == "fmax.s" || kind == "fmin.s" || kind == "fmax.d" || kind == "fmin.d";
+    if (selectedFloatExtremum) {
+      mlir::Type element = riscv_internal::logicalElement(operation.getResult().getType());
+      if ((kind.ends_with(".s") && !element.isF32()) || (kind.ends_with(".d") && !element.isF64()))
+        return fail(operation, "selected scalar extremum disagrees with its machine element type");
+    }
     llvm::StringRef spelling = kind == "add" ? "+"
                               : kind == "sub" ? "-"
                               : kind == "mul" ? "*"
@@ -2160,7 +2183,7 @@ mlir::LogicalResult Emitter::compileBinary(riscv::BinaryOp operation) {
                               : kind == "shl" ? "<<"
                               : kind == "shr" ? ">>"
                                                 : "";
-    if (spelling.empty() && kind != "max" && kind != "min")
+    if (spelling.empty() && kind != "max" && kind != "min" && !selectedFloatExtremum)
       return fail(operation,
                   "unsupported selected scalar-tuple pointwise binary kind");
     const int64_t parts = mlir::isa<riscv::ValueType>(operation.getResult().getType())
@@ -2191,7 +2214,15 @@ mlir::LogicalResult Emitter::compileBinary(riscv::BinaryOp operation) {
         return fail(operation,
                     "scalar-tuple operand projection is not representable");
       std::string expression;
-      if (!spelling.empty())
+      if (selectedFloatExtremum) {
+        // The selected RISC-V scalar instruction implements minimumNumber /
+        // maximumNumber, including NaNs and the ordering of signed zeros.
+        std::string name = fresh("scalar_extremum");
+        line(*scalarResultType + " " + name + ";");
+        line("__asm__(\"" + kind.str() + " %0, %1, %2\" : \"=f\"(" + name + ") : \"f\"(" +
+             *lhsExpression + "), \"f\"(" + *rhsExpression + "));");
+        expression = name;
+      } else if (!spelling.empty())
         expression = "(" + *lhsExpression + " " + spelling.str() + " " +
                      *rhsExpression + ")";
       else

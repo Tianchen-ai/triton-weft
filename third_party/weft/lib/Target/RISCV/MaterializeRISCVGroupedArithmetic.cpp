@@ -57,13 +57,15 @@ public:
     });
     IRRewriter b(&getContext());
     DenseMap<Value, Value> results, masks;
-    for (auto op : operations)
-      if (failed(materialize(b, op, nextAxis++, results, masks))) { signalPassFailure(); return; }
+    for (auto op : operations) {
+      int64_t groupedAxis = nextAxis++;
+      if (failed(materialize(b, op, groupedAxis, nextAxis, results, masks))) { signalPassFailure(); return; }
+    }
     if (failed(propagateNumericValidity(b, original, masks, nextAxis))) { signalPassFailure(); return; }
     for (auto op : operations) b.replaceOp(op, results.lookup(op.getResult()));
   }
 private:
-  LogicalResult materialize(IRRewriter &b, riscv::MacGroupsOp op, int64_t groupedAxis,
+  LogicalResult materialize(IRRewriter &b, riscv::MacGroupsOp op, int64_t groupedAxis, int64_t &nextAxis,
                             DenseMap<Value, Value> &results, DenseMap<Value, Value> &masks) {
     auto left = cast<riscv::ValueType>(op.getLhs().getType());
     auto right = cast<riscv::ValueType>(op.getRhs().getType());
@@ -105,7 +107,16 @@ private:
         }
       }
     auto accumulatorType = makeType(result.getElementType(), productShape, productAxes);
-    auto predicateType = makeType(b.getI1Type(), productShape, productAxes);
+    // Every validity coordinate must be evaluated, including false rows on a
+    // free-axis tail. Which free axis becomes an RVV lane is a later decision.
+    DenseMap<int64_t, int64_t> predicateAxisMap;
+    SmallVector<int64_t> predicateAxes;
+    for (int64_t axis : productAxes) {
+      int64_t complete = axis == groupedAxis ? groupedAxis : nextAxis++;
+      predicateAxisMap[axis] = complete;
+      predicateAxes.push_back(complete);
+    }
+    auto predicateType = makeType(b.getI1Type(), productShape, predicateAxes);
     auto product = [&](Value member) -> std::pair<Value, Value> {
       Value selected = riscv::BinaryOp::create(b, loc, indexType, bases, member, "add", unselectedLeaf(b));
       SmallVector<Value> values;
@@ -116,15 +127,16 @@ private:
         SmallVector<int64_t> shape(type.getShape().asArrayRef()), axes(type.getAxisIds().asArrayRef());
         shape.back() = relation->groups; axes.back() = groupedAxis;
         for (auto [dimension, axis] : llvm::enumerate(axes)) {
+          int64_t completeAxis = predicateAxisMap.lookup(axis);
           Value coordinates = dimension + 1 == axes.size() ? selected :
-              Value(riscv::IotaOp::create(b, loc, makeType(u32, {shape[dimension]}, {axis}),
+              Value(riscv::IotaOp::create(b, loc, makeType(u32, {shape[dimension]}, {completeAxis}),
                                         0, shape[dimension], unselectedLeaf(b)));
           Value active = riscv::CastOp::create(b, loc, u32, bounds[inputNumber][dimension], unselectedLeaf(b));
           Value predicate = riscv::CompareOp::create(b, loc,
-              makeType(b.getI1Type(), {shape[dimension]}, {axis}), coordinates, active, "lt", unselectedLeaf(b));
-          auto position = llvm::find(validityAxes, axis);
+              makeType(b.getI1Type(), {shape[dimension]}, {completeAxis}), coordinates, active, "lt", unselectedLeaf(b));
+          auto position = llvm::find(validityAxes, completeAxis);
           if (position == validityAxes.end()) {
-            validityAxes.push_back(axis); validityShape.push_back(shape[dimension]);
+            validityAxes.push_back(completeAxis); validityShape.push_back(shape[dimension]);
           } else {
             auto &extent = validityShape[position - validityAxes.begin()];
             extent = std::max(extent, shape[dimension]);
@@ -145,7 +157,9 @@ private:
       Attribute zero = isa<FloatType>(result.getElementType()) ? Attribute(b.getFloatAttr(result.getElementType(), 0.0)) :
           Attribute(b.getIntegerAttr(result.getElementType(), 0));
       Value identity = riscv::ConstantOp::create(b, loc, result.getElementType(), zero);
-      value = riscv::SelectOp::create(b, loc, accumulatorType, valid, value, identity, unselectedLeaf(b));
+      Value numericMask = riscv::ReshapeOp::create(b, loc, makeType(b.getI1Type(), productShape, productAxes),
+          valid, predicateType.getAxisIds(), DenseI64ArrayAttr());
+      value = riscv::SelectOp::create(b, loc, accumulatorType, numericMask, value, identity, unselectedLeaf(b));
       return {value, valid};
     };
     auto [first, active] = product(riscv::ConstantOp::create(b, loc, u32, b.getIntegerAttr(u32, 0)));
@@ -176,10 +190,12 @@ private:
     if (productAxes != outputAxes)
       accumulator = riscv::ReshapeOp::create(b, loc, orderedType, accumulator,
           b.getDenseI64ArrayAttr(outputAxes), DenseI64ArrayAttr());
-    auto orderedMask = makeType(b.getI1Type(), result.getShape().asArrayRef(), outputAxes);
+    SmallVector<int64_t> orderedMaskAxes;
+    for (int64_t axis : outputAxes) orderedMaskAxes.push_back(predicateAxisMap.lookup(axis));
+    auto orderedMask = makeType(b.getI1Type(), result.getShape().asArrayRef(), orderedMaskAxes);
     if (productAxes != outputAxes)
       active = riscv::ReshapeOp::create(b, loc, orderedMask, active,
-          b.getDenseI64ArrayAttr(outputAxes), DenseI64ArrayAttr());
+          b.getDenseI64ArrayAttr(orderedMaskAxes), DenseI64ArrayAttr());
     auto restored = riscv::ReshapeOp::create(b, loc, result, accumulator,
         orderedType.getAxisIds(), DenseI64ArrayAttr());
     copyOrigin(op, restored);

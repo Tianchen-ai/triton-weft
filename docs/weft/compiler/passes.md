@@ -55,6 +55,7 @@ ConvertWeftToRISCV
 → MaterializeRISCVReplicaStorageLoads
 → HoistRISCVLoopInvariants
 → SpecializeRISCVMemory
+→ MaterializeRISCVNumericConversions
 → SelectRISCVOperations
 → SelectRISCVIntegerMACs
 → FinalizeRISCVLeaves
@@ -135,12 +136,29 @@ free-axis 对齐和完整分组范围，再展开为闭合 primitive 内的 type
 
 分组有效性是各原始有效项的逻辑 OR，不能把物理补零后的完整寄存器当作全部有效。
 独立 grouped program 显式携带该谓词，并在每个乘积进入累加前补 identity；
-`NumericalValidity` 沿提取、转换、pointwise、普通 `for/if` 和 helper 返回传递对应的
+`NumericalValidity` 沿提取、转换、pointwise、普通 `for/while/if`、Level 和 helper 返回传递对应的
 物理 SSA 谓词，最终作用于 memory effect。谓词随实际执行的控制路径传递，不重新读取
 原输入来重建快照。尚无闭合传播规则的消费者明确拒绝，不能默认为完整有效。
 谓词的逻辑域覆盖整个容量，非活动位置明确为 false。谓词合取与选择使用私有坐标
 别名完成，再投影回原数值轴，避免外层数值 tail 的 VL 截短谓词本身；同域的单一
 谓词直接复用，不为窄化后再扩宽额外生成向量合取。
+
+分组结果的自由轴也在完整私有谓词域内计算，不能依赖后来恰好选到哪条 SIMD 轴。
+归约先按相同数值合同给无效项补 identity，再对原谓词做 OR；完全无效的输出仍无效。
+shaped store 物化为有界坐标遍历和受谓词控制的真实写入，不先读取或写入无效目标。
+`while` 的入口和退出 tuple 分别追踪；Level 的物理有效性 companion 用
+`weft.riscv.validity_slots` 关联原 handoff，不增加作者 state/stage birth 或 handoff 计数。
+
+### `MaterializeRISCVNumericConversions`
+
+闭合物理数值转换的机器宽度步骤。composite lowering 与晚期 leaf selection 共用同一
+实现：后续 Value program 新产生的 RVV 转换也必须显式形成合法 narrowing 链。
+Boolean predicate 是 packed mask，转为数值时物化同坐标的 0/1 select，不能按 byte
+向量 reinterpret。新值进入正常 leaf、生命周期与资源分析，terminal 不补造转换程序。
+
+`Analysis/ReductionIdentity` 由 x86 与 RISC-V 共用。整数极值使用声明 signedness 的边界；
+浮点 max/min 使用 NaN identity，保证全部有效元素为 NaN 时仍返回 NaN。标量尾段的
+f32/f64 极值选择明确的 `fmax.s/d`、`fmin.s/d` leaf，保留 NaN 与 signed-zero 合同。
 
 ### `MaterializeRISCVAtomics`
 
@@ -656,6 +674,10 @@ terminal 只枚举已选重复数和明确的输出坐标，不决定 microtile 
 较大的 broadcast consumer。不得把本可向量执行的子域 exp/log 强制嵌入另一个 lane 轴、
 因此重复为每个 replica 做标量数学。已存在的 register boundary 在其定义后形成必要私有副本；
 循环外不变值的副本不随内层 consumer 重复建立，loop carry 的副本仍属于该次 iteration。
+
+动态 scalar index 跨寄存器 replicas、无法选择直接寄存器提取时，使用同一数值快照的
+`local_view → slice → load`。有定义点的 SSA 在其 producer 后建立一次副本，后续提取
+复用支配的私有 descriptor，不在每个 lane 重存完整 Value，也不重新读取源 View。
 
 scalar carrier 若保留非单位 lane window，表示该窗口内已证明一致的标量供应；
 time/replica parts 是有限标量 tuple，不能仅因 time factor 大于一就建立局部数组。

@@ -17,6 +17,7 @@ std::unique_ptr<mlir::Pass>
 createConvertWeftToRISCVPass(RISCVCompilerOptions options);
 std::unique_ptr<mlir::Pass> createMaterializeRISCVReductionsPass();
 std::unique_ptr<mlir::Pass> createMaterializeRISCVGroupedArithmeticPass();
+std::unique_ptr<mlir::Pass> createMaterializeRISCVNumericConversionsPass();
 std::unique_ptr<mlir::Pass> createMaterializeRISCVAtomicsPass();
 std::unique_ptr<mlir::Pass> createFinalizeRISCVHelpersPass();
 std::unique_ptr<mlir::Pass> createSelectRISCVOperationsPass();

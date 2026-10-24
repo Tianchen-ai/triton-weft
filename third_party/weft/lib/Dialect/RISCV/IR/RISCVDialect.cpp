@@ -3435,10 +3435,29 @@ mlir::LogicalResult DomainOp::verify() {
   return mlir::success();
 }
 
+mlir::LogicalResult weft::riscv::verifyValidityHandoffs(mlir::Operation *operation, int64_t sourceCount) {
+  auto companions = operation->getAttrOfType<mlir::DenseI64ArrayAttr>("weft.riscv.validity_slots");
+  const int64_t count = companions ? companions.size() : 0;
+  if (sourceCount < 0 || sourceCount + count != int64_t(operation->getNumResults()))
+    return operation->emitError("physical handoffs must preserve source results and explicit validity companions");
+  if (!companions) return mlir::success();
+  int64_t previous = -1;
+  for (auto [position, slot] : llvm::enumerate(companions.asArrayRef())) {
+    if (slot <= previous || slot >= sourceCount)
+      return operation->emitError("validity companions require distinct ordered source handoff slots");
+    previous = slot;
+    auto numeric = operation->getResult(slot).getType();
+    auto predicate = operation->getResult(sourceCount + position).getType();
+    if (!elementOf(predicate).isInteger(1) || shapeOf(numeric) != shapeOf(predicate) || axesOf(numeric) != axesOf(predicate))
+      return operation->emitError("validity companion must preserve its numerical handoff coordinates");
+  }
+  return mlir::success();
+}
+
 mlir::LogicalResult LoopOp::verify() {
-  if (getStateBirthCount() < 0 || getStagedBirthCount() < 0 ||
-      getHandoffCount() != static_cast<int64_t>(getResults().size()))
+  if (getStateBirthCount() < 0 || getStagedBirthCount() < 0)
     return emitOpError("physical loop birth/handoff identity is incomplete");
+  if (mlir::failed(verifyValidityHandoffs(*this, getHandoffCount()))) return mlir::failure();
   if (getCarried().size() != getResults().size())
     return emitOpError("physical loop carried operands and results must match");
   if (getDomain().getType().getParentDomainId() !=

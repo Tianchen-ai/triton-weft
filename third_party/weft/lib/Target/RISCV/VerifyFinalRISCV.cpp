@@ -864,8 +864,7 @@ public:
           const int64_t actualStaged = stagedBirths.size();
           if (level.getStateBirthCount() != actualState ||
               level.getStagedBirthCount() != actualStaged ||
-              level.getHandoffCount() !=
-                  static_cast<int64_t>(loop.getNumResults())) {
+              mlir::failed(riscv::verifyValidityHandoffs(loop, level.getHandoffCount()))) {
             loop.emitError()
                 << "final physical Level lost a birth or handoff identity; expected state="
                 << level.getStateBirthCount()
@@ -883,8 +882,7 @@ public:
             branch->getAttrOfType<riscv::LevelAttr>("weft.riscv.level");
         if (!level)
           return;
-        if (level.getHandoffCount() !=
-            static_cast<int64_t>(branch.getNumResults())) {
+        if (mlir::failed(riscv::verifyValidityHandoffs(branch, level.getHandoffCount()))) {
           branch.emitError()
               << "pipelined physical Level lost its handoff identity; expected "
               << level.getHandoffCount() << ", observed "

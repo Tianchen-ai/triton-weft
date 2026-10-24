@@ -865,6 +865,7 @@ private:
   template <typename ConversionOp>
   mlir::LogicalResult compileWidenOperation(ConversionOp operation);
   mlir::LogicalResult compileReduce(riscv::ReduceOp operation);
+  std::optional<std::string> reductionIdentityLiteral(mlir::Type element, llvm::StringRef kind);
   mlir::LogicalResult compileFold2(riscv::Fold2Op operation);
   mlir::LogicalResult compileLookup(riscv::LookupOp operation);
   mlir::LogicalResult compileRVVByteGather(riscv::RVVByteGatherOp operation);

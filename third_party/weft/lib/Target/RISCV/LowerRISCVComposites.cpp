@@ -4,6 +4,7 @@
 #include "ContractionSupply.h"
 #include "DenseValuePrograms.h"
 #include "LocalMemory.h"
+#include "NumericConversions.h"
 #include "DenseContractions.h"
 #include "IME/FragmentMaterialization.h"
 
@@ -111,7 +112,7 @@ public:
     lowerWidenReductions(rewriter, failed);
     lowerReciprocalSquareRoots(rewriter, failed);
     lowerPropagatingExtrema(rewriter, failed);
-    lowerNumericConversions(rewriter, failed);
+    failed |= mlir::failed(riscv_internal::materializeNumericConversions(module, rewriter));
     return mlir::failure(failed);
   }
 
@@ -130,7 +131,7 @@ public:
     closeRegisterReductionDomains(rewriter, failed);
     // Bounded value programs can turn scalar-array conversions into RVV
     // issues. Close their width steps after that representation is known.
-    lowerNumericConversions(rewriter, failed);
+    failed |= mlir::failed(riscv_internal::materializeNumericConversions(module, rewriter));
     eraseDeadComposites(rewriter);
     return mlir::failure(failed);
   }
@@ -150,73 +151,6 @@ private:
   }
 
   int64_t nextPartialBirthId = 0;
-
-  void lowerNumericConversions(mlir::IRRewriter &rewriter, bool &failed) {
-    llvm::SmallVector<mlir::Operation *> operations;
-    getOperation().walk([&](mlir::Operation *operation) {
-      if (mlir::isa<riscv::CastOp, riscv::WidenOp>(operation))
-        operations.push_back(operation);
-    });
-    for (mlir::Operation *operation : operations) {
-      auto source = mlir::dyn_cast<riscv::ValueType>(operation->getOperand(0).getType());
-      auto result = mlir::dyn_cast<riscv::ValueType>(operation->getResult(0).getType());
-      if (!source || !result || result.getLayout().getCarrier() != "rvv") continue;
-      auto integer = mlir::dyn_cast<mlir::IntegerType>(source.getElementType());
-      if (!integer) continue;
-      rewriter.setInsertionPoint(operation);
-      if (integer.getWidth() <= 8 && result.getElementType().isF32()) {
-        // RVV has no byte/boolean-to-float instruction. Keep both conversions
-        // explicit so the intermediate register lifetime participates in planning.
-        auto element = mlir::IntegerType::get(&getContext(), 32,
-            integer.isSigned() ? mlir::IntegerType::Signed : mlir::IntegerType::Unsigned);
-        auto wideType = riscv::ValueType::get(&getContext(), element, result.getShape(),
-                                             result.getAxisIds(), result.getLayout());
-        auto wide = riscv::WidenOp::create(rewriter, operation->getLoc(), wideType,
-            operation->getOperand(0), riscv_internal::unselectedLeaf(rewriter));
-        auto converted = riscv::CastOp::create(rewriter, operation->getLoc(), result,
-            wide.getResult(), riscv_internal::unselectedLeaf(rewriter));
-        copyIdentity(operation, wide);
-        copyIdentity(operation, converted);
-        rewriter.replaceOp(operation, converted.getResult());
-        continue;
-      }
-      auto targetInteger = mlir::dyn_cast<mlir::IntegerType>(result.getElementType());
-      if (!mlir::isa<riscv::CastOp>(operation) || !targetInteger ||
-          targetInteger.getWidth() < 2 || targetInteger.getWidth() >= integer.getWidth()) continue;
-      const unsigned carrierWidth = std::max(8u, targetInteger.getWidth());
-      if ((integer.getWidth() != 16 && integer.getWidth() != 32 && integer.getWidth() != 64) ||
-          (carrierWidth != 8 && carrierWidth != 16 && carrierWidth != 32))
-        continue;
-      mlir::Value value = operation->getOperand(0);
-      unsigned width = integer.getWidth();
-      while (width > carrierWidth) {
-        width /= 2;
-        auto element = mlir::IntegerType::get(&getContext(), width, integer.getSignedness());
-        auto type = riscv::ValueType::get(&getContext(), element, result.getShape(),
-                                         result.getAxisIds(), source.getLayout());
-        auto layout = riscv_internal::projectLayout(rewriter, type, source.getLayout(),
-            operation->getParentOfType<riscv::KernelOp>().getTarget());
-        if (!layout) {
-          operation->emitError("integer truncation has no legal intermediate layout");
-          failed = true;
-          break;
-        }
-        type = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(type, layout));
-        auto narrowed = riscv::NarrowOp::create(rewriter, operation->getLoc(), type,
-            value, "none", false, riscv_internal::unselectedLeaf(rewriter));
-        copyIdentity(operation, narrowed);
-        value = narrowed.getResult();
-      }
-      if (failed) continue;
-      if (value.getType() != result) {
-        auto converted = riscv::CastOp::create(rewriter, operation->getLoc(), result,
-            value, riscv_internal::unselectedLeaf(rewriter));
-        copyIdentity(operation, converted);
-        value = converted.getResult();
-      }
-      rewriter.replaceOp(operation, value);
-    }
-  }
 
   void lowerPropagatingExtrema(mlir::IRRewriter &rewriter, bool &failed) {
     llvm::SmallVector<riscv::BinaryOp> operations;
@@ -650,6 +584,8 @@ private:
           loop.getLoc(), lower, upper, step, loop.getCarried());
       if (auto source = loop->getAttr("source_origin"))
         physical->setAttr("source_origin", source);
+      if (auto validity = loop->getAttr("weft.riscv.validity_slots"))
+        physical->setAttr("weft.riscv.validity_slots", validity);
       physical->setAttr(
           "weft.riscv.level",
           riscv::LevelAttr::get(

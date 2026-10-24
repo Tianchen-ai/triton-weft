@@ -412,6 +412,12 @@ canonical Level转换时保留 domain/partition/multiplicity、birth counts、ca
 和direction。Level最终成为带 `LevelAttr` 的真实 `scf.for`。ordinary `for/while/if` 仍是有序
 scalar control，不因进入RISC-V IR而获得一个编译器发明的 shaped axis。
 
+数值有效性需要跨 Level 时，`weft.riscv.validity_slots` 按原 handoff slot 的升序登记
+附加的 i1 companion；其 shape/axes 必须与对应数值结果相同。原 `handoff_count`
+不变，物理结果数等于原 handoff 加 companion 数，birth 计数仍仅来自作者程序。
+该对应关系随 Level lowering 和流水出口保留，最终 verifier 再检查；内部流水 carry
+不冒充新的 source Level。普通 while 的 before/after tuple 各自保留自己的有效性参数。
+
 嵌套 Level 的遍历长度来自最近同轴祖先的实际 active extent。只有这个有效长度能被
 当前 partition 整除时，才可选择 exact 的整数次数循环；父层声明的 partition 可整除
 不足以证明其尾块完整。跨其它轴嵌套时仍沿同一逻辑轴追溯，不把词法父层的大小当作证明。
