@@ -15,6 +15,8 @@ add_library(WeftRISCVTarget STATIC
   ContractionSupply.cpp
   ConvertWeftToRISCV.cpp
   MaterializeRISCVReductions.cpp
+  MaterializeRISCVGroupedArithmetic.cpp
+  NumericalValidity.cpp
   MaterializeRISCVAtomics.cpp
   FinalizeRISCVHelpers.cpp
   SelectRISCVOperations.cpp

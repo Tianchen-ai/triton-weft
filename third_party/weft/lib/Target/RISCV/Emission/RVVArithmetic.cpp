@@ -1462,6 +1462,9 @@ mlir::LogicalResult Emitter::compileBitcast(riscv::BitcastOp operation) {
 }
 
 mlir::LogicalResult Emitter::compileCast(riscv::CastOp operation) {
+  auto selected = operation.getLeaf().getInstruction();
+  if (selected.starts_with("rvv.sext.vf") || selected.starts_with("rvv.zext.vf"))
+    return compileWidenOperation(operation);
   return compileCastImpl(operation);
 }
 
@@ -1470,6 +1473,11 @@ mlir::LogicalResult Emitter::compileNarrow(riscv::NarrowOp operation) {
 }
 
 mlir::LogicalResult Emitter::compileWiden(riscv::WidenOp operation) {
+  return compileWidenOperation(operation);
+}
+
+template <typename ConversionOp>
+mlir::LogicalResult Emitter::compileWidenOperation(ConversionOp operation) {
   Binding input = bindings.lookup(operation.getInput());
   mlir::FailureOr<Binding> materialized =
       materializeNumeric(operation.getInput(), std::move(input));

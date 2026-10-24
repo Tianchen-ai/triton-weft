@@ -15,6 +15,7 @@ RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改�
 ConvertWeftToRISCV
 → SpecializeRISCVPointerOffsets
 → MaterializeRISCVReductions
+→ MaterializeRISCVGroupedArithmetic
 → MaterializeRISCVAtomics
 → SelectRISCVOperations
 → PropagateRISCVLayouts
@@ -123,6 +124,24 @@ wrap/sign 边界；不能把窄整数回绕后的索引误当作宽整数中的�
 保留非活动位置原值，避免构造越界索引；tuple 各成员共同使用同一顺序和有效域。
 reverse 从较大坐标向较小坐标组合，仍以此前前缀为左参数。
 
+### `MaterializeRISCVGroupedArithmetic`
+
+独立 `mac_groups` 及非融合消费者通过共享 `Analysis/LogicalAxes` 验证分组轴、
+free-axis 对齐和完整分组范围，再展开为闭合 primitive 内的 typed gather、转换、
+乘加与 SSA carry。输入先转换到声明的结果位宽，整数乘加保留该位宽的模运算边界。
+物理分组坐标使用私有轴；输出先完成坐标置换，再恢复原 grouped axis identity，
+不修改作者的 Level、state 或 workspace。已有 single-use 混合 byte
+`mac_groups → widen → reduce(add)` 仍交给 widening-dot 专门物化路径。
+
+分组有效性是各原始有效项的逻辑 OR，不能把物理补零后的完整寄存器当作全部有效。
+独立 grouped program 显式携带该谓词，并在每个乘积进入累加前补 identity；
+`NumericalValidity` 沿提取、转换、pointwise、普通 `for/if` 和 helper 返回传递对应的
+物理 SSA 谓词，最终作用于 memory effect。谓词随实际执行的控制路径传递，不重新读取
+原输入来重建快照。尚无闭合传播规则的消费者明确拒绝，不能默认为完整有效。
+谓词的逻辑域覆盖整个容量，非活动位置明确为 false。谓词合取与选择使用私有坐标
+别名完成，再投影回原数值轴，避免外层数值 tail 的 VL 截短谓词本身；同域的单一
+谓词直接复用，不为窄化后再扩宽额外生成向量合取。
+
 ### `MaterializeRISCVAtomics`
 
 将 shaped pointer atomic 物化为显式的有序 lane 循环与私有旧值结果存储。
@@ -224,6 +243,10 @@ SEW、LMUL、VL 与驻留数，consumer 需要其它分布时插入显式 `conve
 
 control carry 的最终 type 必须先确定，再闭合其下游 reshape，避免后续循环结果调整
 使已经验证的 reshape 映射失效。
+
+完整 numeric lookup table 可以由纯计算产生。若其完整坐标域能放入消费者的 register
+group，而两端 LMUL 不同，使用该 lookup edge 上的显式 conversion 适配寄存器容量；
+不更改表的逻辑 extent，不改变其它消费者，也不回溯重读构造表时的输入。
 
 完整 codebook entry 的 indexed supply 可沿同 shape/axis 的 pointwise 与有序 carry
 查询下游归约；标准全元素 sum 的静态线性展平也提供原轴全部被消费的证明。
@@ -893,6 +916,13 @@ combine/final-reduction topology、selected local instructions 和联合资源�
 storage plan，不能重选 memory form。当前该 fused program 只在 lhs/rhs 的 issue slice 与 reduction-only accumulator
 具有同一完整 physical-part 映射时合法；带互异 free-axis replicas 的 outer contraction 由 planner
 明确选择 `sequential_per_stream`，materializer 不得在失败后自行降级。
+
+单归约轴的 tail issue 在 plan 中选择显式 VL 的 widened-accumulate leaf。
+materializer 按 `source_parts/lane_offsets` 的真实逻辑坐标和两侧有效 extent 构造
+每个 issue 的截断长度，不能把第一个片段的 VL 复制给后续片段。累加使用保持非活动
+lane 的已选操作；融合 partial 最终归约使用各 issue 有效长度的最大值，独立 partial
+使用各自长度。空 partial 返回加法 identity，不读取 VL=0 时未定义的 reduction 结果。
+长度是 Index SSA operand，verifier 检查完整 part 数量及 carrier 容量上界。
 
 materializer 只核验仍存在的 SSA graph 与 plan 一致，并实例化真实
 `rvv_issue_slice → rvv_widen_accumulate → rvv_finalize_widen_dot` 或对应 partial-set program。

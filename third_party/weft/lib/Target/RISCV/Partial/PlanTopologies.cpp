@@ -823,7 +823,11 @@ public:
                 builder.getDenseI64ArrayAttr(dot.getRhsParts()),
                 builder.getDenseI64ArrayAttr(lhsLaneOffsets),
                 builder.getDenseI64ArrayAttr(rhsLaneOffsets),
-                *sequentialMultiply, "rvv.vwmacc.partial", finalizeInstruction,
+                *sequentialMultiply,
+                !collectIssues && dot.getOver().size() == 1 &&
+                    (lhsIssue.getLayout().getValidity() == "tail" || rhsIssue.getLayout().getValidity() == "tail")
+                    ? "rvv.vwmacc.partial.vl" : "rvv.vwmacc.partial",
+                finalizeInstruction,
                 plannedResources));
       }
 

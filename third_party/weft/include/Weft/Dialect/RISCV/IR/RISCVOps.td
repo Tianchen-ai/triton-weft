@@ -2168,6 +2168,7 @@ def WeftRISCV_RVVWidenAccumulateOp
   let arguments = (ins WeftRISCV_ValueType:$lhs,
                        WeftRISCV_ValueType:$rhs,
                        WeftRISCV_ValueType:$accumulator,
+                       Variadic<Index>:$lengths,
                        DenseI64ArrayAttr:$reduction_axes,
                        WeftRISCV_LeafAttr:$leaf);
   let results = (outs WeftRISCV_ValueType:$result);
@@ -2177,6 +2178,7 @@ def WeftRISCV_RVVWidenAccumulateOp
 def WeftRISCV_RVVFinalizeWidenDotOp
     : WeftRISCV_LeafOp<"rvv_finalize_widen_dot", [Pure]> {
   let arguments = (ins WeftRISCV_ValueType:$partial,
+                       Variadic<Index>:$lengths,
                        DenseI64ArrayAttr:$reduction_axes,
                        WeftRISCV_LeafAttr:$leaf);
   let results = (outs AnyType:$result);

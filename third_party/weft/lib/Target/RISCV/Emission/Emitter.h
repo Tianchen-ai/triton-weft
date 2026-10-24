@@ -862,6 +862,8 @@ private:
   mlir::LogicalResult compileCast(riscv::CastOp operation);
   mlir::LogicalResult compileNarrow(riscv::NarrowOp operation);
   mlir::LogicalResult compileWiden(riscv::WidenOp operation);
+  template <typename ConversionOp>
+  mlir::LogicalResult compileWidenOperation(ConversionOp operation);
   mlir::LogicalResult compileReduce(riscv::ReduceOp operation);
   mlir::LogicalResult compileFold2(riscv::Fold2Op operation);
   mlir::LogicalResult compileLookup(riscv::LookupOp operation);

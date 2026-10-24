@@ -59,6 +59,11 @@ verifier 逐一验证 result 的每个 logical coordinate 对应唯一 source pa
 emitter 只按已验证的映射重排 binding，不选择 layout、不生成 lane shuffle。需要改变 lane
 内部顺序的置换仍须通过显式 conversion 完成。
 
+local 数组的完整轴置换可在中间物理程序保留为 `reshape`，但不是零拷贝别名。
+`MaterializeRISCVValuePrograms` 按已验证的轴对应关系生成有界 load、片内坐标置换
+与 store，分配独立目标数值存储，保留原快照和 effects 顺序。final verifier 拒绝
+尚未展开的 local 非恒等置换；emitter 不承担数组转置或存储顺序选择。
+
 当 input-axis order 不变、前缀 axis/extent 完全相同，且被拆分或合并的尾部全部由完整
 lane 承载时，layout propagation 保留前缀的逐轴分解，并按相同线性序号重分解尾部 lane。
 这条关系不跨 time、replica、fragment 或 local 边界；consumer 需要不同表示时使用显式

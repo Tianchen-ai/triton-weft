@@ -7,6 +7,7 @@
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
+#include "Weft/Dialect/RISCV/IR/Stream.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -2999,7 +3000,9 @@ public:
           table && indices && result &&
           table.getLayout().getSew() == result.getLayout().getSew() &&
           indices.getLayout().getSew() == result.getLayout().getSew();
-      if ((!sharedTable && !singleUseRead) || !table ||
+      const bool computedTable = !directLoad && !materialize && table &&
+          table.getLayout().getValidity() == "full";
+      if ((!sharedTable && !singleUseRead && !computedTable) || !table ||
           !indices || !result || table.getLayout().getCarrier() != "rvv" ||
           indices.getLayout().getCarrier() != "rvv" ||
           result.getLayout().getCarrier() != "rvv")
@@ -3025,6 +3028,23 @@ public:
         return;
       if (table.getLayout().getLmulEighths() == requiredLMUL)
         return;
+      if (computedTable) {
+        // An immutable computed table can have other consumers. Adapt only
+        // this use; widening its carrier must not change their representation
+        // or reconstruct the table from a former memory source.
+        auto required = registerGatherSourceLayout(builder, table, result.getLayout(),
+            lookup->getParentOfType<riscv::KernelOp>().getTarget());
+        if (!required) return;
+        mlir::OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPoint(lookup);
+        auto conversion = riscv::ConvertLayoutOp::create(builder, lookup.getLoc(),
+            riscv_internal::withLayout(table, required), lookup.getTable(),
+            riscv_internal::layoutConversion(builder, table.getLayout(), required),
+            riscv::AccessAttr(), riscv_internal::unselectedLeaf(builder));
+        riscv_internal::copyOrigin(lookup, conversion);
+        lookup.getTableMutable().assign(conversion.getResult());
+        return;
+      }
       auto update = [&](mlir::Value value) {
         auto type = mlir::dyn_cast<riscv::ValueType>(value.getType());
         if (!type || type.getLayout().getCarrier() != "rvv" ||
@@ -3363,6 +3383,13 @@ private:
           reduce.getResult().getType().isF32() &&
           (reduce.getKind() == "add" || reduce.getKind() == "max" ||
            reduce.getKind() == "min"))
+        continue;
+      // A dynamic local snapshot is traversed by DenseValuePrograms using its
+      // actual descriptor extents. Its surviving free axes need not disappear;
+      // forcing a register conversion here would load just one physical issue.
+      if (inputType.getLayout().getCarrier() == "local" &&
+          llvm::any_of(inputType.getShape().asArrayRef(), [](int64_t extent) { return extent < 0; }) &&
+          riscv::supportsStreamReduction(inputType.getElementType(), reduce.getKind()))
         continue;
       const int64_t eliminated = inputType.getAxisIds()[reduce.getAxis()];
       if (input.hasOneUse() &&

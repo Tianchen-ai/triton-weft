@@ -235,7 +235,7 @@ void selectLoopCarriedWidenProducts(mlir::ModuleOp module,
         auto rhs = product.getRhs().getType().getLayout();
         rewriter.setInsertionPoint(add);
         auto accumulate = riscv::RVVWidenAccumulateOp::create(rewriter,
-            add.getLoc(), type, product.getLhs(), product.getRhs(), accumulator,
+            add.getLoc(), type, product.getLhs(), product.getRhs(), accumulator, mlir::ValueRange{},
             type.getAxisIds(),
             riscv_internal::leaf(
                 rewriter, "rvv", "widen-accumulate", "rvv.vwmacc.partial",

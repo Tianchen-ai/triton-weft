@@ -696,7 +696,9 @@ public:
             access && access.getForm() == "register" &&
             leaf.getEngine() == "rvv" && leaf.getFamily() == "extract" &&
             (leaf.getInstruction() == "rvv.extract.vrgather" ||
-             leaf.getInstruction() == "rvv.extract.regular-scalar");
+             leaf.getInstruction() == "rvv.extract.regular-scalar" ||
+             (leaf.getInstruction() == "rvv.extract.scalar" &&
+              riscv::scalarRegisterExtractLanes(extract)));
         const bool laneReplicaExtract =
             access && access.getForm() == "register" &&
             leaf.getEngine() == "rvv" && leaf.getFamily() == "extract" &&
@@ -718,6 +720,15 @@ public:
              !scalarReplicaExtract && !ordinaryExtract)) {
           extract.emitError(
               "final extract has no closed physical access and transfer leaf");
+          failed = true;
+        }
+        if (ordinaryExtract && extract.getInput().getType().getLayout().getCarrier() == "rvv" &&
+            !mlir::isa<riscv::ValueType>(extract.getResult().getType()) &&
+            !riscv_internal::sourceField(extract.getInput()) &&
+            llvm::any_of(extract.getSelectors(), [](mlir::Attribute selector) {
+              return mlir::cast<mlir::StringAttr>(selector).getValue() == "index";
+            })) {
+          extract.emitError("scalar numeric extraction requires a selected register or storage projection");
           failed = true;
         }
       }
@@ -1051,6 +1062,12 @@ public:
           }
         }
         auto leaf = operation->getAttrOfType<riscv::LeafAttr>("leaf");
+        if (auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(operation);
+            reshape && reshape.getInput().getType().getLayout().getCarrier() == "local" &&
+            !llvm::equal(reshape.getOrder(), reshape.getInput().getType().getAxisIds().asArrayRef())) {
+          operation->emitError("local axis permutation requires a materialized storage-coordinate program");
+          failed = true;
+        }
         if ((leaf || mlir::isa<riscv::NewOp>(operation)) &&
             !kernel.getTarget().getHasVectorF16() &&
             riscv_internal::requiresFullVectorF16(operation)) {

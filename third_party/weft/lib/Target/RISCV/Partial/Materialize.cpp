@@ -1,4 +1,6 @@
 #include "Support.h"
+#include "../NumericalValidity.h"
+#include "Weft/Dialect/RISCV/IR/Layout.h"
 
 namespace weft::riscv_partial {
 
@@ -66,7 +68,7 @@ mlir::FailureOr<mlir::Value> materializePlannedPartial(
       partial = product.getResult();
     } else {
       auto accumulate = riscv::RVVWidenAccumulateOp::create(rewriter,
-          dot.getLoc(), accumulatorType, *lhs, *rhs, partial, plan.getReductionAxes(),
+          dot.getLoc(), accumulatorType, *lhs, *rhs, partial, mlir::ValueRange{}, plan.getReductionAxes(),
           riscv_internal::leaf(rewriter, "rvv", "widen-accumulate",
               plan.getAccumulateInstruction(), plan.getAccumulateInstruction(),
               operands + groups, groups, 0, 0, "none", "agnostic"));
@@ -1929,7 +1931,7 @@ public:
                 "rvv.project-reduction-operand", 0, 0, 1, 0));
         auto accumulate = riscv::RVVWidenAccumulateOp::create(rewriter,
             reduce.getLoc(), accumulatorType, lhs.getResult(), rhs.getResult(),
-            carried, rewriter.getDenseI64ArrayAttr({reductionAxis}),
+            carried, mlir::ValueRange{}, rewriter.getDenseI64ArrayAttr({reductionAxis}),
             riscv_internal::leaf(
                 rewriter, "rvv", "widen-accumulate", "rvv.vwmacc.partial",
                 "rvv.vwmacc.partial",
@@ -1944,7 +1946,7 @@ public:
         carried = accumulate.getResult();
       }
       auto finalized = riscv::RVVFinalizeWidenDotOp::create(rewriter,
-          reduce.getLoc(), result, carried,
+          reduce.getLoc(), result, carried, mlir::ValueRange{},
           rewriter.getDenseI64ArrayAttr({reductionAxis}),
           riscv_internal::leaf(
               rewriter, "rvv", "finalize-widen-dot",
@@ -2010,6 +2012,46 @@ public:
       }
 
       rewriter.setInsertionPoint(dot);
+      const bool explicitLengths = plan.getAccumulateInstruction() == "rvv.vwmacc.partial.vl";
+      llvm::SmallVector<mlir::Value> issueLengths;
+      if (explicitLengths) {
+        auto left = riscv_internal::activeNumericExtents(rewriter, dot.getLhs());
+        auto right = riscv_internal::activeNumericExtents(rewriter, dot.getRhs());
+        auto lhsType = dot.getLhs().getType(), rhsType = dot.getRhs().getType();
+        auto lhsCoordinates = riscv::RegisterCoordinates::get(lhsType.getLayout());
+        auto rhsCoordinates = riscv::RegisterCoordinates::get(rhsType.getLayout());
+        int64_t axis = plan.getReductionAxes()[0];
+        auto lhsAxis = llvm::find(lhsType.getAxisIds().asArrayRef(), axis) - lhsType.getAxisIds().asArrayRef().begin();
+        auto rhsAxis = llvm::find(rhsType.getAxisIds().asArrayRef(), axis) - rhsType.getAxisIds().asArrayRef().begin();
+        if (mlir::failed(left) || mlir::failed(right) || !lhsCoordinates || !rhsCoordinates ||
+            lhsAxis >= static_cast<int64_t>(lhsType.getShape().size()) ||
+            rhsAxis >= static_cast<int64_t>(rhsType.getShape().size())) {
+          dot.emitError("tail partial issues require explicit input extents and logical source coordinates");
+          failed = true;
+          continue;
+        }
+        auto zero = mlir::arith::ConstantIndexOp::create(rewriter, dot.getLoc(), 0);
+        auto width = mlir::arith::ConstantIndexOp::create(rewriter, dot.getLoc(), lhsIssue.getLayout().getVl());
+        for (size_t index = 0; index < plan.getLhsSourceParts().size(); ++index) {
+          auto lhsCoordinate = lhsCoordinates->logical(plan.getLhsSourceParts()[index], plan.getLhsLaneOffsets()[index]);
+          auto rhsCoordinate = rhsCoordinates->logical(plan.getRhsSourceParts()[index], plan.getRhsLaneOffsets()[index]);
+          if (!lhsCoordinate || !rhsCoordinate || (*lhsCoordinate)[lhsAxis] != (*rhsCoordinate)[rhsAxis]) {
+            dot.emitError("partial issue operands do not preserve the same reduction coordinates");
+            failed = true;
+            break;
+          }
+          auto offset = mlir::arith::ConstantIndexOp::create(rewriter, dot.getLoc(), (*lhsCoordinate)[lhsAxis]);
+          auto available = [&](mlir::Value active) -> mlir::Value {
+            mlir::Value beyond = mlir::arith::CmpIOp::create(rewriter, dot.getLoc(), mlir::arith::CmpIPredicate::ugt, active, offset);
+            mlir::Value remaining = mlir::arith::SubIOp::create(rewriter, dot.getLoc(), active, offset);
+            remaining = mlir::arith::SelectOp::create(rewriter, dot.getLoc(), beyond, remaining, zero);
+            return mlir::arith::MinUIOp::create(rewriter, dot.getLoc(), remaining, width);
+          };
+          issueLengths.push_back(mlir::arith::MinUIOp::create(rewriter, dot.getLoc(),
+              available((*left)[lhsAxis]), available((*right)[rhsAxis])));
+        }
+        if (failed) continue;
+      }
       auto materializeIssueOperands = [&](int64_t output, int64_t issue) {
         const size_t index = static_cast<size_t>(output * issueCount + issue);
         auto lhsParts = rewriter.getDenseI64ArrayAttr(
@@ -2039,8 +2081,10 @@ public:
       auto materializeIssue = [&](int64_t output, int64_t issue,
                                   mlir::Value carried) -> mlir::Value {
         auto [lhsSlice, rhsSlice] = materializeIssueOperands(output, issue);
+        llvm::SmallVector<mlir::Value> lengths;
+        if (explicitLengths) lengths.push_back(issueLengths[output * issueCount + issue]);
         auto accumulate = riscv::RVVWidenAccumulateOp::create(rewriter,
-            dot.getLoc(), accumulator, lhsSlice, rhsSlice, carried,
+            dot.getLoc(), accumulator, lhsSlice, rhsSlice, carried, lengths,
             plan.getReductionAxes(),
             riscv_internal::leaf(
                 rewriter, "rvv", "widen-accumulate",
@@ -2050,7 +2094,7 @@ public:
                     rhsIssue.getLayout().getRegisterGroups() +
                     accumulator.getLayout().getRegisterGroups(),
                 accumulator.getLayout().getRegisterGroups(), 0, 0, "none",
-                "agnostic"));
+                explicitLengths ? "exact" : "agnostic"));
         riscv_internal::copyOrigin(dot, accumulate);
         return accumulate.getResult();
       };
@@ -2066,9 +2110,11 @@ public:
         riscv_internal::copyOrigin(dot, initial);
         return initial.getResult();
       };
-      auto finalize = [&](mlir::Value partial) {
+      auto finalize = [&](mlir::Value partial, mlir::Value length = {}) {
+        llvm::SmallVector<mlir::Value> lengths;
+        if (length) lengths.push_back(length);
         auto finalized = riscv::RVVFinalizeWidenDotOp::create(rewriter,
-            dot.getLoc(), resultElement, partial,
+            dot.getLoc(), resultElement, partial, lengths,
             plan.getReductionAxes(),
             riscv_internal::leaf(
                 rewriter, "rvv", "finalize-widen-dot",
@@ -2082,7 +2128,9 @@ public:
       llvm::SmallVector<mlir::Value> materializedOutputs;
       for (int64_t output = 0; output < outputParts; ++output) {
         mlir::Value outputValue;
-        if (issueCount == 1) {
+        if (issueCount == 1 && explicitLengths) {
+          outputValue = finalize(materializeIssue(output, 0, makeInitial()), issueLengths[output]);
+        } else if (issueCount == 1) {
           auto [lhsSlice, rhsSlice] = materializeIssueOperands(output, 0);
           auto product = riscv::RVVWidenMultiplyOp::create(rewriter,
               dot.getLoc(), accumulator, lhsSlice, rhsSlice,
@@ -2098,13 +2146,20 @@ public:
           outputValue = finalize(product.getResult());
         } else if (fused) {
           mlir::Value carried = makeInitial();
+          mlir::Value length;
           for (int64_t issue = 0; issue < issueCount; ++issue)
             carried = materializeIssue(output, issue, carried);
-          outputValue = finalize(carried);
+          if (explicitLengths)
+            for (int64_t issue = 0; issue < issueCount; ++issue) {
+              mlir::Value current = issueLengths[output * issueCount + issue];
+              length = length ? mlir::Value(mlir::arith::MaxUIOp::create(rewriter, dot.getLoc(), length, current)) : current;
+            }
+          outputValue = finalize(carried, length);
         } else {
           for (int64_t issue = 0; issue < issueCount; ++issue) {
             mlir::Value contribution = finalize(
-                materializeIssue(output, issue, makeInitial()));
+                materializeIssue(output, issue, makeInitial()),
+                explicitLengths ? issueLengths[output * issueCount + issue] : mlir::Value());
             if (!outputValue) {
               outputValue = contribution;
               continue;
@@ -2529,7 +2584,7 @@ public:
         }
 
         auto accumulate = riscv::RVVWidenAccumulateOp::create(rewriter,
-            dot.getLoc(), accumulatorType, *lhsSlice, *rhsSlice, carried,
+            dot.getLoc(), accumulatorType, *lhsSlice, *rhsSlice, carried, mlir::ValueRange{},
             rewriter.getDenseI64ArrayAttr({reductionAxis}),
             riscv_internal::leaf(
                 rewriter, "rvv", "widen-accumulate", "rvv.vwmacc.partial",
@@ -2552,7 +2607,7 @@ public:
       mlir::scf::YieldOp::create(rewriter, dot.getLoc(), carried);
       rewriter.setInsertionPointAfter(loop);
       auto finalized = riscv::RVVFinalizeWidenDotOp::create(rewriter,
-          dot.getLoc(), dot.getResult().getType(), loop.getResult(0),
+          dot.getLoc(), dot.getResult().getType(), loop.getResult(0), mlir::ValueRange{},
           rewriter.getDenseI64ArrayAttr({reductionAxis}),
           riscv_internal::leaf(rewriter, "rvv", "finalize-widen-dot",
                                plan.getFinalizeInstruction(),

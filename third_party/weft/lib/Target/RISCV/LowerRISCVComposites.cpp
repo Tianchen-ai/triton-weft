@@ -1600,7 +1600,7 @@ private:
           mlir::Value mappedLhs = mapping.lookupOrDefault(contract.getLhs());
           mlir::Value mappedRhs = mapping.lookupOrDefault(contract.getRhs());
           auto accumulate = riscv::RVVWidenAccumulateOp::create(rewriter,
-              contract.getLoc(), partialType, mappedLhs, mappedRhs, carried,
+              contract.getLoc(), partialType, mappedLhs, mappedRhs, carried, mlir::ValueRange{},
               rewriter.getDenseI64ArrayAttr({reductionAxis}),
               riscv_internal::leaf(
                   rewriter, "rvv", "widen-accumulate", "rvv.vwmacc.partial",

@@ -929,6 +929,10 @@ private:
       }
       Value storage = frozen.lookup(value);
       auto local = cast<riscv::ValueType>(storage.getType());
+      if (local == expected) {
+        sharedBridges[value] = storage;
+        continue;
+      }
       auto bridge = riscv::ConvertLayoutOp::create(b, value.getLoc(), expected, storage,
           riscv_internal::layoutConversion(b, local.getLayout(), expected.getLayout()),
           riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
@@ -942,10 +946,13 @@ private:
         Value source = reductionStorage[position].binding;
         auto expected = cast<riscv::ValueType>(reduction.getResult().getType());
         auto local = cast<riscv::ValueType>(source.getType());
-        result = riscv::ConvertLayoutOp::create(b, loc, expected, source,
-            riscv_internal::layoutConversion(b, local.getLayout(), expected.getLayout()),
-            riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
-        riscv_internal::copyOrigin(reduction, result.getDefiningOp());
+        result = source;
+        if (local != expected) {
+          result = riscv::ConvertLayoutOp::create(b, loc, expected, source,
+              riscv_internal::layoutConversion(b, local.getLayout(), expected.getLayout()),
+              riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
+          riscv_internal::copyOrigin(reduction, result.getDefiningOp());
+        }
       }
       reduction.getResult().replaceAllUsesWith(result);
     }
@@ -962,10 +969,13 @@ private:
           b.setInsertionPoint(op);
           auto expected = cast<riscv::ValueType>(op->getResult(0).getType());
           auto local = cast<riscv::ValueType>(snapshot.getType());
-          auto bridge = riscv::ConvertLayoutOp::create(b, op->getLoc(), expected, snapshot,
-              riscv_internal::layoutConversion(b, local.getLayout(), expected.getLayout()),
-              riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
-          riscv_internal::copyOrigin(op, bridge);
+          Value bridge = snapshot;
+          if (local != expected) {
+            bridge = riscv::ConvertLayoutOp::create(b, op->getLoc(), expected, snapshot,
+                riscv_internal::layoutConversion(b, local.getLayout(), expected.getLayout()),
+                riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
+            riscv_internal::copyOrigin(op, bridge.getDefiningOp());
+          }
           op->getResult(0).replaceAllUsesWith(bridge);
         } else if (llvm::is_contained(graph.localReads, dyn_cast<riscv::ConvertLayoutOp>(op))) {
           continue;

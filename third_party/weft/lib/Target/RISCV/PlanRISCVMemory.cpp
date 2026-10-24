@@ -3599,6 +3599,14 @@ public:
             "scalar.replica-project", "scalar.replica-project", 0, 0, 0, 0, "none", "exact", *parts));
         return;
       }
+      if (auto lanes = riscv::scalarRegisterExtractLanes(operation)) {
+        auto groups = operation.getInput().getType().getLayout().getRegisterGroups();
+        operation.setAccessAttr(makeAccess(builder, "register", "natural", 1));
+        operation.setLeafAttr(riscv_internal::leaf(builder, "rvv", "extract",
+            "rvv.extract.scalar", "rvv.extract.scalar", groups, 0, groups, 0,
+            "none", "exact", {*lanes}));
+        return;
+      }
       riscv::AccessAttr access;
       auto field = riscv_internal::sourceField(operation.getInput());
       auto inputLayout = riscv_internal::layoutOf(operation.getInput().getType());

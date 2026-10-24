@@ -1,4 +1,5 @@
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
+#include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "Weft/Dialect/Kernel/IR/ReductionRegion.h"
 #include "Weft/Target/RISCVDataCache.h"
 #include "Weft/Target/RISCVTargetProfile.h"
@@ -2179,7 +2180,10 @@ mlir::LogicalResult SequentialPartialPlanAttr::verify(
       rhsSourceParts.size() != rhsLaneOffsets.size() ||
       lhsSourceParts.size() % static_cast<size_t>(issueCount) ||
       multiplyInstruction != expectedMultiply ||
-      accumulateInstruction != "rvv.vwmacc.partial" ||
+      (accumulateInstruction != "rvv.vwmacc.partial" &&
+       accumulateInstruction != "rvv.vwmacc.partial.vl") ||
+      (accumulateInstruction == "rvv.vwmacc.partial.vl" &&
+       (fusedPartial || reductionAxes.size() != 1)) ||
       (fusedPartial ? finalizeInstruction != "none"
                     : (finalizeInstruction != "rvv.vwredsum.partial" &&
                        finalizeInstruction != "rvv.vredsum.partial")) ||
@@ -3744,6 +3748,12 @@ mlir::LogicalResult ReshapeOp::verify() {
           "physical reshape layouts must be assigned together");
     return mlir::success();
   }
+  // A local permutation is still a numeric operation at this boundary. Its
+  // storage-coordinate program must be materialized before final emission;
+  // it is not a promise that the two row-major arrays share a linear carrier.
+  if (source.getCarrier() == "local" && target.getCarrier() == "local" &&
+      !llvm::equal(order, inputAxes) && reshapeAxisPositions(input, result, order))
+    return mlir::success();
   if (auto selected = getPartOrder()) {
     auto expected = reshapeCarrierParts(input, result, order);
     if (!expected || !llvm::equal(*selected, *expected))
@@ -4050,6 +4060,15 @@ mlir::LogicalResult ExtractOp::verify() {
       !isPhysicalValue(getResult().getType()) ||
       elementOf(getInput().getType()) != elementOf(getResult().getType()))
     return emitOpError("physical extract requires typed selectors and result");
+  if (getLeaf().getInstruction() == "rvv.extract.scalar") {
+    auto lanes = scalarRegisterExtractLanes(*this);
+    if (!lanes || getAccess().getForm() != "register" || getLeaf().getParameters().size() != 1 ||
+        getLeaf().getParameters()[0] != *lanes ||
+        !exactLeaf(getLeaf(), "rvv", "extract", "rvv.extract.scalar", "none", "exact") ||
+        getLeaf().getTemporaryGroups() != getInput().getType().getLayout().getRegisterGroups())
+      return emitOpError("scalar register extract requires one complete selected source carrier and its temporary");
+    return verifyLeafOperation(*this);
+  }
   auto pattern = getOperation()->getAttrOfType<mlir::DenseI64ArrayAttr>(
       "index_pattern");
   if (pattern && getAccess().getForm() == "register") {
@@ -9486,8 +9505,13 @@ mlir::LogicalResult RVVWidenAccumulateOp::verify() {
           llvm::ArrayRef<int64_t>(expectedShape) ||
       !operandMapsToPartial(lhs) || !operandMapsToPartial(rhs) ||
       (!loopCarried && !explicitChain) ||
-      !exactLeaf(getLeaf(), "rvv", "widen-accumulate",
-                 "rvv.vwmacc.partial", "none", "agnostic"))
+      llvm::any_of(getLengths(), [&](mlir::Value length) {
+        return denseIndexBounds(length).upper > uint64_t(result.getLayout().getVl());
+      }) ||
+      (getLengths().empty()
+          ? !exactLeaf(getLeaf(), "rvv", "widen-accumulate", "rvv.vwmacc.partial", "none", "agnostic")
+          : (physicalPartCount(result) != std::optional<int64_t>(getLengths().size()) ||
+             !exactLeaf(getLeaf(), "rvv", "widen-accumulate", "rvv.vwmacc.partial.vl", "none", "exact"))))
     return emitOpError(
         "RVV widened accumulation requires matching multi-axis issue operands and one closed partial chain");
   return mlir::success();
@@ -9495,6 +9519,12 @@ mlir::LogicalResult RVVWidenAccumulateOp::verify() {
 
 mlir::LogicalResult RVVFinalizeWidenDotOp::verify() {
   ValueType partial = getPartial().getType();
+  if (!getLengths().empty() && physicalPartCount(partial) != std::optional<int64_t>(getLengths().size()))
+    return emitOpError("explicit finalization lengths must cover every physical partial");
+  if (llvm::any_of(getLengths(), [&](mlir::Value length) {
+        return denseIndexBounds(length).upper > uint64_t(partial.getLayout().getVl());
+      }))
+    return emitOpError("explicit finalization length exceeds its partial carrier");
   auto partialElement =
       mlir::dyn_cast<mlir::IntegerType>(partial.getElementType());
   auto resultValue = mlir::dyn_cast<ValueType>(getResult().getType());

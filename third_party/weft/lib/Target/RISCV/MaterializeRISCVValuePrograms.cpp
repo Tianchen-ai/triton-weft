@@ -94,6 +94,11 @@ public:
       }
       if (auto reshape = dyn_cast<riscv::ReshapeOp>(op)) {
         Value source = local(reshape.getInput());
+        if (source && !llvm::equal(reshape.getOrder(),
+                                  cast<riscv::ValueType>(source.getType()).getAxisIds().asArrayRef())) {
+          if (failed(transposeLocal(reshape, source))) return failure();
+          continue;
+        }
         if (source && llvm::equal(reshape.getOrder(),
                                  cast<riscv::ValueType>(source.getType()).getAxisIds().asArrayRef())) {
           auto old = reshape.getResult().getType();
@@ -481,6 +486,36 @@ private:
     auto memory = view(input, anchor);
     if (failed(memory)) return failure();
     return copyView(*memory, type, anchor);
+  }
+
+  LogicalResult transposeLocal(riscv::ReshapeOp op, Value source) {
+    auto inputType = cast<riscv::ValueType>(source.getType());
+    auto outputType = op.getResult().getType();
+    auto positions = riscv::reshapeAxisPositions(inputType, outputType, op.getOrder());
+    if (!positions) return op.emitError("local transpose has no complete axis/extent correspondence");
+    b.setInsertionPoint(op);
+    auto input = view(source, op);
+    auto destination = allocate(outputType, op);
+    if (failed(input) || failed(destination)) return failure();
+    auto output = view(*destination, op);
+    if (failed(output)) return failure();
+    auto target = op->getParentOfType<riscv::KernelOp>().getTarget();
+    if (failed(traverse(outputType, op, [&](ArrayRef<Value> coordinates, int64_t axis, int64_t width) {
+          SmallVector<Value> inputCoordinates(coordinates.size());
+          for (auto [position, sourcePosition] : llvm::enumerate(*positions))
+            inputCoordinates[sourcePosition] = coordinates[position];
+          auto sourcePiece = fragment(inputType, axis, width, target);
+          auto resultPiece = fragment(outputType, axis, width, target);
+          if (!sourcePiece || !resultPiece) return failure();
+          auto value = load(*input, inputType, inputCoordinates, sourcePiece, op);
+          if (failed(value)) return failure();
+          Value ordered = riscv::ReshapeOp::create(b, op.getLoc(), resultPiece, *value,
+              op.getOrderAttr(), DenseI64ArrayAttr());
+          riscv_internal::copyOrigin(op, ordered.getDefiningOp());
+          return store(ordered, *output, outputType, coordinates, resultPiece, op);
+        }, true))) return op.emitError("local transpose has no bounded physical transfer program");
+    replace(op, *destination);
+    return success();
   }
 
   LogicalResult pointerMemory(Operation *op) {

@@ -87,6 +87,23 @@ bool weft::riscv::isScalarReductionResult(ValueType input, mlir::Type result,
       coordinates->parts() == 1 && coordinates->lanes() == 1;
 }
 
+std::optional<int64_t> weft::riscv::scalarRegisterExtractLanes(ExtractOp op) {
+  auto input = op.getInput().getType();
+  auto layout = input.getLayout();
+  if (input.getShape().size() != 1 || input.getShape()[0] <= 1 ||
+      layout.getCarrier() != "rvv" || layout.getTimeFactors()[0] != 1 ||
+      layout.getReplicaFactors()[0] != 1 || layout.getReplicaGroup() != 1 ||
+      layout.getFragmentFactors()[0] != 1 || layout.getLocalFactors()[0] != 1 ||
+      layout.getLaneFactors()[0] != input.getShape()[0] ||
+      layout.getVl() != input.getShape()[0] ||
+      input.getElementType() != op.getResult().getType() ||
+      !mlir::isa<mlir::IntegerType, mlir::FloatType>(op.getResult().getType()) ||
+      op.getSelectors().size() != 1 || op.getIndices().size() != 1 ||
+      mlir::cast<mlir::StringAttr>(op.getSelectors()[0]).getValue() != "index" ||
+      !op.getIndices()[0].getType().isIntOrIndex()) return std::nullopt;
+  return input.getShape()[0];
+}
+
 std::optional<llvm::SmallVector<int64_t>> weft::riscv::scalarExtractParts(ExtractOp op) {
   auto input = op.getInput().getType();
   auto output = mlir::dyn_cast<ValueType>(op.getResult().getType());

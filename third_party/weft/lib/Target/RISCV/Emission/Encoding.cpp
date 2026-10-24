@@ -34,6 +34,28 @@ mlir::LogicalResult Emitter::compileField(riscv::FieldOp operation) {
 
 mlir::LogicalResult Emitter::compileExtract(riscv::ExtractOp operation) {
   Binding binding = bindings.lookup(operation.getInput());
+  if (instructionOf(operation.getOperation()) == "rvv.extract.scalar") {
+    auto source = materializeNumeric(operation.getInput(), std::move(binding));
+    auto index = bindings.lookup(operation.getIndices().front());
+    auto spelling = scalarCType(operation.getResult().getType());
+    if (mlir::failed(source) || source->kind != Binding::Kind::Vector ||
+        source->parts.size() != 1 || index.kind != Binding::Kind::Scalar || !spelling)
+      return fail(operation, "scalar register extract lost its selected vector or scalar coordinate");
+    const auto layout = operation.getInput().getType().getLayout();
+    const auto element = operation.getResult().getType();
+    const auto suffix = vectorSuffix(operation.getInput());
+    const std::string shifted = "__riscv_vslidedown_vx_" + suffix + "(" + source->parts[0] +
+        ", " + index.scalar + ", " + std::to_string(operation.getLeaf().getParameters()[0]) + ")";
+    std::string expression = mlir::isa<mlir::FloatType>(element)
+        ? "__riscv_vfmv_f_s_" + suffix + "_f" + std::to_string(layout.getSew()) + "(" + shifted + ")"
+        : "__riscv_vmv_x_s_" + suffix + "_" + (element.isUnsignedInteger() ? "u" : "i") +
+            std::to_string(layout.getSew()) + "(" + shifted + ")";
+    if (element.isInteger(1)) expression = "(" + expression + " & 1)";
+    auto name = fresh("scalar_extract");
+    line(*spelling + " " + name + " = " + expression + ";");
+    bindings[operation.getResult()] = scalar(name);
+    return mlir::success();
+  }
   if (instructionOf(operation.getOperation()) == "rvv.extract.regular-scalar") {
     auto source = materializeNumeric(operation.getInput(), std::move(binding));
     if (mlir::failed(source) || source->kind != Binding::Kind::Vector || source->parts.size() != 1)

@@ -91,7 +91,8 @@ Emitter::compileRVVIssueSlice(riscv::RVVIssueSliceOp operation) {
 
 mlir::LogicalResult Emitter::compileRVVWidenAccumulate(
     riscv::RVVWidenAccumulateOp operation) {
-  if (instructionOf(operation.getOperation()) != "rvv.vwmacc.partial")
+  const bool explicitLength = instructionOf(operation.getOperation()) == "rvv.vwmacc.partial.vl";
+  if (!explicitLength && instructionOf(operation.getOperation()) != "rvv.vwmacc.partial")
     return fail(operation,
                 "RVV widened partial accumulation has no exact selected leaf");
   auto lhs = materializeNumeric(operation.getLhs(),
@@ -132,10 +133,17 @@ mlir::LogicalResult Emitter::compileRVVWidenAccumulate(
         mixed ? signedOperand + ", " + unsignedOperand
               : lhs->parts[*lhsPart] + ", " + rhs->parts[*rhsPart];
     std::string name = fresh("widen_partial");
+    std::string length = partVL(operation.getLhs(), *lhsPart);
+    if (explicitLength) {
+      auto binding = bindings.lookup(operation.getLengths()[part]);
+      if (binding.kind != Binding::Kind::Scalar)
+        return fail(operation, "widened accumulation requires its selected scalar active length");
+      length = binding.scalar;
+    }
     line(type + " " + name + " = __riscv_" +
-         std::string(mixed ? "vwmaccsu" : "vwmacc") + "_vv_" + suffix + "(" +
+         std::string(mixed ? "vwmaccsu" : "vwmacc") + "_vv_" + suffix + (explicitLength ? "_tu(" : "(") +
          accumulator->parts[part] + ", " + operands + ", " +
-         partVL(operation.getLhs(), *lhsPart) + ");");
+         length + ");");
     result.parts.push_back(std::move(name));
   }
   bindings[operation.getResult()] = std::move(result);
@@ -173,15 +181,27 @@ mlir::LogicalResult Emitter::compileRVVFinalizeWidenDot(
     return fail(operation,
                 "RVV final widened dot has no supported partial element width");
   for (int64_t part = 0; part < resultParts; ++part) {
+    std::string length = partVL(operation.getPartial(), part);
+    if (!operation.getLengths().empty()) {
+      auto binding = bindings.lookup(operation.getLengths()[part]);
+      if (binding.kind != Binding::Kind::Scalar)
+        return fail(operation, "widened finalization requires its selected scalar active length");
+      length = binding.scalar;
+    }
+    std::string scalarName = fresh("widen_partial_scalar");
+    line("int32_t " + scalarName + " = 0;");
+    line("if (" + length + " > 0) {");
+    ++indent;
     std::string reduced = fresh("widen_partial_sum");
     line("vint32m1_t " + reduced + " = __riscv_" +
          std::string(partialElement.getWidth() == 16 ? "vwredsum" : "vredsum") +
          "_vs_" +
          partialSuffix + "_i32m1(" + partial->parts[part] + ", " + seed + ", " +
-         partVL(operation.getPartial(), part) + ");");
-    std::string scalarName = fresh("widen_partial_scalar");
-    line("int32_t " + scalarName + " = __riscv_vmv_x_s_i32m1_i32(" +
+         length + ");");
+    line(scalarName + " = __riscv_vmv_x_s_i32m1_i32(" +
          reduced + ");");
+    --indent;
+    line("}");
     if (resultValue)
       result.parts.push_back(std::move(scalarName));
     else

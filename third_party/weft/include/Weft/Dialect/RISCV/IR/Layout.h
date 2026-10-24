@@ -106,6 +106,7 @@ std::optional<int64_t> rvvRowScaleRows(BinaryOp operation);
 std::optional<int64_t> rvvRowScaleTemporaryGroups(BinaryOp operation);
 mlir::Value registerAliasSource(mlir::Value value);
 std::optional<llvm::SmallVector<int64_t>> scalarExtractParts(ExtractOp operation);
+std::optional<int64_t> scalarRegisterExtractLanes(ExtractOp operation);
 std::optional<llvm::SmallVector<int64_t>> rvvRegularGatherIndices(
     ValueType input, ValueType result, llvm::ArrayRef<int64_t> pattern);
 bool hasUniqueRegisterUse(mlir::Value value);
