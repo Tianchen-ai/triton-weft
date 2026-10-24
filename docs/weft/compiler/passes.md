@@ -21,6 +21,8 @@ ConvertWeftToRISCV
 → PlanRISCVMemory
 → SelectRISCVOperations
 → LowerRISCVComposites
+→ RetainRISCVFragmentAccumulators
+→ PropagateRISCVConsumerLayouts
 → MaterializeRISCVValuePrograms
 → MaterializeRISCVPrograms
 → VectorizeRISCVRecordLoops
@@ -75,6 +77,10 @@ raw-window load 与显式 layer decode。exact leaf
 use 数量的 rematerialization；资源闭合后的清理不能替代这个位置的清理。
 派生节点继承已有 `source_origin`；只有没有来源标签时才从 location 建立初始来源。
 解析 Physical IR 的文件位置不能覆盖作者来源，否则同一程序重放会改变 CSE 的匹配集合。
+
+完整 fragment 与其 consumer layout 在 Value program 的局部存储决策之前先闭合一次，
+避免将本可驻留的 accumulator 与 pointwise 链提前拆成数组。后续 materialization 新产生的
+fragment 仍经过相同 passes；整数 MAC 保留在访存关系确定之后选择。
 
 内部 RISC-V pipeline 可在这次清理、consumer propagation 与 `CanonicalizeRISCVLayouts`
 之前观察同一层 Physical IR。module 的 `weft.riscv.layout_input` 保存尚未消费的
@@ -387,7 +393,7 @@ reuse 证明，不由该窄合同猜测。
 在 fragment accumulator retention 与 issue grouping 之后，从已选 `ime_unpack` 提取保序
 RVV 候选；沿普通 cast、pointwise、new 与 scf.for init/iter_arg/yield 的同域 use-def 传播。
 值按 SSA identity 去重，一个 component 至多 128 个值、1024 条 use edge，越界明确报告。
-每个 kernel 至多比较两个完整物理候选；不激活 generic ValueType 的 IME carrier，也不换作者树。
+每次 pass 对一个 kernel 至多比较两个完整物理候选；不激活 generic ValueType 的 IME carrier，也不换作者树。
 供应侧可以穿过只省略单位物理轴的 rank-subdomain cast/pointwise，保持其原有 shape 与 axis，
 避免先分段转换 dtype 再拼回完整 carrier。numeric read 仍是边界，不改读取点。
 
@@ -418,11 +424,17 @@ type 的逆转换可以消除；这不授权穿过已选 coordinate exchange 任
 `vget/vset` 子寄存器映射计为 slide，资源统计仍包含实际驻留的 parts。
 
 候选先检查 IR、坐标与共享 region-aware 驻留预算。成组采用明确的 target 规则；独立 atom
-布局按更内层 loop 的局部工作优先，平局保留现有布局。诊断分别输出请求、规则、峰值实体、
+布局按更内层动态 loop 的局部工作优先；已知循环次数乘入工作量，不把仅有两次迭代的
+内层循环视为无限优先，忽略外层转换代价。平局保留现有布局。诊断分别输出请求、规则、峰值实体、
 算术与 broadcast/conversion/initializer 工作量。该估计描述 system compiler 优化前的局部
 展开，不是整个 tile 的周期预测，不包含未变化的 MMA、decode、地址计算与 memory 延迟；
 cycle estimate 明确 unavailable。未知局部工作不填零，后续 memory/leaf/resource 失败也不
 触发另一套隐藏结构的重试。
+
+已注册的 N16 accumulator 可按 row atom 合并，或在 VLEN 可容纳两行时保留连续行对。
+当原布局的完整活跃集合超出寄存器预算，而候选无需 spill 即可驻留时，优先合法驻留候选；
+其它情况继续比较显式局部工作。标量子域到行对的广播可选有序 scalar runs，重复完整向量
+tile 可选 slide 拼接；共享坐标证明约束每个源 part 与目的 lane，不改读取点或数值类型。
 
 ### `ScheduleRISCVLocalSupplies`
 
@@ -978,7 +990,8 @@ tail passthrough 的 full-step leaf；其它 step 保留未更新 lane。整块�
 ### `SelectRISCVIntegerMACs`
 
 在 byte-window 分析与 memory specialization 之后、leaf finalization 之前，选择同 block、
-单 use 的整数 pointwise 乘加。普通 vector/scalar 模乘加可形成 `rvv.vmacc.vx`；精确 widening
+单 use 的整数 pointwise 乘加。普通 vector/scalar 模乘加可形成 `rvv.vmacc.vx`，同型
+vector/vector 模乘加可形成 `rvv.vmacc.vv`；精确 widening
 来源和同结果 type 的 add 可形成合法的 widening vector/vector 或 vector/scalar MAC。
 保留原 signedness、位宽、axes、active domain 和加法边界；读写、未知 effect 或 region
 阻止跨越，最终资源重新核算。不增加 reduction，也不改变最后的归约位置。
@@ -991,6 +1004,8 @@ vector/scalar 乘法的两端若来自同 signedness 的精确扩展，先检查
 没有合法 widening 关系时，同宽 MAC 继续按原输入选择，不改变显式窄化或累加精度。
 新建的 scalar scale 扩展同时记录 scalar implementation，由随后 leaf finalization
 闭合；不能依赖已经结束的 operation selector 再访问它。
+局部 issue 资源核算只在 accumulator 为最后一次寄存器 use 时复用其目的组；候选仍需经过
+完整 region 活跃区间、spill 与最终资源验证，不以单条指令的组数代替整个程序的预算。
 
 ### `SimplifyRISCVControl` 的整数常量
 
@@ -1009,6 +1024,12 @@ full-valid 整数广播若仅增加连续的末尾 lane axes，且每个元素�
 位模式。单 use、同 block 的 i8→i16 保值扩宽可以移到该广播之后，减少宽 gather；
 不跨算术或内存 effect，不改变数值转换边界。选择、verifier 和资源分析共享同一条件，
 emitter 只输出已选序列。
+
+`rvv.axis-broadcast.scalar-runs` 将标量坐标的连续重复段用 splat/slide 组成输出；
+`rvv.axis-broadcast.repeat-tile` 按已证明的源 lane 模数关系重复完整 tile。坐标证明最多
+4096 单元、64 个结果 part，每个 part 至多八个标量段或八次 tile 重复。scalar runs 保留
+一个载体的拼接临时量；tile 重复直接复用目的寄存器。两者均不读取额外内存，也不改变
+tail 的逻辑有效域；数值与存储边界仍由原始程序约束。
 
 index residue 折叠后成为常量且按 layer 对齐的 base，若窗口完全位于一个 layer，可将其
 layer 坐标移入既有 decode map，base 保留 group origin。实际 byte 地址与读取范围不变，

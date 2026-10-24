@@ -26,7 +26,32 @@ std::optional<int64_t> riscv_internal::operationRegisterGroups(Operation *operat
     return groups && add(*groups);
   };
   for (Value value : operation->getOperands()) if (!account(value)) return std::nullopt;
-  for (Value value : operation->getResults()) if (!account(value)) return std::nullopt;
+  auto mac = dyn_cast<riscv::RVVIntegerMACOp>(operation);
+  // vmacc/vwmacc update their accumulator operand. Its final SSA use does
+  // not require a second destination bank during this individual issue.
+  bool tiedAccumulator = mac && riscv::hasUniqueRegisterUse(mac.getAccumulator()) &&
+      mac.getAccumulator().getType() == mac.getResult().getType();
+  bool ordinaryDestination = false;
+  if (auto binary = dyn_cast<riscv::BinaryOp>(operation))
+    ordinaryDestination = llvm::is_contained(
+        ArrayRef<StringRef>{"add", "sub", "mul", "div", "min", "max", "and", "or", "xor", "shl", "shr"},
+        binary.getKind());
+  if (auto unary = dyn_cast<riscv::UnaryOp>(operation))
+    ordinaryDestination = unary.getKind() == "neg" || unary.getKind() == "abs" || unary.getKind() == "not";
+  ordinaryDestination |= isa<riscv::CastOp>(operation);
+  if (ordinaryDestination && operation->getNumResults() == 1) {
+    auto result = dyn_cast<riscv::ValueType>(operation->getResult(0).getType());
+    for (Value operand : operation->getOperands()) {
+      auto input = dyn_cast<riscv::ValueType>(operand.getType());
+      if (input && result && input.getLayout().getCarrier() == "rvv" &&
+          input.getShape() == result.getShape() && input.getAxisIds() == result.getAxisIds() &&
+          input.getLayout() == result.getLayout() && !riscv::fieldReadProjection(operand) &&
+          riscv::hasUniqueRegisterUse(operand))
+        tiedAccumulator = true;
+    }
+  }
+  for (Value value : operation->getResults())
+    if (!tiedAccumulator && !account(value)) return std::nullopt;
   if (auto leaf = operation->getAttrOfType<riscv::LeafAttr>("leaf"))
     if (!add(leaf.getTemporaryGroups()) || !add(leaf.getFragmentGroups())) return std::nullopt;
   return total;

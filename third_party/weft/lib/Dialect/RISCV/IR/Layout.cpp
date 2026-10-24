@@ -464,13 +464,21 @@ llvm::StringRef weft::riscv::fragmentUnpackInstruction(FragmentType input, Value
   if (contract && !contract->rowMergeInstruction.empty() &&
       input.getRole() == "accumulator" && input.getShape() == shape &&
       input.getAxisIds() == result.getAxisIds() && shape.size() == 2 &&
-      (shape[0] == 1 || shape[0] == 4 || shape[0] == 8) && shape[1] == 32 &&
-      input.getPacking().getRowsPerTile() == shape[0] && input.getPacking().getColumnsPerTile() == 8 &&
-      fragmentPartCount(input) == 4 && fragmentPartResourceGroups(input) == 2 &&
-      layout.getCarrier() == "rvv" && layout.getSew() == 32 && layout.getLmulEighths() == 8 &&
-      layout.getVl() == 32 &&
+      (input.getPacking().getRowsPerTile() == 1 || input.getPacking().getRowsPerTile() == 4 ||
+       input.getPacking().getRowsPerTile() == 8) &&
+      shape[0] % input.getPacking().getRowsPerTile() == 0 &&
+      (shape[1] == 16 || shape[1] == 32) && input.getPacking().getColumnsPerTile() == 8 &&
+      fragmentPartCount(input) == (shape[0] / input.getPacking().getRowsPerTile()) * (shape[1] / 8) &&
+      fragmentPartResourceGroups(input) == 2 &&
+      layout.getCarrier() == "rvv" && layout.getSew() == 32 &&
+      (layout.getLmulEighths() == 8 || (shape[1] == 16 && layout.getLmulEighths() == 4)) &&
+      (layout.getLaneFactors()[0] == 1 || (shape[1] == 16 && layout.getLaneFactors()[0] == 2 &&
+                                         input.getPacking().getRowsPerTile() >= 2 &&
+                                         shape[0] % 2 == 0 && layout.getLmulEighths() == 8)) &&
+      layout.getVl() == layout.getLaneFactors()[0] * shape[1] &&
       (layout.getValidity() == "full" || layout.getValidity() == "tail") && layout.getReplicaGroup() == 1 &&
-      layout.getLaneFactors()[0] == 1 && layout.getLaneFactors()[1] == 32 &&
+      layout.getLaneFactors()[1] == shape[1] &&
+      (layout.getTimeFactors()[0] == 1 || layout.getReplicaFactors()[0] == 1) &&
       layout.getTimeFactors()[1] == 1 && layout.getReplicaFactors()[1] == 1 &&
       llvm::all_of(layout.getFragmentFactors().asArrayRef(), [](int64_t x) { return x == 1; }) &&
       llvm::all_of(layout.getLocalFactors().asArrayRef(), [](int64_t x) { return x == 1; }))
@@ -480,7 +488,7 @@ llvm::StringRef weft::riscv::fragmentUnpackInstruction(FragmentType input, Value
 
 int64_t weft::riscv::fragmentUnpackTemporaryGroups(FragmentType input, ValueType result) {
   if (fragmentUnpackInstruction(input, result) != "ime.unpack.rvv")
-    return input.getShape()[0] == 1 ? 5 : 4;
+    return input.getShape()[1] == 16 ? 2 : input.getShape()[0] == 1 ? 5 : 4;
   if (isDirectFragmentRVVHandoff(input, result))
     return 0;
   if (isGroupedFragmentRVVHandoff(input, result))
@@ -752,6 +760,72 @@ std::optional<int64_t> weft::riscv::rvvRowScaleTemporaryGroups(BinaryOp op) {
   return (parts - 1) * (groups - released) + scratch;
 }
 
+std::optional<llvm::SmallVector<RVVLayoutSlice>> weft::riscv::scalarBroadcastRuns(ValueType input, ValueType result) {
+  auto from = RegisterCoordinates::get(input.getLayout()), to = RegisterCoordinates::get(result.getLayout());
+  if (!from || !to || input.getLayout().getCarrier() != "scalar" ||
+      result.getLayout().getCarrier() != "rvv" || input.getElementType() != result.getElementType() ||
+      from->lanes() != 1 || to->parts() <= 0 || to->lanes() <= 0 ||
+      to->parts() > 64 || to->lanes() > 4096 / to->parts() ||
+      result.getLayout().getReplicaGroup() != 1 || input.getAxisIds().size() >= result.getAxisIds().size())
+    return std::nullopt;
+  llvm::SmallVector<unsigned> axes;
+  for (auto [i, axis] : llvm::enumerate(input.getAxisIds().asArrayRef())) {
+    auto found = llvm::find(result.getAxisIds().asArrayRef(), axis);
+    if (found == result.getAxisIds().asArrayRef().end() ||
+        input.getShape()[i] != result.getShape()[found - result.getAxisIds().asArrayRef().begin()]) return std::nullopt;
+    axes.push_back(found - result.getAxisIds().asArrayRef().begin());
+  }
+  llvm::SmallVector<RVVLayoutSlice> runs;
+  for (int64_t part = 0; part < to->parts(); ++part) {
+    size_t first = runs.size();
+    for (int64_t lane = 0; lane < to->lanes(); ++lane) {
+      auto coordinate = to->logical(part, lane);
+      if (!coordinate) return std::nullopt;
+      llvm::SmallVector<int64_t> source;
+      for (unsigned axis : axes) source.push_back((*coordinate)[axis]);
+      auto at = from->locate(source);
+      if (!at || at->lane != 0) return std::nullopt;
+      if (runs.size() > first && runs.back().sourcePart == at->part) ++runs.back().count;
+      else runs.push_back({at->part, 0, part, lane, 1});
+      if (runs.size() - first > 8) return std::nullopt;
+    }
+  }
+  return runs;
+}
+
+std::optional<int64_t> weft::riscv::repeatedTileBroadcastFactor(ValueType input, ValueType result) {
+  auto a = input.getLayout(), b = result.getLayout();
+  auto from = RegisterCoordinates::get(a), to = RegisterCoordinates::get(b);
+  if (!from || !to || a.getCarrier() != "rvv" || b.getCarrier() != "rvv" ||
+      a.getReplicaGroup() != 1 || b.getReplicaGroup() != 1 || input.getElementType() != result.getElementType() ||
+      a.getSew() != b.getSew() || a.getLmulEighths() > b.getLmulEighths() ||
+      to->parts() <= 0 || to->lanes() <= 0 || from->lanes() <= 0 ||
+      to->parts() > 64 || to->lanes() > 4096 / to->parts() || to->lanes() % from->lanes())
+    return std::nullopt;
+  const int64_t repeat = to->lanes() / from->lanes();
+  if (repeat < 2 || repeat > 8) return std::nullopt;
+  llvm::SmallVector<unsigned> axes;
+  for (auto [i, axis] : llvm::enumerate(input.getAxisIds().asArrayRef())) {
+    auto found = llvm::find(result.getAxisIds().asArrayRef(), axis);
+    if (found == result.getAxisIds().asArrayRef().end() ||
+        input.getShape()[i] != result.getShape()[found - result.getAxisIds().asArrayRef().begin()]) return std::nullopt;
+    axes.push_back(found - result.getAxisIds().asArrayRef().begin());
+  }
+  for (int64_t part = 0; part < to->parts(); ++part) {
+    auto sourcePart = rvvBroadcastSourcePart(input, result, part);
+    if (!sourcePart) return std::nullopt;
+    for (int64_t lane = 0; lane < to->lanes(); ++lane) {
+      auto coordinate = to->logical(part, lane);
+      if (!coordinate) return std::nullopt;
+      llvm::SmallVector<int64_t> source;
+      for (unsigned axis : axes) source.push_back((*coordinate)[axis]);
+      auto at = from->locate(source);
+      if (!at || at->part != *sourcePart || at->lane != lane % from->lanes()) return std::nullopt;
+    }
+  }
+  return repeat;
+}
+
 std::optional<int64_t> weft::riscv::axisBroadcastInstructionCount(ValueType input, ValueType result) {
   if (!needsRVVAxisBroadcast(input, result)) return 0;
   auto streams = boundedProduct(result.getLayout().getTimeFactors());
@@ -841,6 +915,10 @@ std::optional<int64_t> weft::riscv::packedAxisBroadcastFactor(ValueType input, V
 
 std::optional<int64_t> weft::riscv::axisBroadcastTemporaryGroups(RVVAxisBroadcastOp op) {
   auto input = op.getInput().getType(), result = op.getResult().getType();
+  if (op.getLeaf().getInstruction() == "rvv.axis-broadcast.scalar-runs")
+    return scalarBroadcastRuns(input, result) ? std::optional<int64_t>((result.getLayout().getLmulEighths() + 7) / 8) : std::nullopt;
+  if (op.getLeaf().getInstruction() == "rvv.axis-broadcast.repeat-tile")
+    return repeatedTileBroadcastFactor(input, result) ? std::optional<int64_t>(0) : std::nullopt;
   if (op.getLeaf().getInstruction() == "rvv.axis-broadcast.packed") {
     if (!packedAxisBroadcastFactor(input, result)) return std::nullopt;
     return 2 * ((result.getLayout().getLmulEighths() + 7) / 8);

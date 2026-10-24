@@ -161,15 +161,65 @@ mlir::FailureOr<std::string> Emitter::axisBroadcastPart(
 
 mlir::LogicalResult
 Emitter::compileRVVAxisBroadcast(riscv::RVVAxisBroadcastOp operation) {
-  const bool packed = instructionOf(operation) == "rvv.axis-broadcast.packed";
-  if (!packed && instructionOf(operation) != "rvv.axis-broadcast")
+  const auto instruction = instructionOf(operation);
+  const bool packed = instruction == "rvv.axis-broadcast.packed";
+  const bool scalarRuns = instruction == "rvv.axis-broadcast.scalar-runs";
+  const bool repeatTile = instruction == "rvv.axis-broadcast.repeat-tile";
+  if (!packed && !scalarRuns && !repeatTile && instruction != "rvv.axis-broadcast")
     return fail(operation, "axis broadcast has no exact selected leaf");
   auto input = materializeNumeric(operation.getInput(), bindings.lookup(operation.getInput()));
   if (mlir::failed(input))
     return mlir::failure();
   Binding result;
   result.kind = Binding::Kind::Vector;
+  if (scalarRuns) {
+    auto runs = riscv::scalarBroadcastRuns(operation.getInput().getType(), operation.getResult().getType());
+    if (!runs || (input->kind != Binding::Kind::ScalarTuple && input->kind != Binding::Kind::Scalar))
+      return fail(operation, "scalar broadcast lost its selected source coordinate runs");
+    const std::string suffix = vectorSuffix(operation.getResult());
+    const bool floating = mlir::isa<mlir::FloatType>(operation.getResult().getType().getElementType());
+    for (const auto &run : *runs) {
+      if ((input->kind == Binding::Kind::Scalar && run.sourcePart != 0) ||
+          (input->kind == Binding::Kind::ScalarTuple && run.sourcePart >= static_cast<int64_t>(input->parts.size())))
+        return fail(operation, "scalar broadcast source part is unavailable");
+      const std::string source = input->kind == Binding::Kind::Scalar ? input->scalar : input->parts[run.sourcePart];
+      const std::string splat = fresh("broadcast_run");
+      line(vectorType(operation.getResult()) + " " + splat +
+           (floating ? " = __riscv_vfmv_v_f_" : " = __riscv_vmv_v_x_") + suffix +
+           "(" + source + ", " + std::to_string(run.count) + ");");
+      if (run.resultOffset == 0) {
+        if (run.resultPart != static_cast<int64_t>(result.parts.size()))
+          return fail(operation, "scalar broadcast result runs are not ordered");
+        result.parts.push_back(splat);
+      } else {
+        const std::string &output = result.parts[run.resultPart];
+        line(output + " = __riscv_vslideup_vx_" + suffix + "_tu(" + output + ", " + splat + ", " +
+             std::to_string(run.resultOffset) + ", " + std::to_string(run.resultOffset + run.count) + ");");
+      }
+    }
+    bindings[operation.getResult()] = std::move(result);
+    return mlir::success();
+  }
   for (int64_t part = 0; part < vectorPartCount(operation.getResult()); ++part) {
+    if (repeatTile) {
+      auto sourceType = operation.getInput().getType(), targetType = operation.getResult().getType();
+      auto repeat = riscv::repeatedTileBroadcastFactor(sourceType, targetType);
+      auto sourcePart = riscv::rvvBroadcastSourcePart(sourceType, targetType, part);
+      if (!repeat || !sourcePart || input->kind != Binding::Kind::Vector ||
+          *sourcePart >= static_cast<int64_t>(input->parts.size()))
+        return fail(operation, "repeated tile broadcast lost its selected source coordinates");
+      const std::string from = vectorSuffix(operation.getInput()), to = vectorSuffix(operation.getResult());
+      std::string source = input->parts[*sourcePart];
+      if (from != to) source = "__riscv_vlmul_ext_v_" + from + "_" + to + "(" + source + ")";
+      const int64_t lanes = *riscv::rvvLaneCount(sourceType);
+      const std::string output = fresh("broadcast_tile");
+      line(vectorType(operation.getResult()) + " " + output + " = " + source + ";");
+      for (int64_t i = 1; i < *repeat; ++i)
+        line(output + " = __riscv_vslideup_vx_" + to + "_tu(" + output + ", " + source + ", " +
+             std::to_string(i * lanes) + ", " + std::to_string((i + 1) * lanes) + ");");
+      result.parts.push_back(output);
+      continue;
+    }
     if (packed) {
       auto sourceType = operation.getInput().getType(), targetType = operation.getResult().getType();
       auto repeat = riscv::packedAxisBroadcastFactor(sourceType, targetType);

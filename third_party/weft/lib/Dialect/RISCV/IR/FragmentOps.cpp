@@ -1150,8 +1150,9 @@ mlir::LogicalResult IMEUnpackOp::verify() {
   auto fragment = getInput().getType();
   auto layout = getResult().getType().getLayout();
   const bool grouped = isGroupedFragmentRVVHandoff(fragment, getResult().getType());
+  const bool registeredRows = fragmentUnpackInstruction(fragment, getResult().getType()) != "ime.unpack.rvv";
   if (layout.getAxisIds().size() != 2 ||
-      (layout.getLaneFactors()[0] != 1 && !grouped && !isDirectFragmentRVVHandoff(fragment, getResult().getType())) ||
+      (layout.getLaneFactors()[0] != 1 && !grouped && !registeredRows && !isDirectFragmentRVVHandoff(fragment, getResult().getType())) ||
       (!grouped && (layout.getReplicaGroup() != 1 ||
                     layout.getLmulEighths() > fragmentPartResourceGroups(fragment) * 8)) ||
       llvm::any_of(layout.getFragmentFactors().asArrayRef(), [](int64_t factor) { return factor != 1; }) ||

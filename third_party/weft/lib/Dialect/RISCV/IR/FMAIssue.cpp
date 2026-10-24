@@ -215,6 +215,7 @@ StringRef weft::riscv::pointwiseIntegerMACInstruction(TargetAttr target, ValueTy
       (layout.getValidity() != "full" && layout.getValidity() != "tail") ||
       !supportsRVVLayout(target, layout)) return "";
   if (lhs == type && rhs == element) return "rvv.vmacc.vx";
+  if (lhs == type && rhs == type) return "rvv.vmacc.vv";
   auto multiplier = dyn_cast<ValueType>(rhs);
   if (integerMACRowParts(lhs, multiplier, type) && supportsRVVLayout(target, lhs.getLayout()))
     return "rvv.vmacc.row.vx";

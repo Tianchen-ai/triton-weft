@@ -2,6 +2,7 @@
 #include "Weft/Target/RISCVCompilation.h"
 
 #include "RISCVPhysicalSupport.h"
+#include "ValueLiveness.h"
 
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
 #include "Weft/Dialect/RISCV/IR/Contraction.h"
@@ -472,7 +473,8 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
       auto instruction = riscv::pointwiseIntegerMACInstruction(kernel.getTarget(), input,
           rowScale ? mlir::Type(rowScale) : mlir::Type(element), result);
       if (instruction != "rvv.vmacc.vx" && instruction != "rvv.vwmacc.vx" &&
-          instruction != "rvv.vwmaccu.vx" && instruction != "rvv.vmacc.row.vx") continue;
+          instruction != "rvv.vwmaccu.vx" && instruction != "rvv.vmacc.row.vx" &&
+          instruction != "rvv.vmacc.vv") continue;
       bool ordered = true;
       for (auto *op = product->getNextNode(); op != add; op = op->getNextNode())
         if (op->getNumRegions() || !riscv::hasOnlyReadEffects(op)) { ordered = false; break; }
@@ -488,10 +490,18 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
         riscv_internal::copyOrigin(add, extended);
         scalar = extended.getResult();
       }
+      const bool reuse = riscv::hasUniqueRegisterUse(accumulator);
       auto mac = riscv::RVVIntegerMACOp::create(rewriter, add.getLoc(), result, vector, scalar, accumulator,
           riscv_internal::leaf(rewriter, "rvv", "integer-mac", instruction, instruction,
-              input.getLayout().getRegisterGroups() + result.getLayout().getRegisterGroups(),
+              input.getLayout().getRegisterGroups() + result.getLayout().getRegisterGroups() +
+                  riscv_internal::issueRegisterGroups(scalar),
               result.getLayout().getRegisterGroups(), 0, 0, "none", "exact"));
+      auto groups = riscv_internal::operationRegisterGroups(mac);
+      auto destination = riscv_internal::residentRegisterGroups(mac.getResult());
+      if (!groups || !destination || *groups - (reuse ? *destination : 0) > kernel.getTarget().getVectorRegisters()) {
+        rewriter.eraseOp(mac);
+        continue;
+      }
       riscv_internal::copyOrigin(add, mac);
       rewriter.replaceOp(add, mac.getResult());
       rewriter.eraseOp(product);
@@ -526,6 +536,7 @@ void selectWidenPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter) 
         }
       if (!ordered) continue;
       rewriter.setInsertionPoint(add);
+      const bool reuse = riscv::hasUniqueRegisterUse(accumulator);
       auto mac = riscv::RVVIntegerMACOp::create(rewriter, add.getLoc(), type,
           product.getLhs(), product.getRhs(), accumulator,
           riscv_internal::leaf(rewriter, "rvv", "integer-mac", instruction, instruction,
@@ -533,6 +544,12 @@ void selectWidenPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter) 
                   riscv_internal::issueRegisterGroups(product.getRhs()) +
                   riscv_internal::issueRegisterGroups(accumulator),
               type.getLayout().getRegisterGroups(), 0, 0, "none", "exact"));
+      auto groups = riscv_internal::operationRegisterGroups(mac);
+      auto destination = riscv_internal::residentRegisterGroups(mac.getResult());
+      if (!groups || !destination || *groups - (reuse ? *destination : 0) > kernel.getTarget().getVectorRegisters()) {
+        rewriter.eraseOp(mac);
+        continue;
+      }
       riscv_internal::copyOrigin(add, mac);
       rewriter.replaceOp(add, mac.getResult());
       rewriter.eraseOp(product);

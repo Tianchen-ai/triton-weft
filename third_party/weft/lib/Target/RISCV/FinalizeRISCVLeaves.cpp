@@ -944,6 +944,14 @@ public:
       rewriter.eraseOp(widen);
     }
     getOperation().walk([&](riscv::RVVAxisBroadcastOp broadcast) {
+      if (riscv::repeatedTileBroadcastFactor(broadcast.getInput().getType(), broadcast.getResult().getType())) {
+        auto before = broadcast.getLeaf();
+        broadcast.setLeafAttr(riscv_internal::leaf(builder, "rvv", "axis-broadcast",
+            "rvv.axis-broadcast.repeat-tile", "rvv.axis-broadcast.repeat-tile",
+            before.getOperandGroups(), before.getResultGroups(), 0,
+            0, "none", "exact", before.getParameters().asArrayRef()));
+        return;
+      }
       if (!riscv::packedAxisBroadcastFactor(broadcast.getInput().getType(), broadcast.getResult().getType()))
         return;
       auto before = broadcast.getLeaf();

@@ -99,6 +99,8 @@ std::optional<int64_t> unaryTemporaryGroups(UnaryOp operation, ValueType result,
 std::optional<int64_t> binaryBroadcastInstructionCount(BinaryOp operation);
 std::optional<int64_t> axisBroadcastInstructionCount(ValueType input, ValueType result);
 std::optional<int64_t> axisBroadcastTemporaryGroups(RVVAxisBroadcastOp operation);
+std::optional<llvm::SmallVector<RVVLayoutSlice>> scalarBroadcastRuns(ValueType input, ValueType result);
+std::optional<int64_t> repeatedTileBroadcastFactor(ValueType input, ValueType result);
 std::optional<int64_t> packedAxisBroadcastFactor(ValueType input, ValueType result);
 std::optional<int64_t> rvvRowScaleRows(BinaryOp operation);
 std::optional<int64_t> rvvRowScaleTemporaryGroups(BinaryOp operation);

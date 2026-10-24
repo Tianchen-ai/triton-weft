@@ -185,6 +185,8 @@ constexpr Entry prefix[] = {
     {PassID::SelectPanelTransfers, "program-materialization"},
     {PassID::PanelTransfers, "program-materialization"},
     {PassID::DenseFragments, "program-materialization"},
+    {PassID::Fragments, "program-materialization"},
+    {PassID::ConsumerLayouts, "program-materialization"},
     {PassID::Values, "program-materialization"},
     {PassID::Programs, "program-materialization"},
     {PassID::RecordLoops, "program-materialization"},

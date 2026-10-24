@@ -16,7 +16,7 @@ mlir::LogicalResult Emitter::compileRVVIntegerMAC(riscv::RVVIntegerMACOp operati
   const bool wideScalar = instruction == "rvv.vwmacc.vx" || instruction == "rvv.vwmaccu.vx";
   const bool scalarMultiplier = instruction == "rvv.vmacc.vx" || wideScalar || rows;
   const bool unsignedWide = instruction == "rvv.vwmaccu.vv";
-  if ((!scalarMultiplier && !unsignedWide && instruction != "rvv.vwmacc.vv") ||
+  if ((!scalarMultiplier && !unsignedWide && instruction != "rvv.vwmacc.vv" && instruction != "rvv.vmacc.vv") ||
       vector->kind != Binding::Kind::Vector || accumulator->kind != Binding::Kind::Vector ||
       (rows ? !rowParts || rowParts->size() != accumulator->parts.size() :
               vector->parts.size() != accumulator->parts.size()) ||
@@ -39,7 +39,7 @@ mlir::LogicalResult Emitter::compileRVVIntegerMAC(riscv::RVVIntegerMACOp operati
     std::string intrinsic = wideScalar
         ? (instruction == "rvv.vwmaccu.vx" ? "vwmaccu_vx_" : "vwmacc_vx_")
         : scalarMultiplier ? "vmacc_vx_" :
-        unsignedWide ? "vwmaccu_vv_" : "vwmacc_vv_";
+        instruction == "rvv.vmacc.vv" ? "vmacc_vv_" : unsignedWide ? "vwmaccu_vv_" : "vwmacc_vv_";
     line(vectorType(operation.getResult()) + " " + name + " = __riscv_" + intrinsic +
          vectorSuffix(operation.getResult()) + "(" + accumulator->parts[part] + ", " +
          scale + ", " + vector->parts[vectorPart] + ", " +

@@ -10739,6 +10739,15 @@ mlir::LogicalResult RVVAxisBroadcastOp::verify() {
   ValueType result = getResult().getType();
   auto inputLayout = input.getLayout();
   auto resultLayout = result.getLayout();
+  if (getLeaf().getInstruction() == "rvv.axis-broadcast.scalar-runs") {
+    auto runs = scalarBroadcastRuns(input, result);
+    auto lanes = rvvLaneCount(result);
+    if (!runs || !lanes ||
+        !exactLeaf(getLeaf(), "rvv", "axis-broadcast", "rvv.axis-broadcast.scalar-runs", "none", "exact") ||
+        getLeaf().getParameters().asArrayRef() != llvm::ArrayRef<int64_t>({1, *lanes}))
+      return emitOpError("scalar broadcast requires bounded contiguous runs of the source coordinates");
+    return mlir::success();
+  }
   auto inputLanes = checkedProduct(inputLayout.getLaneFactors().asArrayRef());
   auto resultLanes = checkedProduct(resultLayout.getLaneFactors().asArrayRef());
   bool preservesSourceDomain = input.getElementType() == result.getElementType();
@@ -10774,6 +10783,7 @@ mlir::LogicalResult RVVAxisBroadcastOp::verify() {
       addsOnlySingletonAxes &&
       inputLayout.getLmulEighths() == resultLayout.getLmulEighths();
   const bool packed = getLeaf().getInstruction() == "rvv.axis-broadcast.packed";
+  const bool repeated = getLeaf().getInstruction() == "rvv.axis-broadcast.repeat-tile";
   if (!preservesSourceDomain || input.getAxisIds().size() >=
                                     result.getAxisIds().size() ||
       inputLayout.getCarrier() != "rvv" ||
@@ -10783,8 +10793,9 @@ mlir::LogicalResult RVVAxisBroadcastOp::verify() {
       inputLayout.getSew() != resultLayout.getSew() ||
       inputLayout.getLmulEighths() > resultLayout.getLmulEighths() ||
       !exactLeaf(getLeaf(), "rvv", "axis-broadcast",
-                 packed ? "rvv.axis-broadcast.packed" : "rvv.axis-broadcast", "none", "exact") ||
+                 packed ? "rvv.axis-broadcast.packed" : repeated ? "rvv.axis-broadcast.repeat-tile" : "rvv.axis-broadcast", "none", "exact") ||
       (packed && !packedAxisBroadcastFactor(input, result)) ||
+      (repeated && !repeatedTileBroadcastFactor(input, result)) ||
       getLeaf().getParameters().asArrayRef() !=
           llvm::ArrayRef<int64_t>({*inputLanes, *resultLanes}))
     return emitOpError(

@@ -848,14 +848,44 @@ mlir::LogicalResult Emitter::compileIMEUnpack(riscv::IMEUnpackOp operation) {
   const std::string suffix = vectorSuffix(operation.getResult());
   if (operation.getLeaf().getInstruction() == "spacemit-ime2-vpack-rows") {
     const int64_t rows = fragment.getShape()[0];
-    for (int64_t group = 0; group < (rows + 3) / 4; ++group) {
+    const int64_t atomRows = fragment.getPacking().getRowsPerTile();
+    if (fragment.getShape()[1] == 16) {
+      for (int64_t atom = 0; atom < rows / atomRows; ++atom) {
+        for (int64_t group = 0; group < (atomRows + 3) / 4; ++group) {
+          const std::string pair = fresh("ime_row_pairs");
+          line("vint32m2_t " + pair + ";");
+          line("__asm__ volatile(\"vsetvli t0, zero, e32, m1, ta, ma\\n\\t\"");
+          line("  \".insn r 0x2b, 2, 0x33, %0, %1, %2\\n\\t\"");
+          line("  : \"=&vr\"(" + pair + ") : \"vr\"(__riscv_vget_v_i32m2_i32m1(" + input.parts[atom * 2] + ", " + std::to_string(group) + ")), ");
+          line("    \"vr\"(__riscv_vget_v_i32m2_i32m1(" + input.parts[atom * 2 + 1] + ", " + std::to_string(group) + ")) : \"t0\", \"vl\", \"vtype\");");
+          if (layout.getLaneFactors()[0] == 2) {
+            for (int64_t half = 0; half < std::min<int64_t>(4, atomRows - group * 4) / 2; ++half)
+              result.parts.push_back("__riscv_vget_v_i32m2_i32m1(" + pair + ", " + std::to_string(half) + ")");
+            continue;
+          }
+          for (int64_t row = 0; row < std::min<int64_t>(4, atomRows - group * 4); ++row) {
+            std::string value = "__riscv_vget_v_i32m2_i32m1(" + pair + ", " + std::to_string(row / 2) + ")";
+            if (row % 2) value = "__riscv_vslidedown_vx_i32m1(" + value + ", 16, 16)";
+            if (suffix != "i32m1") value = "__riscv_vlmul_trunc_v_i32m1_" + suffix + "(" + value + ")";
+            const std::string name = fresh("ime_output_row");
+            line(vectorType(operation.getResult()) + " " + name + " = " + value + ";");
+            result.parts.push_back(name);
+          }
+        }
+      }
+      bindings[operation.getResult()] = std::move(result);
+      return mlir::success();
+    }
+    for (int64_t atom = 0; atom < rows / atomRows; ++atom) {
+    const int64_t activeRows = atomRows;
+    for (int64_t group = 0; group < (activeRows + 3) / 4; ++group) {
       llvm::SmallVector<std::string> inputs;
-      for (const auto &part : input.parts)
+      for (const auto &part : llvm::ArrayRef(input.parts).slice(atom * 4, 4))
         inputs.push_back("__riscv_vget_v_i32m2_i32m1(" + part + ", " + std::to_string(group) + ")");
       const std::string first = fresh("ime_join_columns"), second = fresh("ime_join_columns");
       line("vint32m2_t " + first + ", " + second + ";");
       llvm::SmallVector<std::string> rowPairs;
-      for (int64_t half = 0; half < 2 && group * 4 + half * 2 < rows; ++half) {
+      for (int64_t half = 0; half < 2 && group * 4 + half * 2 < activeRows; ++half) {
         rowPairs.push_back(fresh("ime_output_rows"));
         line("vint32m2_t " + rowPairs.back() + ";");
       }
@@ -878,9 +908,10 @@ mlir::LogicalResult Emitter::compileIMEUnpack(riscv::IMEUnpackOp operation) {
           line("  : \"=&vr\"(" + pair + ") : \"vr\"(__riscv_vget_v_i32m2_i32m1(" + first + ", 1)),");
           line("    \"vr\"(__riscv_vget_v_i32m2_i32m1(" + second + ", 1)) : \"t0\", \"vl\", \"vtype\");");
         }
-        for (int64_t row = 0; row < 2 && group * 4 + half * 2 + row < rows; ++row)
+        for (int64_t row = 0; row < 2 && group * 4 + half * 2 + row < activeRows; ++row)
           result.parts.push_back("__riscv_vget_v_i32m2_i32m1(" + pair + ", " + std::to_string(row) + ")");
       }
+    }
     }
     bindings[operation.getResult()] = std::move(result);
     return mlir::success();

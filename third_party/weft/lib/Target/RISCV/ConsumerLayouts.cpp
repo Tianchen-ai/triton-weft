@@ -4,6 +4,7 @@
 #include "IME/FragmentSupply.h"
 #include "Weft/Dialect/RISCV/IR/Fragment.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
+#include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
@@ -13,6 +14,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <map>
+#include <limits>
 
 using namespace weft;
 using namespace weft::riscv_internal;
@@ -207,6 +209,18 @@ bool rewriteComponent(riscv::IMEUnpackOp anchor, riscv::LayoutAttr layout,
       auto type = mlir::dyn_cast<riscv::ValueType>(operand.get().getType());
       if (!type)
         continue;
+      if (auto runs = riscv::scalarBroadcastRuns(type, result);
+          runs && llvm::any_of(*runs, [](auto run) { return run.resultOffset != 0; })) {
+        rewriter.setInsertionPoint(op);
+        const int64_t lanes = *riscv::rvvLaneCount(result);
+        auto broadcast = riscv::RVVAxisBroadcastOp::create(rewriter, op->getLoc(), result, operand.get(),
+            leaf(rewriter, "rvv", "axis-broadcast", "rvv.axis-broadcast.scalar-runs",
+                 "rvv.axis-broadcast.scalar-runs", 0, result.getLayout().getRegisterGroups(),
+                 (result.getLayout().getLmulEighths() + 7) / 8, 0, "none", "exact", {1, lanes}));
+        copyOrigin(op, broadcast);
+        operand.set(broadcast.getResult());
+        continue;
+      }
       auto required = projectLayout(rewriter, type, result.getLayout(), target);
       if (auto binary = mlir::dyn_cast<riscv::BinaryOp>(op);
           binary && binary.getKind() == "mul" && operand.getOperandNumber() == 0 &&
@@ -233,14 +247,16 @@ bool rewriteComponent(riscv::IMEUnpackOp anchor, riscv::LayoutAttr layout,
       auto outputLanes = staticProduct(result.getLayout().getLaneFactors()).value() * result.getLayout().getReplicaGroup();
       if (required.getCarrier() != "rvv" || inputLanes == outputLanes)
         continue;
-      if (mlir::isa<riscv::BinaryOp>(op))
+      const bool repeated = riscv::repeatedTileBroadcastFactor(projected, result).has_value();
+      if (mlir::isa<riscv::BinaryOp>(op) && !repeated)
         continue;
       if (type.getAxisIds().size() >= result.getAxisIds().size() || inputLanes > outputLanes)
         return false;
       rewriter.setInsertionPoint(op);
+      const llvm::StringRef broadcastInstruction = repeated ? "rvv.axis-broadcast.repeat-tile" : "rvv.axis-broadcast";
       auto broadcast = riscv::RVVAxisBroadcastOp::create(rewriter, op->getLoc(), result, *input,
-          leaf(rewriter, "rvv", "axis-broadcast", "rvv.axis-broadcast", "rvv.axis-broadcast", 0, 0,
-               result.getLayout().getRegisterGroups() + 2 * ((result.getLayout().getLmulEighths() + 7) / 8),
+          leaf(rewriter, "rvv", "axis-broadcast", broadcastInstruction, broadcastInstruction, 0, 0,
+               repeated ? 0 : result.getLayout().getRegisterGroups() + 2 * ((result.getLayout().getLmulEighths() + 7) / 8),
                0, "none", "exact", {inputLanes, outputLanes}));
       copyOrigin(op, broadcast);
       operand.set(broadcast.getResult());
@@ -302,7 +318,11 @@ std::optional<Work> work(riscv::KernelOp kernel) {
                                              kernel.getTarget().getVlenBits());
     } else if (auto unpack = mlir::dyn_cast<riscv::IMEUnpackOp>(op)) {
       if (riscv::fragmentUnpackInstruction(unpack.getInput().getType(), unpack.getResult().getType()) != "ime.unpack.rvv") {
-        count = 4 * ((unpack.getResult().getType().getShape()[0] + 3) / 4);
+        const int64_t columns = unpack.getResult().getType().getShape()[1];
+        const int64_t atomRows = unpack.getInput().getType().getPacking().getRowsPerTile();
+        const int64_t rowGroups = (unpack.getResult().getType().getShape()[0] + 3) / 4;
+        const bool pairs = unpack.getResult().getType().getLayout().getLaneFactors()[0] == 2;
+        count = rowGroups * (columns == 16 ? (atomRows == 1 || pairs ? 1 : 3) : 4);
       } else {
         auto handoff = riscv::fragmentRVVHandoffLayout(unpack.getInput().getType(), kernel.getTarget());
         if (!handoff) { complete = false; return; }
@@ -321,10 +341,20 @@ std::optional<Work> work(riscv::KernelOp kernel) {
         for (auto slice : *slices)
           count += (slice.sourceOffset != 0) + (slice.resultOffset != 0);
     } else if (auto broadcast = mlir::dyn_cast<riscv::RVVAxisBroadcastOp>(op)) {
-      auto instructions = riscv::axisBroadcastInstructionCount(broadcast.getInput().getType(),
-                                                               broadcast.getResult().getType());
-      if (!instructions) { complete = false; return; }
-      count = *instructions;
+      auto input = broadcast.getInput().getType(), output = broadcast.getResult().getType();
+      if (broadcast.getLeaf().getInstruction() == "rvv.axis-broadcast.scalar-runs") {
+        auto runs = riscv::scalarBroadcastRuns(input, output);
+        if (!runs) { complete = false; return; }
+        for (auto run : *runs) count += run.resultOffset ? 2 : 1;
+      } else if (broadcast.getLeaf().getInstruction() == "rvv.axis-broadcast.repeat-tile") {
+        auto repeat = riscv::repeatedTileBroadcastFactor(input, output);
+        if (!repeat) { complete = false; return; }
+        count = (*repeat - 1) * *riscv::rvvCarrierCount(output.getLayout());
+      } else {
+        auto instructions = riscv::axisBroadcastInstructionCount(input, output);
+        if (!instructions) { complete = false; return; }
+        count = *instructions;
+      }
     } else if (auto zero = mlir::dyn_cast<riscv::IMEZeroOp>(op)) {
       count = riscv::fragmentPartCount(zero.getResult().getType());
     } else if (auto broadcast = mlir::dyn_cast<riscv::IMEFragmentRowBroadcastOp>(op)) {
@@ -349,10 +379,29 @@ std::optional<Work> work(riscv::KernelOp kernel) {
       count = *parts;
     }
     unsigned depth = 0;
-    for (auto *parent = op->getParentOp(); parent && parent != kernel.getOperation(); parent = parent->getParentOp())
-      depth += mlir::isa<mlir::scf::ForOp>(parent);
-    result[depth].arithmetic += arithmetic;
-    result[depth].movement += count;
+    int64_t repetitions = 1;
+    for (auto *parent = op->getParentOp(); parent && parent != kernel.getOperation(); parent = parent->getParentOp()) {
+      auto loop = mlir::dyn_cast<mlir::scf::ForOp>(parent);
+      if (!loop) continue;
+      auto lower = riscv::denseConstantIndex(loop.getLowerBound());
+      auto upper = riscv::denseConstantIndex(loop.getUpperBound());
+      auto step = riscv::denseConstantIndex(loop.getStep());
+      if (!lower || !upper || !step || *step <= 0) { ++depth; continue; }
+      const __int128 span = std::max<__int128>(0, __int128(*upper) - *lower);
+      const __int128 trips = (span + *step - 1) / *step;
+      const __int128 next = trips * repetitions;
+      if (next > std::numeric_limits<int64_t>::max()) { complete = false; return; }
+      repetitions = next;
+    }
+    auto &level = result[depth];
+    const __int128 totalArithmetic = __int128(arithmetic) * repetitions + level.arithmetic;
+    const __int128 totalMovement = __int128(count) * repetitions + level.movement;
+    if (totalArithmetic + totalMovement > std::numeric_limits<int64_t>::max()) {
+      complete = false;
+      return;
+    }
+    level.arithmetic = totalArithmetic;
+    level.movement = totalMovement;
   });
   return complete ? std::optional<Work>(result) : std::nullopt;
 }
@@ -477,11 +526,27 @@ static mlir::LogicalResult propagateConsumerLayouts(
     bool changed = false, legal = true;
     bool grouped = false;
     bool completeRow = false;
+    bool rowPairs = false;
     for (auto anchor : anchors) {
       auto layout = kernel.getLocalTileStrategy() != "atom-partitioned"
           ? riscv::fragmentRVVHandoffLayout(anchor.getInput().getType(), kernel.getTarget(), 2)
           : std::nullopt;
-      grouped |= bool(layout);
+      auto domain = anchor.getResult().getType();
+      bool paired = false;
+      if (kernel.getLocalTileStrategy() == "target-default" && domain.getShape().size() == 2 &&
+          domain.getShape()[0] >= 2 && domain.getShape()[0] % 2 == 0 && domain.getShape()[1] == 16 &&
+          kernel.getTarget().getVlenBits() == 2 * 16 * 32) {
+        auto one = integers(rewriter, {1, 1});
+        auto candidate = riscv::LayoutAttr::get(rewriter.getContext(), "rvv", domain.getAxisIds(),
+            one, integers(rewriter, {2, 16}), integers(rewriter, {domain.getShape()[0] / 2, 1}),
+            one, one, 32, 8, 32, domain.getShape()[0] / 2, domain.getLayout().getValidity());
+        auto value = mlir::cast<riscv::ValueType>(withLayout(domain, candidate));
+        if (riscv::fragmentUnpackInstruction(anchor.getInput().getType(), value) != "ime.unpack.rvv") {
+          layout = candidate;
+          paired = rowPairs = true;
+        }
+      }
+      grouped |= bool(layout) && !paired;
       if (!layout && kernel.getLocalTileStrategy() == "register-grouped") {
         rejectRISCVCandidate(kernel, RISCVFailureCategory::Unsupported,
                              "register-grouped strategy is unsupported for the selected tile geometry");
@@ -542,12 +607,17 @@ static mlir::LogicalResult propagateConsumerLayouts(
       registeredRowMerge |= riscv::fragmentUnpackInstruction(unpack.getInput().getType(), unpack.getResult().getType()) != "ime.unpack.rvv";
     });
     const bool preferGrouped = grouped && (!registeredRowMerge || kernel.getLocalTileStrategy() == "register-grouped");
-    const bool selected = resourceLegal && candidate && (preferGrouped || lessWork(*candidate, *baseline));
+    selectFragmentRegisterReuse(kernel);
+    auto baselinePressure = physicalRegisterPressure(kernel);
+    const bool avoidsSpill = baselinePressure &&
+        baselinePressure->total() > kernel.getTarget().getVectorRegisters();
+    const bool selected = resourceLegal && candidate && (avoidsSpill || preferGrouped || lessWork(*candidate, *baseline));
     llvm::errs() << "weft-consumer-layout: candidates=2 requested=" << kernel.getLocalTileStrategy() << " selected="
-                 << (selected ? (grouped ? "register-grouped" : completeRow ? "complete-row" : "fragment-order") : "existing")
-                 << " reason=" << (!legal ? "unsupported-coordinate-edge" : !resourceLegal ? "resident-budget" : !candidate ? "unknown-local-work" : preferGrouped ? "target-register-group-rule" : selected ? "less-inner-issue-work" : "no-issue-work-reduction")
+                 << (selected ? (grouped ? "register-grouped" : rowPairs ? "register-row-pairs" : completeRow ? "complete-row" : "fragment-order") : "existing")
+                 << " reason=" << (!legal ? "unsupported-coordinate-edge" : !resourceLegal ? "resident-budget" : !candidate ? "unknown-local-work" : avoidsSpill ? "fits-resident-budget" : preferGrouped ? "target-register-group-rule" : selected ? "less-inner-issue-work" : "no-issue-work-reduction")
+                 << " existing-resident-groups=" << (baselinePressure ? baselinePressure->total() : -1)
                  << " resident-groups=" << (pressure ? pressure->total() : -1)
-                 << " scope=pointwise+broadcast+conversion+initializer estimate=pre-system-compiler cycle-estimate=unavailable work-by-loop-depth(alu,movement)=";
+                 << " scope=pointwise+broadcast+conversion+initializer estimate=pre-system-compiler cycle-estimate=unavailable work-by-dynamic-loop-depth(alu,movement)=";
     for (auto [depth, count] : *baseline) {
       auto after = candidate ? candidate->find(depth) : Work::const_iterator();
       llvm::errs() << depth << ":(" << count.arithmetic << ',' << count.movement << ")->";
