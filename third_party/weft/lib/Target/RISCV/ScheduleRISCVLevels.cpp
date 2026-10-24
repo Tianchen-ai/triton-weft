@@ -97,6 +97,32 @@ public:
         loop->removeAttr("weft.riscv.schedule");
         continue;
       }
+      // A frontier that already fills the vector file cannot leave room for
+      // its consumers. Try the other dependency-defined boundary: complete
+      // independent arithmetic before carrying values to the accumulator.
+      auto transportGroups = [&](const PipelineSchedule &schedule) -> std::optional<int64_t> {
+        int64_t count = 0;
+        for (Value value : schedule.transported) {
+          auto groups = residentRegisterGroups(value);
+          if (!groups) return std::nullopt;
+          count += *groups;
+        }
+        return count;
+      };
+      auto groups = transportGroups(**candidate);
+      auto kernel = loop->getParentOfType<riscv::KernelOp>();
+      if (groups && *groups >= kernel.getTarget().getVectorRegisters()) {
+        auto compact = schedulePipeline(loop, PipelineFrontier::Carry);
+        if (failed(compact)) { signalPassFailure(); return; }
+        if (*compact) {
+          auto compactGroups = transportGroups(**compact);
+          if (compactGroups && *compactGroups < *groups) {
+            llvm::errs() << "weft-pipeline-carry-frontier: groups=" << *groups
+                         << " -> " << *compactGroups << '\n';
+            candidate = std::move(compact);
+          }
+        }
+      }
       if (failed(selectFrontiers(**candidate, b, selected, reduction))) {
         signalPassFailure();
         return;

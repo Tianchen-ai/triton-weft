@@ -4203,7 +4203,14 @@ planScaledSourceLanes(mlir::Builder &builder, riscv::RVVWidenDotOp dot,
                               builder, dot, *lhsSource, *rhsSource,
                               facts.partialSlots, sourceSlots, split)
                         : std::optional<ScaledSourceLaneGeometry>();
-    if (geometry)
+    // This source-lane realization materializes its complete product set.
+    // Leave oversized sets to the chunked reduced topology; accepting them
+    // here prevents that planner from selecting its legal bounded issue sets.
+    auto sourceGroups = geometry
+        ? checkedProduct({sourceSlots, geometry->sourceSlot.getLayout().getRegisterGroups()})
+        : std::optional<int64_t>();
+    if (geometry && sourceGroups &&
+        *sourceGroups <= kernel.getTarget().getVectorRegisters() - 2)
       return SourceLanePlan{sourceSlots,
                             split,
                             *lhsSource,

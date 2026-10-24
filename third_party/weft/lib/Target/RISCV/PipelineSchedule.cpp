@@ -428,7 +428,8 @@ FailureOr<PipelineSchedule> PipelineSchedule::read(scf::ForOp loop) {
   return result;
 }
 
-FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(scf::ForOp loop) {
+FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
+    scf::ForOp loop, PipelineFrontier frontier) {
   PipelineSchedule result;
   result.loop = loop;
   if (failed(loopContract(loop, result.descending, true))) return failure();
@@ -448,7 +449,7 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(scf:
     // A contraction starts the consuming stage even when its accumulator is
     // local to this iteration. Otherwise all dot work becomes a producer and
     // only the final scalar carry update overlaps the following iteration.
-    if (contractionConsumer(&operation))
+    if (frontier == PipelineFrontier::Contraction && contractionConsumer(&operation))
       consumerSet.insert(&operation);
     auto dependencies = stageDependencies(&operation);
     if (failed(dependencies)) return failure();

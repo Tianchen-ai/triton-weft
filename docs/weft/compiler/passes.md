@@ -459,12 +459,20 @@ accumulator reuse，避免把可以原位更新的 accumulator 误算成同时�
 
 该 pass 只做已经实现的真实 rewrite：相邻 pure 逆 conversion 消除、单 use 纯 pointwise producer
 的 backward rematerialization，以及同一 block 内相同 conversion 的 SSA CSE。它不声称已经
-实现跨 block hoist/sink、全局 conversion algebra 或任意 producer rematerialization。
+实现任意跨 block hoist/sink、全局 conversion algebra 或任意 producer rematerialization。
 conversion CSE 与 backward rematerialization 处于同一个固定点：合并conversion后新出现的
 single-use producer须在本次pass内继续处理，不留给下一次解析/重放才改变其表示。
 重物化前先核对全部 shaped operands 的 layout 投影；例如窄结果的 lane 数会使宽整数
 index 超过合法 LMUL 时，保留原 producer 与显式 conversion，不插入半套转换再报错。
 这是同一物理程序的可选 rewrite，不改变作者计算、目标引擎或访存边界。
+
+普通 `scf.for` 的某个完整 RVV carry，若 block argument 与循环输出的全部用途都是
+相同的 pure scalar extract，可将该 carry 改为消费者的 scalar 表示。init 与 yield 显式转换，
+argument/result 同步改型；dtype、shape、axes、源 birth/handoff 和数值计算不变。
+仅接受至多 16 个完整静态 scalar parts，并排除 deferred storage projection、混合消费者、
+tail 与已冻结资源。没有读取或数学运算被移出空循环；后续物理 pass 继续选择真实 supply，
+最终资源重新核算。该机制对应 Triton `RemoveLayoutConversions.cpp:552-567` 的循环
+representation 传播，CPU 使用 scalar/RVV 载体，不引入 GPU ownership。
 
 partial materialization 后，`physical-share` 的 input/result 都变成单 use 时，若到唯一
 conversion 的同 block 区间没有写入或未知 effect，允许移除这条已无共享用途的边界，
@@ -753,6 +761,12 @@ storage projection 不使用这条前移规则。无 memory clobber、copy accum
 它不通过 op 数量、相邻关系或 window family 命名 cluster。闭合的普通 `for/if` 可以作为
 一个 stage 内的有序单元；嵌套作者 Level、外部 write/unknown effect 没有重排合同，仍拒绝。
 
+默认以 contraction 建立消费边界。若跨阶段的 numeric values 本身已占满目标向量寄存器，
+scheduler 另枚举由真实循环 carry 依赖确定的边界：把独立算术留在 producer，将其较小结果
+传给 consumer。只有传递的向量驻留量严格下降才采用；两阶段仍须通过同一 effect、shape、
+依赖与展开验证，最终资源 pass 仍可拒绝该候选。它不删除作者算术、隐式降低精度或取消
+所请求的流水，不把较小驻留量当作实际加速证据。
+
 静态 `physical-share` / `local-value-copy` 私有数组若能证明全部 storage aliases 留在分配作用域内，调度器将
 allocation、descriptor 和所有读写用户放入 consumer stage，并保留它们的原始内存顺序。
 仅数值输入跨 stage；私有 descriptor 不进入 carry，也不被当作 invariant 外提。expander
@@ -912,6 +926,8 @@ plan 保存完整 slot 集合与 scale/combine 资源，两者分别验证，不
 
 单 issue 的 reduced-scaled 集合超过寄存器预算时，planner 在原 slot 顺序上选择可整除的
 有界 chunk，把 direct/reduced/scale-combined set 类型与单 issue operand projection 一起冻结。
+候选 source-lane 合并若要求完整 product set 加 reduction 临时量超过预算，不得提前选定；
+该约束在候选阶段检查，让已有 chunk 路线继续形成合法的有界集合。
 materializer 按这些类型逐块生成 issue slice、widen product、reduction、scale combine，再以
 同宽 i32 merge 汇合完成的块；不要求所有宽乘积同时存活。slice 显式标出实际消费的 source part，
 资源 pass 可只 reload 需要的片段。整数尺度不跨浮点更新边界，完整 SSA 活跃集仍须通过最终预算检查。

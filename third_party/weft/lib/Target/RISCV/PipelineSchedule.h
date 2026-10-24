@@ -38,7 +38,9 @@ struct PipelineSchedule {
 // No split is a normal absence of an eligible producer/consumer cluster.
 // Invalid effects, bindings or dependency contracts are diagnostics, not an
 // invitation to retry another implementation of the source program.
-mlir::FailureOr<std::optional<PipelineSchedule>> schedulePipeline(mlir::scf::ForOp loop);
+enum class PipelineFrontier { Contraction, Carry };
+mlir::FailureOr<std::optional<PipelineSchedule>> schedulePipeline(
+    mlir::scf::ForOp loop, PipelineFrontier frontier = PipelineFrontier::Contraction);
 
 struct PipelineExpansion {
   mlir::scf::IfOp guard;

@@ -8,6 +8,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
@@ -96,6 +97,70 @@ bool canReprojectIndex(mlir::Value value, riscv::LayoutAttr required,
   return true;
 }
 
+void scalarizeLoopCarriers(mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
+  llvm::SmallVector<mlir::scf::ForOp> loops;
+  module.walk([&](mlir::scf::ForOp loop) { loops.push_back(loop); });
+  unsigned selected = 0;
+  for (auto loop : loops) {
+    auto kernel = loop->getParentOfType<riscv::KernelOp>();
+    if (!kernel || kernel.getResourcesMaterialized()) continue;
+    auto yield = mlir::cast<mlir::scf::YieldOp>(loop.getBody()->getTerminator());
+    for (unsigned index = 0; index < loop.getNumRegionIterArgs(); ++index) {
+      auto argument = loop.getRegionIterArg(index);
+      auto output = loop.getResult(index);
+      auto before = mlir::dyn_cast<riscv::ValueType>(argument.getType());
+      if (!before || before.getLayout().getCarrier() != "rvv" ||
+          before.getLayout().getValidity() != "full" || argument.use_empty() ||
+          yield.getOperand(index) == argument ||
+          riscv::fieldReadProjection(loop.getInitArgs()[index]) ||
+          riscv::fieldReadProjection(yield.getOperand(index))) continue;
+      riscv::ValueType after;
+      llvm::SmallVector<riscv::ConvertLayoutOp> uses;
+      bool legal = true;
+      for (mlir::Value value : {mlir::Value(argument), mlir::Value(output)}) {
+        for (mlir::Operation *user : value.getUsers()) {
+          auto conversion = mlir::dyn_cast<riscv::ConvertLayoutOp>(user);
+          auto type = conversion ? conversion.getResult().getType() : riscv::ValueType();
+          auto geometry = type ? riscv::RegisterCoordinates::get(type.getLayout()) : std::nullopt;
+          if (!conversion || conversion.getConversion().getKind() != "extract" ||
+              !isPureRepresentationConversion(conversion) || !geometry ||
+              type.getLayout().getCarrier() != "scalar" || type.getLayout().getValidity() != "full" ||
+              geometry->lanes() != 1 || geometry->parts() > 16 ||
+              !llvm::equal(geometry->extents(), type.getShape().asArrayRef()) ||
+              type.getShape() != before.getShape() || type.getAxisIds() != before.getAxisIds() ||
+              type.getElementType() != before.getElementType() || (after && after != type)) {
+            legal = false;
+            break;
+          }
+          after = type;
+          uses.push_back(conversion);
+        }
+        if (!legal) break;
+      }
+      if (!legal || uses.empty()) continue;
+      // These conversions consume the same already-numeric SSA values. Their
+      // original readers remain in place; only the loop's register ABI changes.
+      auto convert = [&](mlir::Value value, mlir::Operation *at) {
+        rewriter.setInsertionPoint(at);
+        auto converted = riscv::ConvertLayoutOp::create(rewriter, at->getLoc(), after, value,
+            uses.front().getConversion(), riscv::AccessAttr(),
+            riscv_internal::unselectedLeaf(rewriter));
+        riscv_internal::copyOrigin(uses.front(), converted);
+        return converted.getResult();
+      };
+      auto initial = convert(loop.getInitArgs()[index], loop);
+      auto returned = convert(yield.getOperand(index), yield);
+      loop.getInitArgsMutable()[index].set(initial);
+      argument.setType(after);
+      output.setType(after);
+      yield.getResultsMutable()[index].set(returned);
+      for (auto use : uses) rewriter.replaceOp(use, use.getInput());
+      ++selected;
+    }
+  }
+  if (selected) llvm::errs() << "weft-loop-scalar-carriers: selected=" << selected << '\n';
+}
+
 class CanonicalizeRISCVLayoutsPass
     : public mlir::PassWrapper<CanonicalizeRISCVLayoutsPass,
                                mlir::OperationPass<mlir::ModuleOp>> {
@@ -110,6 +175,7 @@ public:
 
   void runOnOperation() override {
     mlir::IRRewriter rewriter(&getContext());
+    scalarizeLoopCarriers(getOperation(), rewriter);
     getOperation().walk([&](riscv::ExtractOp extract) {
       if (extract->getParentOfType<riscv::KernelOp>().getResourcesMaterialized() ||
           extract.getIndices().size() != 1) return;
