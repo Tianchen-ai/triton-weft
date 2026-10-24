@@ -205,10 +205,13 @@ mlir::LogicalResult Emitter::compileIMEFragmentStorageLoad(riscv::IMEFragmentSto
 mlir::LogicalResult Emitter::compileIMEFragmentChunkSplitLoad(riscv::IMEFragmentChunkSplitLoadOp operation) {
   Binding projection = bindings.lookup(operation.getField());
   auto field = fieldFor(projection);
+  const auto instruction = operation.getLeaf().getInstruction();
+  const bool nibbles = instruction == "ime.fragment-nibbles-signed" ||
+                       instruction == "ime.fragment-nibbles-unsigned";
   if (projection.kind != Binding::Kind::Field || !field || projection.field.index ||
       !projection.field.relativeIndices.empty() ||
-      (operation.getLeaf().getInstruction() != "spacemit-ime2-vupack128" &&
-       operation.getLeaf().getInstruction() != "rvv.fragment-chunk-slide"))
+      (instruction != "spacemit-ime2-vupack128" &&
+       instruction != "rvv.fragment-chunk-slide" && !nibbles))
     return fail(operation, "chunk split requires its selected full field and local permutation");
   Binding owner = bindings.lookup(projection.field.owner);
   if (owner.kind == Binding::Kind::Slice) {
@@ -221,13 +224,63 @@ mlir::LogicalResult Emitter::compileIMEFragmentChunkSplitLoad(riscv::IMEFragment
     return fail(operation, "chunk split lost the declared record storage");
   auto fragment = operation.getLow().getType();
   const int64_t rows = fragment.getPacking().getRowsPerTile();
+  const bool rowGuard = operation.getLeaf().getParameters()[1];
+  const auto source = operation.getField().getDefiningOp<riscv::FieldOp>()
+                          .getOwner().getDefiningOp<riscv::LoadOp>().getRegion();
+  const auto rowExtent = rowGuard ? descriptorExtent(source,
+      fragment.getAxisIds()[fragment.getPacking().getAxisOrder()[0]]) : std::optional<std::string>();
+  if (rowGuard && !rowExtent)
+    return fail(operation, "guarded chunk supply lost its active row extent");
   const std::string first = fieldStorageAddress(owner, *field, storage->byte);
   Binding low, high;
   low.kind = high.kind = Binding::Kind::Fragment;
   low.fragmentFamily = high.fragmentFamily = fragment.getFamily().str();
-  if (operation.getLeaf().getInstruction() == "rvv.fragment-chunk-slide") {
+  // Each byte contains adjacent logical elements. Widening before separating
+  // its nibbles produces one little-endian i16 lane containing two i8 cells.
+  // Decode at most four declared rows; a second cohort retains its own address.
+  auto decodeNibbles = [&](const std::string &address, int64_t rowCount, int64_t packedGroups = 0) {
+    const std::string count = std::to_string(rowCount * 16);
+    const std::string inputLMUL = packedGroups ? "m" + std::to_string(packedGroups) : "mf2";
+    const std::string outputLMUL = packedGroups ? "m" + std::to_string(packedGroups * 2) : "m1";
+    const std::string bytes = fresh("ime_nibbles"), wide = fresh("ime_nibbles_wide");
+    const std::string lower = fresh("ime_nibbles_low"), upper = fresh("ime_nibbles_high");
+    const std::string paired = fresh("ime_nibbles_pair"), decoded = fresh("ime_nibbles_decoded");
+    line("vuint8" + inputLMUL + "_t " + bytes + " = __riscv_vle8_v_u8" + inputLMUL + "((const uint8_t *)" + address + ", " + count + ");");
+    line("vuint16" + outputLMUL + "_t " + wide + " = __riscv_vzext_vf2_u16" + outputLMUL + "(" + bytes + ", " + count + ");");
+    line("vuint16" + outputLMUL + "_t " + upper + " = __riscv_vsll_vx_u16" + outputLMUL + "(" + wide + ", 4, " + count + ");");
+    line("vuint16" + outputLMUL + "_t " + lower + " = __riscv_vor_vv_u16" + outputLMUL + "(" + wide + ", " + upper + ", " + count + ");");
+    line("vuint16" + outputLMUL + "_t " + paired + " = __riscv_vand_vx_u16" + outputLMUL + "(" + lower + ", 3855, " + count + ");");
+    line("vint8" + outputLMUL + "_t " + decoded + " = __riscv_vreinterpret_v_u8" + outputLMUL + "_i8" + outputLMUL + "(__riscv_vreinterpret_v_u16" + outputLMUL + "_u8" + outputLMUL + "(" + paired + "));");
+    if (instruction == "ime.fragment-nibbles-signed") {
+      const std::string lanes = std::to_string(rowCount * 32);
+      line(decoded + " = __riscv_vsra_vx_i8" + outputLMUL + "(__riscv_vsll_vx_i8" + outputLMUL + "(" + decoded + ", 4, " + lanes + "), 4, " + lanes + ");");
+    }
+    return decoded;
+  };
+  auto readChunk = [&](const std::string &address, int64_t firstRow) {
+    const std::string result = fresh("ime_chunk_read");
+    const bool guarded = rowGuard && firstRow > 0;
+    line("vint8m1_t " + result + ";");
+    if (guarded)
+      line("if ((" + *rowExtent + ") > " + std::to_string(firstRow) + ") {");
+    if (nibbles)
+      line(result + " = " + decodeNibbles(address, std::min<int64_t>(rows, 4)) + ";");
+    else
+      line(result + " = __riscv_vle8_v_i8m1((const int8_t *)" + address + ", " +
+           std::to_string(std::min<int64_t>(rows, 4) * 32) + ");");
+    if (guarded) {
+      line("} else {");
+      line("  " + result + " = __riscv_vmv_v_x_i8m1(0, 128);");
+      line("}");
+    }
+    return result;
+  };
+  if (rows == 1) {
     const std::string value = fresh("ime_chunk"), upper = fresh("ime_chunk_high");
-    line("vint8m1_t " + value + " = __riscv_vle8_v_i8m1((const int8_t *)" + first + ", 32);");
+    if (nibbles)
+      line("vint8m1_t " + value + " = " + decodeNibbles(first, 1) + ";");
+    else
+      line("vint8m1_t " + value + " = __riscv_vle8_v_i8m1((const int8_t *)" + first + ", 32);");
     line("vint8m1_t " + upper + " = __riscv_vslidedown_vx_i8m1(" + value + ", 16, 16);");
     low.parts.push_back(value);
     high.parts.push_back(upper);
@@ -236,13 +289,20 @@ mlir::LogicalResult Emitter::compileIMEFragmentChunkSplitLoad(riscv::IMEFragment
     return mlir::success();
   }
   const int64_t loadGroups = operation.getLeaf().getParameters()[0];
-  const int64_t atomsPerLoad = rows == 8 && loadGroups > 1 ? loadGroups / 2 : 1;
+  const int64_t atomsPerLoad = rows == 8 && loadGroups > 1 ? (nibbles ? loadGroups : loadGroups / 2) : 1;
+  const bool groupedNibbles = nibbles && loadGroups > 1;
+  const int64_t decodedGroups = groupedNibbles ? loadGroups * 2 : loadGroups;
   std::string loaded;
   llvm::SmallVector<std::string> pairs, lefts, rights;
   for (int64_t part = 0; part < riscv::fragmentPartCount(fragment); ++part) {
     const std::string at = "((const int8_t *)" +
         fieldStorageAddress(owner, *field, storage->byte, std::to_string(part * rows)) + ")";
-    if (part % atomsPerLoad == 0) {
+    if (groupedNibbles) {
+      if (part % atomsPerLoad == 0)
+        loaded = decodeNibbles(at, loadGroups * 8, loadGroups);
+    } else if (nibbles || rowGuard) {
+      loaded = readChunk(at, part * rows);
+    } else if (part % atomsPerLoad == 0) {
       loaded = fresh("ime_chunk_load");
       const std::string suffix = "i8m" + std::to_string(loadGroups);
       line("vint8m" + std::to_string(loadGroups) + "_t " + loaded +
@@ -250,16 +310,20 @@ mlir::LogicalResult Emitter::compileIMEFragmentChunkSplitLoad(riscv::IMEFragment
            std::to_string(loadGroups > 1 ? loadGroups * 128 : std::min<int64_t>(rows, 4) * 32) + ");");
     }
     const int64_t subregister = (part % atomsPerLoad) * 2;
-    const std::string left = loadGroups == 1 ? loaded : "__riscv_vget_v_i8m" +
-        std::to_string(loadGroups) + "_i8m1(" + loaded + ", " + std::to_string(subregister) + ")";
+    const std::string left = decodedGroups == 1 ? loaded : "__riscv_vget_v_i8m" +
+        std::to_string(decodedGroups) + "_i8m1(" + loaded + ", " + std::to_string(subregister) + ")";
     std::string right = left;
-    if (loadGroups > 1) {
-      right = "__riscv_vget_v_i8m" + std::to_string(loadGroups) + "_i8m1(" +
+    if (decodedGroups > 1) {
+      right = "__riscv_vget_v_i8m" + std::to_string(decodedGroups) + "_i8m1(" +
           loaded + ", " + std::to_string(subregister + 1) + ")";
     } else if (rows == 8) {
-      right = fresh("ime_chunk_right");
-      line("vint8m1_t " + right + " = __riscv_vle8_v_i8m1((const int8_t *)" +
-           fieldStorageAddress(owner, *field, storage->byte, std::to_string(part * rows + 4)) + ", 128);");
+      const std::string next = fieldStorageAddress(owner, *field, storage->byte, std::to_string(part * rows + 4));
+      if (nibbles || rowGuard) {
+        right = readChunk(next, part * rows + 4);
+      } else {
+        right = fresh("ime_chunk_right");
+        line("vint8m1_t " + right + " = __riscv_vle8_v_i8m1((const int8_t *)" + next + ", 128);");
+      }
     }
     const std::string pair = fresh("ime_chunk_pair");
     line("vint8m2_t " + pair + ";");

@@ -18,8 +18,9 @@ int64_t fragmentPartResourceGroups(FragmentType fragment);
 std::optional<AccessAttr> fragmentFieldReadAccess(mlir::Value input, FragmentType result);
 std::optional<AccessAttr> fragmentChunkReadAccess(mlir::Value field, FragmentType result);
 int64_t fragmentChunkLoadGroups(mlir::Value field, FragmentType fragment, TargetAttr target);
-int64_t fragmentChunkTemporaryGroups(FragmentType fragment);
-llvm::StringRef fragmentChunkInstruction(FragmentType fragment);
+bool fragmentChunkNeedsRowGuard(mlir::Value field, FragmentType fragment);
+int64_t fragmentChunkTemporaryGroups(mlir::Value field, FragmentType fragment);
+llvm::StringRef fragmentChunkInstruction(mlir::Value field, FragmentType fragment);
 std::optional<AccessAttr> fragmentWindowReadAccess(mlir::Value field,
     mlir::Value logicalBase, FragmentType result);
 // Exact row-word supply geometry. The alignment in this access is usable only

@@ -352,7 +352,7 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
         mlir::cast<riscv::ValueType>(projection.getType()).getElementType());
     const int64_t bits = integer.getWidth();
     const int64_t innerAxis = fragment.getAxisIds()[fragment.getPacking().getAxisOrder()[1]];
-    if (bits == 8 && !pointwise) {
+    if ((bits == 8 || bits == 4) && !pointwise) {
       auto chunkAccess = riscv::fragmentChunkReadAccess(field.getResult(), fragment);
       auto point = originPoint(projection, innerAxis);
       if (chunkAccess && point && field->getNumOperands() == 1) {
@@ -361,15 +361,16 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
           mlir::OpBuilder::InsertionGuard guard(rewriter);
           rewriter.setInsertionPointAfter(load);
           auto fullField = mlir::cast<riscv::FieldOp>(rewriter.clone(*field));
-          const auto instruction = riscv::fragmentChunkInstruction(fragment);
+          const auto instruction = riscv::fragmentChunkInstruction(fullField.getResult(), fragment);
           const int64_t loadGroups = riscv::fragmentChunkLoadGroups(fullField.getResult(), fragment,
               operation->getParentOfType<riscv::KernelOp>().getTarget());
           chunks = riscv::IMEFragmentChunkSplitLoadOp::create(rewriter, load.getLoc(),
               fragment, fragment, fullField.getResult(), *chunkAccess,
               riscv_internal::leaf(rewriter, "ime", "fragment-chunk-split-load",
                   instruction, instruction,
-                  0, 0, riscv::fragmentChunkTemporaryGroups(fragment), 2 * fragment.getResourceGroups(),
-                  "none", "agnostic", {loadGroups}));
+                  0, 0, riscv::fragmentChunkTemporaryGroups(fullField.getResult(), fragment), 2 * fragment.getResourceGroups(),
+                  "none", "agnostic", {loadGroups,
+                      riscv::fragmentChunkNeedsRowGuard(fullField.getResult(), fragment)}));
           copyOrigin(load, chunks);
         }
         auto blockSize = mlir::arith::ConstantIndexOp::create(rewriter, operation->getLoc(), 32);

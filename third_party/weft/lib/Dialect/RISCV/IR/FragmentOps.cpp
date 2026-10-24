@@ -91,7 +91,7 @@ weft::riscv::usedInstructionExtensions(KernelOp kernel) {
   auto splits = kernel.walk([&](IMEFragmentChunkSplitLoadOp split) -> mlir::WalkResult {
     if (mlir::failed(split.verify())) return mlir::WalkResult::interrupt();
     const auto *contract = findRISCVFragmentCapability(split.getLow().getType().getFamily());
-    if (split.getLeaf().getInstruction() == contract->chunkSplitInstruction)
+    if (split.getLow().getType().getPacking().getRowsPerTile() > 1)
       extensions.push_back(contract->extension);
     return mlir::WalkResult::advance();
   });
@@ -193,15 +193,38 @@ std::optional<AccessAttr> weft::riscv::fragmentChunkReadAccess(
   auto type = mlir::dyn_cast<ValueType>(input.getType());
   auto capability = field ? fragmentCapability(field, result.getFamily()) : FragmentCapabilityAttr();
   const auto *contract = findRISCVFragmentCapability(result.getFamily());
+  auto element = type ? mlir::dyn_cast<mlir::IntegerType>(type.getElementType()) : mlir::IntegerType();
+  const bool nibbles = element && !element.isSignless() && element.getWidth() == 4;
   if (!field || !owner || owner.getSnapshotStorage() || !slice || !type || !capability ||
       !contract || contract->chunkSplitInstruction != "spacemit-ime2-vupack128" ||
       contract->vlenBits != 1024 || memory.getElements() != 32 ||
       type.getShape().size() != 2 || type.getAxisIds().size() != 2 ||
       type.getShape()[1] != 32 || field.getAccess().getMapping() != "natural" ||
-      field.getAccess().getFieldChunkBytes() != 32 || field.getAccess().getBitOffset() % 8 ||
-      !integerSignednessMatches(type.getElementType(), "signed") || elementBitWidth(type.getElementType()) != 8 ||
+      field.getAccess().getFieldChunkBytes() != (nibbles ? 16 : 32) || field.getAccess().getBitOffset() % 8 ||
+      (!nibbles && (!integerSignednessMatches(type.getElementType(), "signed") || elementBitWidth(type.getElementType()) != 8)) ||
       (result.getRole() != "lhs" && result.getRole() != "rhs"))
     return std::nullopt;
+  if (nibbles) {
+    auto parent = field->getParentOfType<KernelOp>();
+    if (!parent || !llvm::is_contained(parent.getTarget().getLegalLMULEighths().asArrayRef(), 4))
+      return std::nullopt;
+    auto encoding = mlir::dyn_cast<kernel::EncodingType>(memory.getEncoding());
+    auto module = field->getParentOfType<mlir::ModuleOp>();
+    if (!encoding || !module) return std::nullopt;
+    llvm::StringRef family = encoding.getKind() == "base" ? encoding.getFamily() : llvm::StringRef();
+    module.walk([&](DerivedEncodingOp derived) {
+      if (family.empty() && derived.getResultFamily() == encoding.getFamily() &&
+          derived.getLayoutIdentity() == encoding.getLayoutIdentity() &&
+          derived.getParameterValues() == encoding.getParameters().asArrayRef())
+        family = derived.getSourceFamily();
+    });
+    bool nativeOrder = false;
+    module.walk([&](EncodingDeclOp declaration) {
+      if (declaration.getSymName() == family)
+        nativeOrder = declaration.getByteOrder() == "little" && declaration.getBitOrder() == "lsb_first";
+    });
+    if (!nativeOrder) return std::nullopt;
+  }
   const auto packing = result.getPacking();
   if (packing != (result.getRole() == "lhs" ? capability.getLhsPacking() : capability.getRhsPacking()) ||
       packing.getColumnsPerTile() != 16 || fragmentPartResourceGroups(result) != 1 ||
@@ -232,7 +255,15 @@ std::optional<AccessAttr> weft::riscv::fragmentChunkReadAccess(
   return row && inner ? std::optional<AccessAttr>(field.getAccess()) : std::nullopt;
 }
 
+bool weft::riscv::fragmentChunkNeedsRowGuard(mlir::Value input, FragmentType fragment) {
+  auto field = input.getDefiningOp<FieldOp>();
+  auto load = field ? field.getOwner().getDefiningOp<LoadOp>() : LoadOp();
+  return load && load.getRegion().getType().getInterleaveRows() <
+      fragment.getShape()[fragment.getPacking().getAxisOrder()[0]];
+}
+
 int64_t weft::riscv::fragmentChunkLoadGroups(mlir::Value fieldValue, FragmentType fragment, TargetAttr target) {
+  const bool nibbles = elementBitWidth(mlir::cast<ValueType>(fieldValue.getType()).getElementType()) == 4;
   if (fragment.getPacking().getRowsPerTile() != 8) return 1;
   auto field = fieldValue.getDefiningOp<FieldOp>();
   auto load = field ? field.getOwner().getDefiningOp<LoadOp>() : LoadOp();
@@ -240,6 +271,14 @@ int64_t weft::riscv::fragmentChunkLoadGroups(mlir::Value fieldValue, FragmentTyp
                   fragment.getShape()[fragment.getPacking().getAxisOrder()[0]])
     return 1;
   const int64_t parts = fragmentPartCount(fragment);
+  if (nibbles) {
+    for (int64_t groups : {4, 2})
+      if (parts % groups == 0 &&
+          llvm::is_contained(target.getLegalLMULEighths().asArrayRef(), groups * 8) &&
+          llvm::is_contained(target.getLegalLMULEighths().asArrayRef(), groups * 16))
+        return groups;
+    return 1;
+  }
   for (int64_t groups : {4, 2})
     if ((parts * 2) % groups == 0 &&
         llvm::is_contained(target.getLegalLMULEighths().asArrayRef(), groups * 8))
@@ -247,15 +286,21 @@ int64_t weft::riscv::fragmentChunkLoadGroups(mlir::Value fieldValue, FragmentTyp
   return 1;
 }
 
-int64_t weft::riscv::fragmentChunkTemporaryGroups(FragmentType fragment) {
+int64_t weft::riscv::fragmentChunkTemporaryGroups(mlir::Value field, FragmentType fragment) {
+  if (elementBitWidth(mlir::cast<ValueType>(field.getType()).getElementType()) == 4)
+    return std::max<int64_t>(6, fragmentPartCount(fragment) * 2);
   if (fragment.getPacking().getRowsPerTile() == 1) return 0;
   return std::max<int64_t>(4, fragmentPartCount(fragment) *
       (fragment.getPacking().getRowsPerTile() == 8 ? 2 : 1));
 }
 
-llvm::StringRef weft::riscv::fragmentChunkInstruction(FragmentType fragment) {
+llvm::StringRef weft::riscv::fragmentChunkInstruction(mlir::Value field, FragmentType fragment) {
   const auto *contract = findRISCVFragmentCapability(fragment.getFamily());
   if (!contract) return "";
+  auto integer = mlir::dyn_cast<mlir::IntegerType>(mlir::cast<ValueType>(field.getType()).getElementType());
+  if (!integer) return "";
+  if (integer.getWidth() == 4)
+    return integer.isSigned() ? "ime.fragment-nibbles-signed" : "ime.fragment-nibbles-unsigned";
   return fragment.getPacking().getRowsPerTile() == 1
       ? "rvv.fragment-chunk-slide" : llvm::StringRef(contract->chunkSplitInstruction);
 }
@@ -268,10 +313,11 @@ mlir::LogicalResult IMEFragmentChunkSplitLoadOp::verify() {
   const int64_t loadGroups = fragmentChunkLoadGroups(getField(), fragment, target);
   const auto parameters = getLeaf().getParameters().asArrayRef();
   if (!access || !contract || getHigh().getType() != fragment || getAccess() != *access ||
-      !exactLeaf(getLeaf(), "ime", "fragment-chunk-split-load", fragmentChunkInstruction(fragment), "none", "agnostic") ||
+      !exactLeaf(getLeaf(), "ime", "fragment-chunk-split-load", fragmentChunkInstruction(getField(), fragment), "none", "agnostic") ||
       getLeaf().getFragmentGroups() != 2 * fragment.getResourceGroups() ||
-      getLeaf().getTemporaryGroups() != fragmentChunkTemporaryGroups(fragment) || getLeaf().getLocalBytes() ||
-      parameters.size() != 1 || parameters[0] != loadGroups)
+      getLeaf().getTemporaryGroups() != fragmentChunkTemporaryGroups(getField(), fragment) || getLeaf().getLocalBytes() ||
+      parameters.size() != 2 || parameters[0] != loadGroups ||
+      parameters[1] != fragmentChunkNeedsRowGuard(getField(), fragment))
     return emitOpError("fragment chunk split requires complete block32 row chunks, two exact K16 results and registered packing");
   return mlir::success();
 }

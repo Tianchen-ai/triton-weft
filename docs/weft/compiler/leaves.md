@@ -295,8 +295,19 @@ field load 的 scope；snapshot、尾块或不匹配 chunk 不进入该局部路
 读作 payload，也不要求改变持久 Encoding。跨 cohort 形式固定单寄存器读取，不能采用
 假定整段连续的 grouped load。完整 atom 的行合并同样可服务 tail 标记的数值载体；该
 handoff 只重排寄存器，实际尾部写入仍由原 store 的 active coordinates 控制。
+跨 cohort 供应的 leaf 显式记录 row guard：每个四行窗口只有在源 slice 的 active rows
+覆盖它时才形成地址并读取，否则给非逻辑行供应零值；完整 cohort 的存储合同保证窗口内
+不存在缺失行。guard 与 load-group 数一起核验，不能以完整输出 fragment 推定源行存在。
 单行 chunk 无需行交错：按原 byte 对齐读取 32 个 byte，低半保留
 原载体，高半选择标准 RVV slide，两个 K16 结果仍只暴露各自的有效字节。
+同一供应操作可读取自然 little-endian、lsb-first 的完整 16-byte 行 chunk，恢复其中
+32 个 signed/unsigned 4-bit 元素，再供应上述 i8 fragments。leaf 明确保存 signedness，
+每次只展开最多四行的原始字节；跨 cohort 的第二部分保留独立地址。unsigned 元素保持
+0…15，signed 元素按 4-bit 符号扩展，不改变显式 i8 转换或 i32 contraction 合同。
+解码与行重排的联合临时寄存器计入资源；这仍使用已注册的 i8 MMA，不表示 i4 矩阵 ISA 支持。
+完整连续 cohort 可按 leaf 的 load-group 参数合并二或四个 atom 的 packed 读取，以精确
+加倍的 LMUL 解码后提取原有 K16 fragments；输入和双宽载体必须都在目标合法 LMUL 集合中。
+跨 cohort 或不足完整 group 的供应保持独立窗口，不能扩大读取范围。
 
 同一 atom 可在 M/N 上组成不超过四个 atom 的完整局部 product，K 仍为 8。FragmentType
 以 fragment factors 保存单 atom 坐标、replica factors 保存有界重复数，shape 和资源组覆盖
