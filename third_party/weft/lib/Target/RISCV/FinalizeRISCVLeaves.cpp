@@ -790,6 +790,33 @@ mlir::LogicalResult materializeFieldReads(mlir::ModuleOp module) {
     riscv_internal::copyOrigin(input.getDefiningOp(), read);
     extract.getInputMutable().assign(read.getResult());
   }
+  llvm::SmallVector<riscv::FieldReadOp> reads;
+  module.walk([&](riscv::FieldReadOp read) { reads.push_back(read); });
+  for (auto read : reads) {
+    auto input = read.getInput().getType(), result = read.getResult().getType();
+    auto field = riscv::fieldReadProjection(read.getInput());
+    auto kernel = read->getParentOfType<riscv::KernelOp>();
+    auto encoding = field ? mlir::dyn_cast<kernel::EncodingType>(
+        riscv_internal::logicalElement(field.getOwner().getType())) : kernel::EncodingType();
+    if (!kernel || kernel.getResourcesMaterialized() || !encoding ||
+        input.getLayout().getCarrier() != "scalar" || result.getLayout().getCarrier() != "rvv" ||
+        riscv_internal::interleaveRows(field, encoding) <= 1 ||
+        !riscv_internal::fieldFacts(field).scalarPerRecord ||
+        riscv::isContiguousInterleavedScalarRead(read.getInput(), result, read.getAccess()))
+      continue;
+    auto temporary = riscv::fieldReadTemporaryGroups(read.getInput(), input, read.getAccess(), read.getIndices());
+    if (!temporary) return read.emitError("record scalar supply has no closed resources");
+    auto instruction = riscv::fieldReadInstruction(read.getInput(), input, read.getAccess());
+    read.getResult().setType(input);
+    read.setLeafAttr(riscv_internal::leaf(rewriter, "transfer", "field-read", instruction,
+                                        instruction, 0, 0, *temporary, 0, "none", "exact"));
+    rewriter.setInsertionPointAfter(read);
+    auto conversion = riscv::ConvertLayoutOp::create(rewriter, read.getLoc(), result, read.getResult(),
+        riscv_internal::layoutConversion(rewriter, input.getLayout(), result.getLayout()),
+        riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
+    riscv_internal::copyOrigin(read, conversion);
+    read.getResult().replaceAllUsesExcept(conversion.getResult(), conversion);
+  }
   return mlir::success();
 }
 

@@ -192,6 +192,12 @@ window。source field 是一维连续 i8/i16/i32 storage；`source_count` 等于
 拼装 scalar；一个 RVV 临时载体计入资源。它不批量展开多个 scalar 字段、不提高地址对齐，
 也不把不存在的行或不完整字段加入读取范围。
 
+交错记录的 scalar 字段在 consumer-layout 改写后仍保留其读取边界。若记录窗口不能证明
+处于同一连续 cohort 中，最终物化先按原记录坐标读取 scalar tuple，再显式转换为消费者的
+RVV 布局；不能因消费者只有一个 lane axis 就把跨 cohort 的字段当作一次连续向量读取。
+encoded subview 的静态偏移与动态偏移都参与原记录坐标计算，包含行 cohort 选择和 K record
+偏移；形成 record binding 时不得丢弃已声明的静态 offset。
+
 `encoded.field-read.record-element` 读取非交错记录中同一 payload 坐标：payload 的最后一轴
 被一个显式 scalar index 消去，保留轴按已选 record stride 进入 RVV lane。当前接受 byte 内
 完整的 unsigned 1/2/4/8-bit natural 或低位优先 grouped/layered 元素；typed projection、完整
@@ -284,6 +290,11 @@ field load 的 scope；snapshot、尾块或不匹配 chunk 不进入该局部路
 后续 K16 issue 显式选择对应结果，不能在 emitter 新增外围遍历。`ime_unpack` 可使用注册的
 `vpack` 行合并序列，将 N32 的多个 accumulator atom 转为已选 RVV 行布局；输入、输出
 和中间寄存器均参与资源核验，不增加算术或改变累加边界。
+若完整 M8 atom 来自两个 M4 cohort，chunk supply 保留两个独立的记录地址，各读取其
+128-byte payload，再应用同一局部 permutation；不将两个 cohort 之间的 scale 或其它 K 块
+读作 payload，也不要求改变持久 Encoding。跨 cohort 形式固定单寄存器读取，不能采用
+假定整段连续的 grouped load。完整 atom 的行合并同样可服务 tail 标记的数值载体；该
+handoff 只重排寄存器，实际尾部写入仍由原 store 的 active coordinates 控制。
 单行 chunk 无需行交错：按原 byte 对齐读取 32 个 byte，低半保留
 原载体，高半选择标准 RVV slide，两个 K16 结果仍只暴露各自的有效字节。
 
@@ -299,6 +310,8 @@ accumulator 交到 RVV 时按明确坐标拼接，不能改变作者 K 累加、
 合同。整数累加遵守原有 i32 数值合同，块级浮点缩放、作者 Level 与状态边界不移动。
 已有 packed-window pass 可展开有界 issue 并共享同一存储窗口；dense 输入使用显式局部访存窗口，
 存在别名写入的 numeric Value 保留其原快照。资源收口继续分析完整的展开与累加器活跃区间。
+contraction 的显式 `unroll` 绑定传递给这一物理 issue 循环，由共同展开 pass 实施，因子不超过
+完整 K atom 数；它不再丢失该配置，也不将展开转交给 terminal emitter。
 
 operand supply 有两种显式局部表示：`ime_pack` 消费已选的连续内轴 RVV slices，以寄存器拼接
 完成 packing；`ime_fragment_storage_load` 只在 source field 的整 chunk、row cohort、point partition/

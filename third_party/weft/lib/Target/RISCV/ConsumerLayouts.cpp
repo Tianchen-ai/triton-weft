@@ -297,14 +297,21 @@ std::optional<Work> work(riscv::KernelOp kernel) {
           count += *broadcasts;
         }
       }
+      const int64_t activeBits = type.getLayout().getVl() * type.getLayout().getSew();
+      arithmetic *= std::max<int64_t>(1, (activeBits + kernel.getTarget().getVlenBits() - 1) /
+                                             kernel.getTarget().getVlenBits());
     } else if (auto unpack = mlir::dyn_cast<riscv::IMEUnpackOp>(op)) {
-      auto handoff = riscv::fragmentRVVHandoffLayout(unpack.getInput().getType(), kernel.getTarget());
-      if (!handoff) { complete = false; return; }
-      auto from = mlir::cast<riscv::ValueType>(withLayout(unpack.getResult().getType(), *handoff));
-      auto slices = riscv::rvvLayoutRepackSlices(from, unpack.getResult().getType());
-      if (!slices) { complete = false; return; }
-      for (auto slice : *slices)
-        count += (slice.sourceOffset != 0) + (slice.resultOffset != 0);
+      if (riscv::fragmentUnpackInstruction(unpack.getInput().getType(), unpack.getResult().getType()) != "ime.unpack.rvv") {
+        count = 4 * ((unpack.getResult().getType().getShape()[0] + 3) / 4);
+      } else {
+        auto handoff = riscv::fragmentRVVHandoffLayout(unpack.getInput().getType(), kernel.getTarget());
+        if (!handoff) { complete = false; return; }
+        auto from = mlir::cast<riscv::ValueType>(withLayout(unpack.getResult().getType(), *handoff));
+        auto slices = riscv::rvvLayoutRepackSlices(from, unpack.getResult().getType());
+        if (!slices) { complete = false; return; }
+        for (auto slice : *slices)
+          count += (slice.sourceOffset != 0) + (slice.resultOffset != 0);
+      }
     } else if (auto repack = mlir::dyn_cast<riscv::ConvertLayoutOp>(op);
                repack && repack.getConversion().getKind() == "lane_repack") {
       auto slices = riscv::rvvLayoutRepackSlices(repack.getInput().getType(), repack.getResult().getType());
@@ -530,10 +537,15 @@ static mlir::LogicalResult propagateConsumerLayouts(
     auto pressure = legal ? physicalRegisterPressure(*trial) : std::nullopt;
     const bool resourceLegal = pressure && pressure->total() <= kernel.getTarget().getVectorRegisters();
     auto candidate = legal ? work(*trial) : std::nullopt;
-    const bool selected = resourceLegal && candidate && (grouped || lessWork(*candidate, *baseline));
+    bool registeredRowMerge = false;
+    kernel.walk([&](riscv::IMEUnpackOp unpack) {
+      registeredRowMerge |= riscv::fragmentUnpackInstruction(unpack.getInput().getType(), unpack.getResult().getType()) != "ime.unpack.rvv";
+    });
+    const bool preferGrouped = grouped && (!registeredRowMerge || kernel.getLocalTileStrategy() == "register-grouped");
+    const bool selected = resourceLegal && candidate && (preferGrouped || lessWork(*candidate, *baseline));
     llvm::errs() << "weft-consumer-layout: candidates=2 requested=" << kernel.getLocalTileStrategy() << " selected="
                  << (selected ? (grouped ? "register-grouped" : completeRow ? "complete-row" : "fragment-order") : "existing")
-                 << " reason=" << (!legal ? "unsupported-coordinate-edge" : !resourceLegal ? "resident-budget" : !candidate ? "unknown-local-work" : grouped ? "target-register-group-rule" : selected ? "less-inner-issue-work" : "no-issue-work-reduction")
+                 << " reason=" << (!legal ? "unsupported-coordinate-edge" : !resourceLegal ? "resident-budget" : !candidate ? "unknown-local-work" : preferGrouped ? "target-register-group-rule" : selected ? "less-inner-issue-work" : "no-issue-work-reduction")
                  << " resident-groups=" << (pressure ? pressure->total() : -1)
                  << " scope=pointwise+broadcast+conversion+initializer estimate=pre-system-compiler cycle-estimate=unavailable work-by-loop-depth(alu,movement)=";
     for (auto [depth, count] : *baseline) {
@@ -550,7 +562,7 @@ static mlir::LogicalResult propagateConsumerLayouts(
                    << " side=" << (pressure->before ? "before" : "after")
                    << " vector=" << pressure->vector << " fragment=" << pressure->fragment << '\n';
     if (!rejected.empty()) llvm::errs() << "weft-consumer-layout: rejected=" << rejected << '\n';
-    if (grouped && !selected) {
+    if (grouped && !selected && (!registeredRowMerge || kernel.getLocalTileStrategy() == "register-grouped")) {
       kernel.emitOpError("selected register-grouped realization has no legal closed physical program");
       return mlir::failure();
     }

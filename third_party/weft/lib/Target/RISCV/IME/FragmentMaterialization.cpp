@@ -137,6 +137,11 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
     };
     auto loop = mlir::scf::ForOp::create(rewriter, operation->getLoc(), constant(0),
         constant(reductionExtent / atomK), constant(1), mlir::ValueRange{zero.getResult()});
+    if (auto schedule = operation->getAttrOfType<riscv::ScheduleAttr>("schedule")) {
+      const int64_t factor = std::min<int64_t>(schedule.getUnroll(), reductionExtent / atomK);
+      if (factor > 1)
+        loop->setAttr("weft.riscv.unroll_factor", rewriter.getI64IntegerAttr(factor));
+    }
     loop->setAttr("weft.riscv.system_unroll", rewriter.getStringAttr("disable"));
     loop->setAttr("weft.riscv.direction", rewriter.getStringAttr("ascending"));
     copyOrigin(operation, loop);
@@ -341,7 +346,7 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
     auto field = riscv::fieldReadProjection(projection);
     auto load = field ? sourceLoad(field.getOwner()) : riscv::LoadOp();
     auto access = riscv::fragmentFieldReadAccess(projection, fragment);
-    if (!access || !load || needsReadSnapshot(load))
+    if (!load || needsReadSnapshot(load))
       return {};
     auto integer = mlir::cast<mlir::IntegerType>(
         mlir::cast<riscv::ValueType>(projection.getType()).getElementType());
@@ -357,7 +362,7 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
           rewriter.setInsertionPointAfter(load);
           auto fullField = mlir::cast<riscv::FieldOp>(rewriter.clone(*field));
           const auto instruction = riscv::fragmentChunkInstruction(fragment);
-          const int64_t loadGroups = riscv::fragmentChunkLoadGroups(fragment,
+          const int64_t loadGroups = riscv::fragmentChunkLoadGroups(fullField.getResult(), fragment,
               operation->getParentOfType<riscv::KernelOp>().getTarget());
           chunks = riscv::IMEFragmentChunkSplitLoadOp::create(rewriter, load.getLoc(),
               fragment, fragment, fullField.getResult(), *chunkAccess,
@@ -384,6 +389,7 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
         return selected.getResult(0);
       }
     }
+    if (!access) return {};
     auto point = bits < 8 ? originPoint(projection, innerAxis) : riscv::PhysicalPointOp();
     if (bits < 8 && !point)
       return {};

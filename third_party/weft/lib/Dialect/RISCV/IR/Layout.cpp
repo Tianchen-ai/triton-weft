@@ -468,7 +468,8 @@ llvm::StringRef weft::riscv::fragmentUnpackInstruction(FragmentType input, Value
       input.getPacking().getRowsPerTile() == shape[0] && input.getPacking().getColumnsPerTile() == 8 &&
       fragmentPartCount(input) == 4 && fragmentPartResourceGroups(input) == 2 &&
       layout.getCarrier() == "rvv" && layout.getSew() == 32 && layout.getLmulEighths() == 8 &&
-      layout.getVl() == 32 && layout.getValidity() == "full" && layout.getReplicaGroup() == 1 &&
+      layout.getVl() == 32 &&
+      (layout.getValidity() == "full" || layout.getValidity() == "tail") && layout.getReplicaGroup() == 1 &&
       layout.getLaneFactors()[0] == 1 && layout.getLaneFactors()[1] == 32 &&
       layout.getTimeFactors()[1] == 1 && layout.getReplicaFactors()[1] == 1 &&
       llvm::all_of(layout.getFragmentFactors().asArrayRef(), [](int64_t x) { return x == 1; }) &&

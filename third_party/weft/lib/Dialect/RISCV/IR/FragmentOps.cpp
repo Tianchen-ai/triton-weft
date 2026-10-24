@@ -210,8 +210,11 @@ std::optional<AccessAttr> weft::riscv::fragmentChunkReadAccess(
   const int64_t rows = type.getShape()[0], cohort = memory.getInterleaveRows();
   const int64_t rowAxis = result.getAxisIds()[packing.getAxisOrder()[0]];
   const int64_t innerAxis = result.getAxisIds()[packing.getAxisOrder()[1]];
+  const bool splitCohorts = packing.getRowsPerTile() == 8 && cohort >= 4 &&
+      cohort < rows && rows % cohort == 0 && cohort % 4 == 0;
   if (rows != result.getShape()[packing.getAxisOrder()[0]] || rows <= 0 ||
-      cohort < rows || cohort % rows || type.getAxisIds()[0] != rowAxis || type.getAxisIds()[1] != innerAxis)
+      (!splitCohorts && (cohort < rows || cohort % rows)) ||
+      type.getAxisIds()[0] != rowAxis || type.getAxisIds()[1] != innerAxis)
     return std::nullopt;
   bool row = false, inner = false;
   for (mlir::Value index : slice.getIndices()) {
@@ -229,8 +232,13 @@ std::optional<AccessAttr> weft::riscv::fragmentChunkReadAccess(
   return row && inner ? std::optional<AccessAttr>(field.getAccess()) : std::nullopt;
 }
 
-int64_t weft::riscv::fragmentChunkLoadGroups(FragmentType fragment, TargetAttr target) {
+int64_t weft::riscv::fragmentChunkLoadGroups(mlir::Value fieldValue, FragmentType fragment, TargetAttr target) {
   if (fragment.getPacking().getRowsPerTile() != 8) return 1;
+  auto field = fieldValue.getDefiningOp<FieldOp>();
+  auto load = field ? field.getOwner().getDefiningOp<LoadOp>() : LoadOp();
+  if (load && load.getRegion().getType().getInterleaveRows() <
+                  fragment.getShape()[fragment.getPacking().getAxisOrder()[0]])
+    return 1;
   const int64_t parts = fragmentPartCount(fragment);
   for (int64_t groups : {4, 2})
     if ((parts * 2) % groups == 0 &&
@@ -257,7 +265,7 @@ mlir::LogicalResult IMEFragmentChunkSplitLoadOp::verify() {
   const auto *contract = findRISCVFragmentCapability(fragment.getFamily());
   auto access = fragmentChunkReadAccess(getField(), fragment);
   auto target = (*this)->getParentOfType<KernelOp>().getTarget();
-  const int64_t loadGroups = fragmentChunkLoadGroups(fragment, target);
+  const int64_t loadGroups = fragmentChunkLoadGroups(getField(), fragment, target);
   const auto parameters = getLeaf().getParameters().asArrayRef();
   if (!access || !contract || getHigh().getType() != fragment || getAccess() != *access ||
       !exactLeaf(getLeaf(), "ime", "fragment-chunk-split-load", fragmentChunkInstruction(fragment), "none", "agnostic") ||

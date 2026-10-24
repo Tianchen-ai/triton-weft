@@ -234,6 +234,11 @@ pressure，但通过把下一iteration的load/decode与当前compute重叠而缩
 应检查：load-to-use距离、steady-state中producer/consumer交错、跨stage SSA数量、buffer
 versions、prologue/epilogue占比、spill变化。只看到`pipeline_depth=2`不算实现。
 
+fragment consumer-layout 比较按 active bits / VLEN 估计每条向量算术的工作量，并计入
+已注册行合并指令的真实固定序列。已有直接行合并时，默认 grouped 候选必须减少工作才
+能采用；不能把一条 LMUL4 算术计成与 LMUL1 等量，再忽略退出循环时的布局转换。
+显式的 `register-grouped` 仍是作者选择的物理配置，并继续接受资源合法性检查。
+
 ### 7.3 调度边界
 
 当前`ScheduleRISCVLevels`负责从use-def/effect写stage/order，`PipelineRISCVLevels`只做

@@ -240,7 +240,8 @@ mlir::LogicalResult Emitter::compileIMEFragmentChunkSplitLoad(riscv::IMEFragment
   std::string loaded;
   llvm::SmallVector<std::string> pairs, lefts, rights;
   for (int64_t part = 0; part < riscv::fragmentPartCount(fragment); ++part) {
-    const std::string at = "((const int8_t *)" + first + " + " + std::to_string(part * rows * 32) + ")";
+    const std::string at = "((const int8_t *)" +
+        fieldStorageAddress(owner, *field, storage->byte, std::to_string(part * rows)) + ")";
     if (part % atomsPerLoad == 0) {
       loaded = fresh("ime_chunk_load");
       const std::string suffix = "i8m" + std::to_string(loadGroups);
@@ -257,7 +258,8 @@ mlir::LogicalResult Emitter::compileIMEFragmentChunkSplitLoad(riscv::IMEFragment
           loaded + ", " + std::to_string(subregister + 1) + ")";
     } else if (rows == 8) {
       right = fresh("ime_chunk_right");
-      line("vint8m1_t " + right + " = __riscv_vle8_v_i8m1(" + at + " + 128, 128);");
+      line("vint8m1_t " + right + " = __riscv_vle8_v_i8m1((const int8_t *)" +
+           fieldStorageAddress(owner, *field, storage->byte, std::to_string(part * rows + 4)) + ", 128);");
     }
     const std::string pair = fresh("ime_chunk_pair");
     line("vint8m2_t " + pair + ";");

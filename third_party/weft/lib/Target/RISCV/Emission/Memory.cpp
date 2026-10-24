@@ -1282,6 +1282,16 @@ mlir::FailureOr<Binding> Emitter::recordForSlice(mlir::Value value) {
     if (auto point = points.find(axis); point != points.end())
       point->second.base = coordinates[position];
   }
+  for (auto [axis, offset] : region.slice.staticOffsets) {
+    auto dimension = llvm::find(base.memory.axes, axis);
+    if (dimension == base.memory.axes.end())
+      return value.getDefiningOp()->emitError("encoded record static offset has no matching memory axis"),
+             mlir::failure();
+    const size_t position = std::distance(base.memory.axes.begin(), dimension);
+    coordinates[position] = "(" + coordinates[position] + " + " + std::to_string(offset) + ")";
+    if (auto point = points.find(axis); point != points.end())
+      point->second.base = coordinates[position];
+  }
   Binding result;
   result.kind = Binding::Kind::Record;
   const int64_t recordBytes = base.memory.recordBytes;
