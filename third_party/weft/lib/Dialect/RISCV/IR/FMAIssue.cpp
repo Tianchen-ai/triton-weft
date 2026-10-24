@@ -225,6 +225,19 @@ StringRef weft::riscv::pointwiseIntegerMACInstruction(TargetAttr target, ValueTy
   if (layout.getValidity() == "full" &&
       supportsRVVWidenBinary(target, lhs, multiplier, type))
     return element.isUnsigned() ? "rvv.vwmaccu.vv" : "rvv.vwmacc.vv";
+  auto left = dyn_cast<IntegerType>(lhs.getElementType());
+  auto right = multiplier ? dyn_cast<IntegerType>(multiplier.getElementType()) : IntegerType();
+  if (left && right && !left.isSignless() && !right.isSignless() && element.isSigned() &&
+      left.getSignedness() != right.getSignedness() &&
+      lhs.getShape() == multiplier.getShape() && lhs.getAxisIds() == multiplier.getAxisIds() &&
+      lhs.getLayout() == multiplier.getLayout() && layout.getValidity() == "full" &&
+      left.getWidth() <= lhs.getLayout().getSew() && right.getWidth() <= lhs.getLayout().getSew()) {
+    auto carrier = ValueType::get(type.getContext(),
+        IntegerType::get(type.getContext(), lhs.getLayout().getSew(), IntegerType::Signed),
+        lhs.getShape(), lhs.getAxisIds(), lhs.getLayout());
+    if (supportsRVVWidenBinary(target, carrier, carrier, type))
+      return left.isSigned() ? "rvv.vwmaccsu.vv" : "rvv.vwmaccsu.vv.swap";
+  }
   return "";
 }
 

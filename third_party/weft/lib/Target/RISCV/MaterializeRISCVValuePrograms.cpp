@@ -373,6 +373,11 @@ private:
       dynamicNumeric |= type.getLayout().getCarrier() != "local" &&
           llvm::any_of(type.getShape().asArrayRef(), [](int64_t extent) { return extent < 0; });
       scalarTraversal |= type.getLayout().getCarrier() == "scalar" &&
+          // A scalar carrier with a lane domain is a verified uniform supply
+          // for each time/replica window, not an elementwise scalar traversal.
+          // Its bounded tuple can feed the selected vector-scalar operation.
+          llvm::all_of(type.getLayout().getLaneFactors().asArrayRef(),
+              [](int64_t factor) { return factor == 1; }) &&
           llvm::any_of(type.getLayout().getTimeFactors().asArrayRef(),
               [](int64_t factor) { return factor > 1; });
     };

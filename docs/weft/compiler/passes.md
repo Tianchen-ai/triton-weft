@@ -135,6 +135,9 @@ reverse 从较大坐标向较小坐标组合，仍以此前前缀为左参数。
 策略，最多增加 30 bytes 对齐填充，不是 VLEN 或 cache-line 大小声明。它避免入口仅按
 压缩指令的两字节要求放置、使相同指令随链接器布局产生不稳定的取指表现。
 final verifier 要求显式的合法二次幂对齐；C emitter 只输出已选 `aligned` 属性。
+包含局部 RVV/IME 操作的有序循环另行保存 `weft.riscv.code_alignment=16`，通过
+Clang 的 `code_align` 属性固定回边目标的最小对齐。函数入口对齐不能代替循环入口对齐；
+该策略不假定更大边界总是更快，也不根据 kernel 名称选择代码偏移。
 
 布局选择同时核对一个 control edge 上全部 carry/result slots 的常驻寄存器占用，
 并保留更新 issue 的空间；不能用各 slot 单独放得下来证明它们可以同时存活。
@@ -612,6 +615,12 @@ terminal 只枚举已选重复数和明确的输出坐标，不决定 microtile 
 因此重复为每个 replica 做标量数学。已存在的 register boundary 在其定义后形成必要私有副本；
 循环外不变值的副本不随内层 consumer 重复建立，loop carry 的副本仍属于该次 iteration。
 
+scalar carrier 若保留非单位 lane window，表示该窗口内已证明一致的标量供应；
+time/replica parts 是有限标量 tuple，不能仅因 time factor 大于一就建立局部数组。
+普通逐元素 scalar traversal、动态数值域和超寄存器预算的程序仍使用原来的物化规则。
+I16/I32/I64 向 2～7 位整数的普通截断先按合法 RVV 宽度缩到 byte carrier，再执行
+已有有限位宽转换；这些中间步骤显式进入 Physical IR，不用不存在的 sub-byte SEW。
+
 对于完整静态范围、相同 VL 且至多四个 issue 的寄存器输入，pass 可直接写出有限 pieces：
 `rvv_issue_slice` 供应原值，已完成的 export pieces 由 `rvv_assemble_value` 交还原数值载体。
 选择时同时计入已完成 pieces 与当前 issue 的驻留；包含 stream reduction 时，所属循环
@@ -995,6 +1004,9 @@ vector/vector 模乘加可形成 `rvv.vmacc.vv`；精确 widening
 来源和同结果 type 的 add 可形成合法的 widening vector/vector 或 vector/scalar MAC。
 保留原 signedness、位宽、axes、active domain 和加法边界；读写、未知 effect 或 region
 阻止跨越，最终资源重新核算。不增加 reduction，也不改变最后的归约位置。
+混合 signed/unsigned 的保值 widening multiply 加同型 accumulator 可选择
+`rvv.vwmaccsu.vv`，两种输入顺序分别记录 exact leaf。有限位宽输入使用已经闭合的
+整数 carrier；不能省略其截断、符号扩展或 zero extension。
 
 这项融合不在前期反复运行的 operation-family selection 中执行。地址分析需要看见
 `base * width + lane` 以及分段坐标的显式关系；过早形成不可分的 MAC 会隐藏连续访存证明，

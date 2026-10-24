@@ -1,5 +1,6 @@
 #include "RISCVPhysicalSupport.h"
 #include "Weft/Target/RISCVPasses.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SetVector.h"
@@ -21,6 +22,17 @@ public:
     getOperation().walk([&](riscv::KernelOp kernel) {
       kernel->setAttr("native_entry_alignment",
                      IntegerAttr::get(IntegerType::get(&getContext(), 64), 32));
+    });
+    getOperation().walk([&](scf::ForOp loop) {
+      bool vectorBody = false;
+      loop.walk([&](Operation *operation) {
+        if (operation->getParentOfType<scf::ForOp>() != loop) return;
+        auto leaf = operation->getAttrOfType<riscv::LeafAttr>("leaf");
+        vectorBody |= leaf && (leaf.getEngine() == "rvv" || leaf.getEngine() == "ime");
+      });
+      if (vectorBody)
+        loop->setAttr("weft.riscv.code_alignment",
+                      IntegerAttr::get(IntegerType::get(&getContext(), 64), 16));
     });
     getOperation().walk<WalkOrder::PostOrder>([&](riscv::HelperOp helper) {
       llvm::SetVector<Value> captures;

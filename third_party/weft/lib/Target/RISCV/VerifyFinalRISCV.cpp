@@ -766,6 +766,14 @@ public:
           failed = true;
         }
       if (auto loop = mlir::dyn_cast<mlir::scf::ForOp>(operation)) {
+        if (auto alignment = loop->getAttr("weft.riscv.code_alignment")) {
+          auto integer = mlir::dyn_cast<mlir::IntegerAttr>(alignment);
+          const int64_t bytes = integer && integer.getType().isInteger(64) ? integer.getInt() : 0;
+          if (bytes < 2 || bytes > 4096 || (bytes & (bytes - 1))) {
+            loop.emitError("native loop requires a selected power-of-two code alignment in [2, 4096]");
+            failed = true;
+          }
+        }
         auto level = loop->getAttrOfType<riscv::LevelAttr>("weft.riscv.level");
         auto control = riscv_internal::PhysicalLoopControl::get(loop);
         if (mlir::failed(control) || mlir::failed(control->verifyFiniteEndpoint(loop))) failed = true;

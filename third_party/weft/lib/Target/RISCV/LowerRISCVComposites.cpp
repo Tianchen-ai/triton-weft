@@ -182,13 +182,14 @@ private:
       }
       auto targetInteger = mlir::dyn_cast<mlir::IntegerType>(result.getElementType());
       if (!mlir::isa<riscv::CastOp>(operation) || !targetInteger ||
-          targetInteger.getWidth() < 8 || targetInteger.getWidth() >= integer.getWidth()) continue;
+          targetInteger.getWidth() < 2 || targetInteger.getWidth() >= integer.getWidth()) continue;
+      const unsigned carrierWidth = std::max(8u, targetInteger.getWidth());
       if ((integer.getWidth() != 16 && integer.getWidth() != 32 && integer.getWidth() != 64) ||
-          (targetInteger.getWidth() != 8 && targetInteger.getWidth() != 16 && targetInteger.getWidth() != 32))
+          (carrierWidth != 8 && carrierWidth != 16 && carrierWidth != 32))
         continue;
       mlir::Value value = operation->getOperand(0);
       unsigned width = integer.getWidth();
-      while (width > targetInteger.getWidth()) {
+      while (width > carrierWidth) {
         width /= 2;
         auto element = mlir::IntegerType::get(&getContext(), width, integer.getSignedness());
         auto type = riscv::ValueType::get(&getContext(), element, result.getShape(),
