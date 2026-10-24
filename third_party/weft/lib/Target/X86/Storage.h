@@ -95,6 +95,36 @@ struct StorageLayout : kernel::EncodingStorage {
     for (int64_t extent : mlir::cast<mlir::DenseI64ArrayAttr>(base.getFieldShapes()[field]).asArrayRef()) count *= extent;
     return count * (width / 8) == bytes();
   }
+  // A runtime window may reuse one decode map when every aligned window has
+  // exactly the same fragments, translated by a constant byte displacement.
+  // Check both base-record and persistent-cohort addresses, including chunks.
+  std::optional<std::pair<int64_t, int64_t>> translatedWindow(unsigned field,
+                                                            int64_t extent) {
+    auto dimensions = mlir::cast<mlir::DenseI64ArrayAttr>(base.getFieldShapes()[field]);
+    if (dimensions.size() != 1 || extent <= 0 || dimensions[0] % extent ||
+        dimensions[0] > 4096) return {};
+    const int64_t count = dimensions[0];
+    if (extent == count) return std::make_pair(int64_t{0}, int64_t{0});
+    auto first = fragments(field, 0, false), next = fragments(field, extent, false);
+    if (first.empty() || next.empty()) return {};
+    const int64_t rawStride = next.front().byte - first.front().byte;
+    const int64_t packedStride = address(next.front().byte).first - address(first.front().byte).first;
+    for (int64_t start = extent; start < count; start += extent) {
+      for (int64_t lane = 0; lane < extent; ++lane) {
+        auto initial = fragments(field, lane, false);
+        auto current = fragments(field, start + lane, false);
+        if (initial.size() != current.size()) return {};
+        for (auto [a, z] : llvm::zip(initial, current)) {
+          auto aAddress = address(a.byte), zAddress = address(z.byte);
+          if (a.shift != z.shift || a.mask != z.mask || a.resultShift != z.resultShift ||
+              z.byte - a.byte != start / extent * rawStride ||
+              zAddress.first - aAddress.first != start / extent * packedStride ||
+              zAddress.second != aAddress.second) return {};
+        }
+      }
+    }
+    return std::make_pair(rawStride, packedStride);
+  }
 };
 
 inline mlir::FailureOr<StorageLayout> storageLayout(mlir::ModuleOp module,

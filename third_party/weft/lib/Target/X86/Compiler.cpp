@@ -1447,6 +1447,7 @@ private:
   }
   bool knownPowerOfTwoMultiple(Value value, int64_t divisor, unsigned depth = 0) {
     if (depth > 16 || !llvm::isPowerOf2_64(divisor)) return false;
+    if (divisor == 1) return true;
     APInt number;
     if (matchPattern(value, m_ConstantInt(&number)))
       return number.getBitWidth() <= 64 && (number.getZExtValue() & (divisor - 1)) == 0;
@@ -1456,6 +1457,13 @@ private:
     if (auto mul = value.getDefiningOp<arith::MulIOp>())
       return knownPowerOfTwoMultiple(mul.getLhs(), divisor, depth + 1) ||
              knownPowerOfTwoMultiple(mul.getRhs(), divisor, depth + 1);
+    auto *definition = value.getDefiningOp();
+    if (definition && isa<arith::IndexCastOp, arith::IndexCastUIOp,
+                          arith::ExtUIOp, arith::ExtSIOp, arith::TruncIOp>(definition)) {
+      auto bits = [](Type type) { return type.isIndex() ? 64u : type.getIntOrFloatBitWidth(); };
+      if (llvm::Log2_64(divisor) <= std::min(bits(value.getType()), bits(definition->getOperand(0).getType())))
+        return knownPowerOfTwoMultiple(definition->getOperand(0), divisor, depth + 1);
+    }
     if (auto arg = dyn_cast<BlockArgument>(value)) {
       auto loop = dyn_cast_or_null<scf::ForOp>(arg.getOwner()->getParentOp());
       return loop && value == loop.getInductionVar() &&
@@ -1469,6 +1477,7 @@ private:
     Type resultType = physicalType(domain);
     Value descriptor = region;
     int64_t windowOffset = 0, windowElements = 0;
+    Value translatedOffset;
     if (auto window = region.getDefiningOp<wk::SubviewOp>()) {
       auto baseShape = shape(window.getBase().getType());
       if (window.getOffsets().size() != baseShape.size() || baseShape.empty()) return {};
@@ -1476,6 +1485,10 @@ private:
         if (window.getOffsets()[axis] != 0 || window.getExtents()[axis] != baseShape[axis]) return {};
       windowOffset = window.getOffsets().back();
       windowElements = window.getExtents().back();
+      if (windowOffset == -1 && window.getDynamicBounds().size() == 1) {
+        translatedOffset = mapped(window.getDynamicBounds().front());
+        windowOffset = 0;
+      }
       if (windowOffset < 0 || windowElements <= 0) return {};
       descriptor = window.getBase();
     } else if (auto slice = region.getDefiningOp<wk::SliceOp>()) {
@@ -1486,9 +1499,11 @@ private:
             return cast<StringAttr>(selector).getValue() == "all";
           })) return {};
       APInt coordinate;
-      if (!matchPattern(mapped(slice.getIndices().front()), m_ConstantInt(&coordinate)) ||
-          coordinate.isNegative() || coordinate.getActiveBits() > 63) return {};
-      windowOffset = coordinate.getSExtValue();
+      Value index = mapped(slice.getIndices().front());
+      if (matchPattern(index, m_ConstantInt(&coordinate))) {
+        if (coordinate.isNegative() || coordinate.getActiveBits() > 63) return {};
+        windowOffset = coordinate.getSExtValue();
+      } else translatedOffset = index;
       windowElements = 1;
       descriptor = slice.getBase();
     }
@@ -1506,6 +1521,12 @@ private:
     if (windowElements) {
       if (fieldShape.size() != 1 || windowOffset > elements || windowElements > elements - windowOffset) return {};
     } else windowElements = elements;
+    std::optional<std::pair<int64_t, int64_t>> translation;
+    if (translatedOffset) {
+      if (!knownPowerOfTwoMultiple(translatedOffset, windowElements)) return {};
+      translation = layout->translatedWindow(fieldIndex, windowElements);
+      if (!translation) return {};
+    }
     int64_t count = vectorType.getNumElements();
     if (!windowElements || count % windowElements) return {};
     // A field descriptor covers complete records. A static subview can demand
@@ -1543,6 +1564,17 @@ private:
       }
     }
     OpBuilder::InsertionGuard insertion(b);
+    auto translatedBase = [&](Value base, int64_t stride) -> Value {
+      if (!translatedOffset || !stride) return base;
+      Value offset = translatedOffset;
+      if (offset.getType().isIndex())
+        offset = arith::IndexCastUIOp::create(b, loc, b.getI64Type(), offset);
+      else if (!offset.getType().isInteger(64))
+        offset = arith::ExtUIOp::create(b, loc, b.getI64Type(), offset);
+      auto number = [&](int64_t n) { return constant(loc, b.getI64Type(), b.getI64IntegerAttr(n)); };
+      Value windows = arith::DivUIOp::create(b, loc, offset, number(windowElements));
+      return arith::AddIOp::create(b, loc, base, arith::MulIOp::create(b, loc, windows, number(stride)));
+    };
     scf::IfOp cohortChoice;
     auto rawType = VectorType::get({records * byteCount}, b.getI8Type());
     Value raw = zero(loc, rawType);
@@ -1615,6 +1647,7 @@ private:
       Value base = arith::MulIOp::create(b, loc,
           arith::AddIOp::create(b, loc, column, arith::MulIOp::create(b, loc, columns,
               arith::DivUIOp::create(b, loc, row, number(layout->rows)))), number(layout->rows * layout->bytes()));
+      if (translation) base = translatedBase(base, translation->second);
       if (!directCohort) {
         cohortChoice = scf::IfOp::create(b, loc, input ? TypeRange{} : TypeRange{resultType}, aligned, true);
         b.setInsertionPointToStart(&cohortChoice.getThenRegion().front());
@@ -1675,6 +1708,7 @@ private:
       Value base = arith::MulIOp::create(b, loc,
           arith::DivUIOp::create(b, loc, linear, constant(loc, b.getI64Type(), b.getI64IntegerAttr(elements))),
           constant(loc, b.getI64Type(), b.getI64IntegerAttr(layout->bytes())));
+      if (translation) base = translatedBase(base, translation->first);
       for (int64_t begin = 0; begin < byteCount;) {
         int64_t end = begin + 1;
         while (end < byteCount && bytes[end] == bytes[end - 1] + 1) ++end;
