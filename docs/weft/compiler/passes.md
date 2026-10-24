@@ -9,6 +9,21 @@ RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改�
 窄化或潜在回绕不能继承未经证明的窄区间。查询只在单次有界遍历内保存 memo，
 不会跨 pass 保留随 SSA 改写失效的事实。未知 producer 和超出分析位宽的值不提供证明。
 
+`Analysis/StorageBytes` 与 x86 共用 Encoding 字段到 bit span / byte fragment 的解释。
+RISC-V 的 `fieldFacts`、record-local bit projection 与 x86 的字段传输选择消费同一份
+natural、grouped/layered、joined 几何事实；byte/bit order 和 persistent interleave
+仍来自作者声明。查询不包含 ISA、量化公式或新布局选择，也不在 IR 改写之间缓存结果。
+
+`PlanRISCVMemory` 的字段子程序将不能由已选连续传输覆盖的完整 record 访问，
+展开为显式的记录循环、byte load、数值位组合与 masked byte store。跨 byte 的字段
+消费同一份 fragment 映射；写入只覆盖该字段的 bits，保留共享 byte 的其它字段。
+编码 Value 的数值副本在原 load 边界完成，后续 field 使用不能穿过别名写入重新解引用。
+同一 stage 的多个字段表示保留同一个作者 birth；跨 block 的 stage 在自己的作用域
+初始化其存储。局部 byte leaf 只描述一个已投影 record，不拥有外层遍历或 Encoding 算法。
+这一通用路径目前要求 owner 的 encoded element axis 覆盖一个完整 record；任意前缀
+记录轴由实际 descriptor extent 遍历。这不覆盖任意整记录 reshape 传输或字段窗口；
+这些访问仍须具有自己的完整物理程序，不能留给 emitter 临时解释。
+
 ## 1. 固定顺序
 
 ```text

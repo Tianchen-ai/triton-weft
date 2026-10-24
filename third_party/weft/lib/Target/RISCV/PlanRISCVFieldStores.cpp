@@ -1,14 +1,135 @@
 #include "RISCVPhysicalSupport.h"
 #include "FieldStores.h"
+#include "Weft/Analysis/StorageBytes.h"
 
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/ADT/STLExtras.h"
 
 #include <algorithm>
 #include <numeric>
+#include <map>
 
 using namespace weft;
+
+namespace {
+mlir::LogicalResult materializeFieldBytes(mlir::IRRewriter &b, riscv::StoreOp op) {
+  auto field = op.getRegion().getDefiningOp<riscv::FieldOp>();
+  auto owner = mlir::dyn_cast<riscv::MemDescType>(field.getOwner().getType());
+  auto encoding = owner ? mlir::dyn_cast<kernel::EncodingType>(owner.getEncoding()) : kernel::EncodingType();
+  if (!owner || !encoding || owner.getShape().empty() || owner.getShape().asArrayRef().back() != owner.getElements())
+    return op.emitError("field-byte program requires an explicit complete record along the encoded element axis");
+  auto declaration = riscv_internal::findEncoding(op, riscv_internal::baseEncodingFamily(op, encoding));
+  if (!declaration) return op.emitError("field-byte program has no declared base Encoding");
+  unsigned ordinal = 0;
+  for (; ordinal < declaration.getFieldNames().size(); ++ordinal)
+    if (mlir::cast<mlir::StringAttr>(declaration.getFieldNames()[ordinal]).getValue() == field.getName()) break;
+  if (ordinal == declaration.getFieldNames().size()) return op.emitError("field-byte program cannot resolve the declared field");
+  auto element = mlir::cast<mlir::TypeAttr>(declaration.getFieldTypes()[ordinal]).getValue();
+  auto relation = analysis::fieldBitLayout(element, mlir::cast<mlir::ArrayAttr>(declaration.getFieldLayouts()[ordinal]));
+  if (relation.elementBits > 64) return op.emitError("field-byte program requires an element no wider than 64 bits");
+  auto shape = mlir::cast<mlir::DenseI64ArrayAttr>(declaration.getFieldShapes()[ordinal]).asArrayRef();
+  auto count = riscv_internal::staticProduct(shape);
+  if (!count || *count <= 0) return op.emitError("field-byte program requires a bounded field coordinate domain");
+  int64_t offset = declaration.getFieldBitOffsets()[ordinal];
+  int64_t spanOffset = offset / 8;
+  int64_t spanBytes = (offset % 8 + declaration.getFieldStorageBits()[ordinal] + 7) / 8;
+  auto facts = riscv_internal::fieldFacts(field);
+  int64_t chunk = facts.chunkBytes;
+  auto valueType = mlir::dyn_cast<riscv::ValueType>(op.getValue().getType());
+  unsigned outerRank = owner.getShape().size() - 1;
+  if ((valueType && valueType.getShape().size() != outerRank + shape.size()) ||
+      (!valueType && (outerRank || !shape.empty())))
+    return op.emitError("field-byte program requires the complete record/free-axis projection");
+  llvm::SmallVector<llvm::SmallVector<analysis::StorageByteFragment>> fragments;
+  for (int64_t index = 0; index < *count; ++index) {
+    auto pieces = analysis::fieldByteFragments(relation, offset, index, declaration.getBitOrder(), declaration.getByteOrder());
+    if (!pieces) return op.emitError("field-byte program has no complete storage-bit relation");
+    fragments.push_back(std::move(*pieces));
+  }
+  b.setInsertionPoint(op);
+  auto loc = op.getLoc();
+  auto u8 = mlir::IntegerType::get(b.getContext(), 8, mlir::IntegerType::Unsigned);
+  auto u64 = mlir::IntegerType::get(b.getContext(), 64, mlir::IntegerType::Unsigned);
+  auto index = [&](int64_t value) -> mlir::Value { return mlir::arith::ConstantIndexOp::create(b, loc, value); };
+  auto number = [&](int64_t value) -> mlir::Value { return riscv::ConstantOp::create(b, loc, u64, b.getIntegerAttr(u64, value)); };
+  auto binary = [&](mlir::Value left, mlir::Value right, llvm::StringRef kind) -> mlir::Value {
+    return riscv::BinaryOp::create(b, loc, u64, left, right, kind, riscv_internal::unselectedLeaf(b));
+  };
+  llvm::SmallVector<mlir::Value> coordinates;
+  auto visit = [&](auto &&visit, unsigned dimension) -> mlir::LogicalResult {
+    if (dimension < outerRank) {
+      auto upper = riscv::ExtentOp::create(b, loc, b.getIndexType(), field.getOwner(), dimension);
+      auto loop = mlir::scf::ForOp::create(b, loc, index(0), upper, index(1));
+      riscv_internal::copyOrigin(op, loop);
+      loop->setAttr("weft.riscv.direction", b.getStringAttr("ascending"));
+      loop->setAttr("weft.riscv.system_unroll", b.getStringAttr("disable"));
+      mlir::OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(loop.getBody());
+      coordinates.push_back(loop.getInductionVar());
+      auto result = visit(visit, dimension + 1);
+      coordinates.pop_back();
+      return result;
+    }
+    mlir::Value record = field.getOwner();
+    if (outerRank) {
+      auto recordType = riscv::MemDescType::get(b.getContext(), owner.getEncoding(),
+          b.getDenseI64ArrayAttr({owner.getElements()}), b.getDenseI64ArrayAttr({owner.getAxisIds().asArrayRef().back()}),
+          b.getDenseI64ArrayAttr({owner.getStrides().asArrayRef().back()}), b.getDenseI64ArrayAttr({owner.getOrigins().asArrayRef().back()}),
+          owner.getAlignment(), "slice", owner.getAccess(), owner.getAliasSet(), owner.getLayoutIdentity(),
+          owner.getStorageBits(), owner.getElements(), owner.getInterleaveRows());
+      llvm::SmallVector<mlir::Attribute> selectors(outerRank, b.getStringAttr("index"));
+      selectors.push_back(b.getStringAttr("all"));
+      record = riscv::SliceOp::create(b, loc, recordType, field.getOwner(), coordinates, b.getArrayAttr(selectors));
+    }
+    struct Byte { mlir::Value value; int64_t mask = 0; };
+    std::map<int64_t, Byte> bytes;
+    // Compute the numerical bits before any byte update in this record. The
+    // original Value, including an encoded read snapshot, remains the supplier.
+    for (int64_t member = 0; member < *count; ++member) {
+      mlir::Value value = op.getValue();
+      if (valueType) {
+        llvm::SmallVector<mlir::Value> selected(coordinates);
+        llvm::SmallVector<int64_t> position(shape.size());
+        int64_t remainder = member;
+        for (size_t n = shape.size(); n > 0; --n) { position[n - 1] = remainder % shape[n - 1]; remainder /= shape[n - 1]; }
+        for (int64_t component : position) selected.push_back(index(component));
+        value = riscv::ExtractOp::create(b, loc, element, value, selected,
+            b.getArrayAttr(llvm::SmallVector<mlir::Attribute>(selected.size(), b.getStringAttr("index"))),
+            riscv_internal::unassignedAccess(b), riscv_internal::unselectedLeaf(b));
+      }
+      if (mlir::isa<mlir::FloatType>(element)) {
+        auto bits = mlir::IntegerType::get(b.getContext(), relation.elementBits, mlir::IntegerType::Unsigned);
+        value = riscv::BitcastOp::create(b, loc, bits, value, riscv_internal::unselectedLeaf(b));
+      }
+      if (value.getType() != u64) value = riscv::CastOp::create(b, loc, u64, value, riscv_internal::unselectedLeaf(b));
+      for (const auto &piece : fragments[member]) {
+        auto &byte = bytes[piece.byte];
+        int64_t mask = piece.mask << piece.shift;
+        if (byte.mask & mask) return op.emitError("field-byte program contains overlapping source bit fragments");
+        mlir::Value part = value;
+        if (piece.resultShift) part = binary(part, number(piece.resultShift), "shr");
+        part = binary(part, number(piece.mask), "and");
+        if (piece.shift) part = binary(part, number(piece.shift), "shl");
+        byte.value = byte.value ? binary(byte.value, part, "or") : part;
+        byte.mask |= mask;
+      }
+    }
+    for (auto &[offset, byte] : bytes) {
+      auto value = riscv::CastOp::create(b, loc, u8, byte.value, riscv_internal::unselectedLeaf(b));
+      auto stored = riscv::FieldByteStoreOp::create(b, loc, value, record, offset, byte.mask,
+          spanOffset, spanBytes, chunk, riscv_internal::leaf(b, "scalar", "field-byte-store",
+              "scalar.field-byte-store", "scalar.field-byte-store", 0, 0));
+      riscv_internal::copyOrigin(op, stored);
+    }
+    return mlir::success();
+  };
+  if (mlir::failed(visit(visit, 0))) return mlir::failure();
+  b.eraseOp(op);
+  return mlir::success();
+}
+}
 
 mlir::LogicalResult riscv_internal::materializeFieldStoreView(
     mlir::IRRewriter &rewriter, riscv::StoreOp operation) {
@@ -108,8 +229,9 @@ mlir::LogicalResult riscv_internal::planFieldStore(
   auto field = operation.getRegion().getDefiningOp<riscv::FieldOp>();
   auto facts = fieldFacts(field);
   auto owner = mlir::dyn_cast<kernel::EncodingType>(logicalElement(field.getOwner().getType()));
-  if (!owner || facts.bitOffset % 8 || facts.storageBits % 8)
+  if (!owner)
     return operation.emitError("encoded field store requires a byte-addressable storage field");
+  if (facts.bitOffset % 8 || facts.storageBits % 8) return materializeFieldBytes(rewriter, operation);
   const int64_t rows = interleaveRows(field, owner);
   const int64_t bits = logicalBitWidth(operation.getValue().getType());
   auto value = mlir::dyn_cast<riscv::ValueType>(operation.getValue().getType());
@@ -121,7 +243,7 @@ mlir::LogicalResult riscv_internal::planFieldStore(
   if (scalar) {
     if (!facts.scalarPerRecord || facts.mapping != "natural" ||
         (bits != 8 && bits != 16 && bits != 32))
-      return operation.emitError("scalar field store requires one complete natural byte, half, or word");
+      return materializeFieldBytes(rewriter, operation);
     kind = "scalar";
     if (rows > 1 && facts.chunkBytes < bits / 8) {
       kind = "scalar_bytes";
@@ -140,11 +262,11 @@ mlir::LogicalResult riscv_internal::planFieldStore(
     if (value.getLayout().getCarrier() != "rvv" || value.getShape().size() != 1 ||
         value.getShape()[0] <= 0 || facts.logicalRank != 1 ||
         value.getShape()[0] * bits != facts.storageBits)
-      return operation.emitError("vector field store requires one complete record-local field axis");
+      return materializeFieldBytes(rewriter, operation);
     const int64_t count = value.getShape()[0];
     if (facts.mapping == "natural" && (bits == 8 || bits == 16 || bits == 32)) {
       if (rows > 1 && facts.chunkBytes < bits / 8)
-        return operation.emitError("vector field store has no byte-distributed multi-byte element relation");
+        return materializeFieldBytes(rewriter, operation);
       kind = "natural";
       lanes = rows > 1 ? std::gcd(count, facts.chunkBytes / (bits / 8))
                        : std::min(count, value.getLayout().getVl());
@@ -156,7 +278,7 @@ mlir::LogicalResult riscv_internal::planFieldStore(
       sourcesPerStore = 8 / bits;
       lanes = rows > 1 ? std::gcd(facts.layer, facts.chunkBytes) : facts.layer;
     } else {
-      return operation.emitError("field store has no closed natural or whole-byte layered packing relation");
+      return materializeFieldBytes(rewriter, operation);
     }
     const int64_t sew = value.getLayout().getSew();
     int64_t lmul = 0;

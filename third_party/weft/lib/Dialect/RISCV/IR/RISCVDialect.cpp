@@ -1,4 +1,5 @@
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
+#include "Weft/Analysis/StorageBytes.h"
 #include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "Weft/Dialect/Kernel/IR/ReductionRegion.h"
 #include "Weft/Target/RISCVDataCache.h"
@@ -1045,48 +1046,13 @@ mlir::LogicalResult verifyConversion(mlir::Operation *operation,
 std::optional<int64_t> computeRecordFieldRelativeBit(AccessAttr access,
                                                      int64_t elementBits,
                                                      int64_t logicalIndex) {
-  if (!access || elementBits <= 0 || logicalIndex < 0)
-    return std::nullopt;
-  if (access.getMapping() == "natural") {
-    if (logicalIndex > std::numeric_limits<int64_t>::max() / elementBits)
-      return std::nullopt;
-    return logicalIndex * elementBits;
-  }
-  if (access.getMapping() != "grouped_layered" ||
-      access.getGroupSize() <= 0 || access.getLayerSize() <= 0 ||
-      access.getGroupSize() % access.getLayerSize() ||
-      (access.getOrder() != "lo_first" && access.getOrder() != "hi_first"))
-    return std::nullopt;
-  const int64_t group = access.getGroupSize();
-  const int64_t layer = access.getLayerSize();
-  const int64_t layers = group / layer;
-  if (layers <= 0 || group > std::numeric_limits<int64_t>::max() / elementBits)
-    return std::nullopt;
-  const int64_t groupBits = group * elementBits;
-  const int64_t groupIndex = logicalIndex / group;
-  if (groupIndex > std::numeric_limits<int64_t>::max() / groupBits)
-    return std::nullopt;
-  const int64_t within = logicalIndex % group;
-  const int64_t logicalLayer = within / layer;
-  const int64_t physicalLayer =
-      access.getOrder() == "lo_first" ? logicalLayer
-                                      : layers - 1 - logicalLayer;
-  const int64_t withinLayer = within % layer;
-  const int64_t layerStrideBits = layers * elementBits;
-  if (withinLayer > std::numeric_limits<int64_t>::max() / layerStrideBits)
-    return std::nullopt;
-  if (physicalLayer >
-      std::numeric_limits<int64_t>::max() / elementBits)
-    return std::nullopt;
-  const int64_t groupOffset = groupIndex * groupBits;
-  const int64_t layerOffset = withinLayer * layerStrideBits;
-  const int64_t physicalOffset = physicalLayer * elementBits;
-  if (groupOffset > std::numeric_limits<int64_t>::max() - layerOffset)
-    return std::nullopt;
-  const int64_t prefix = groupOffset + layerOffset;
-  if (prefix > std::numeric_limits<int64_t>::max() - physicalOffset)
-    return std::nullopt;
-  return prefix + physicalOffset;
+  if (!access || (access.getMapping() == "grouped_layered" &&
+      access.getOrder() != "lo_first" && access.getOrder() != "hi_first")) return {};
+  weft::analysis::FieldBitLayout layout;
+  layout.mapping = access.getMapping(); layout.elementBits = elementBits;
+  layout.group = access.getGroupSize(); layout.layer = access.getLayerSize();
+  layout.highFirst = access.getOrder() == "hi_first";
+  return layout.contiguousBit(logicalIndex);
 }
 
 bool isClosedRecordCohortValue(ValueType value, RecordCohortType cohort) {
@@ -3306,6 +3272,48 @@ mlir::LogicalResult StorageStoreOp::verify() {
       !exactLeaf(getLeaf(), "transfer", "artifact-storage",
                  "scalar.storage.store.u8", "none", "exact"))
     return emitOpError("raw storage store is private to a typed artifact builder");
+  return verifyLeafOperation(*this);
+}
+
+mlir::LogicalResult FieldByteLoadOp::verify() {
+  auto type = getRecord().getType();
+  auto encoding = mlir::dyn_cast<kernel::EncodingType>(type.getEncoding());
+  auto integer = mlir::dyn_cast<mlir::IntegerType>(getResult().getType());
+  if (!integer || integer.getWidth() != 8 || !integer.isUnsigned() ||
+      !encoding || encoding.getKind() == "dense" || !canRead(type.getAccess()) ||
+      type.getShape().size() != 1 || type.getElements() <= 0 || type.getShape()[0] != type.getElements() ||
+      type.getStorageBits() <= 0 || type.getStorageBits() % 8)
+    return emitOpError("field byte load requires one complete readable encoded record and a u8 result");
+  int64_t bytes = type.getStorageBits() / 8;
+  if (type.getInterleaveRows() > 0 && bytes > std::numeric_limits<int64_t>::max() / type.getInterleaveRows())
+    return emitOpError("field byte load cohort byte span overflows its address representation");
+  if (getSpanOffset() < 0 || getSpanBytes() <= 0 ||
+      getSpanOffset() > bytes || getSpanBytes() > bytes - getSpanOffset() ||
+      getChunkBytes() <= 0 || getSpanBytes() % getChunkBytes() ||
+      getByteOffset() < getSpanOffset() || getByteOffset() - getSpanOffset() >= getSpanBytes() ||
+      !exactLeaf(getLeaf(), "scalar", "field-byte-load", "scalar.field-byte-load", "none", "exact"))
+    return emitOpError("field byte load requires a closed byte span and persistent chunk relation");
+  return verifyLeafOperation(*this);
+}
+
+mlir::LogicalResult FieldByteStoreOp::verify() {
+  auto type = getRecord().getType();
+  auto encoding = mlir::dyn_cast<kernel::EncodingType>(type.getEncoding());
+  auto integer = mlir::dyn_cast<mlir::IntegerType>(getValue().getType());
+  if (!integer || integer.getWidth() != 8 || !integer.isUnsigned() ||
+      !encoding || encoding.getKind() == "dense" || !canWrite(type.getAccess()) ||
+      type.getShape().size() != 1 || type.getElements() <= 0 || type.getShape()[0] != type.getElements() ||
+      type.getStorageBits() <= 0 || type.getStorageBits() % 8)
+    return emitOpError("field byte store requires one complete writable encoded record and a u8 payload");
+  int64_t bytes = type.getStorageBits() / 8;
+  if (type.getInterleaveRows() > 0 && bytes > std::numeric_limits<int64_t>::max() / type.getInterleaveRows())
+    return emitOpError("field byte store cohort byte span overflows its address representation");
+  if (getMask() <= 0 || getMask() > 255 || getSpanOffset() < 0 || getSpanBytes() <= 0 ||
+      getSpanOffset() > bytes || getSpanBytes() > bytes - getSpanOffset() ||
+      getChunkBytes() <= 0 || getSpanBytes() % getChunkBytes() ||
+      getByteOffset() < getSpanOffset() || getByteOffset() - getSpanOffset() >= getSpanBytes() ||
+      !exactLeaf(getLeaf(), "scalar", "field-byte-store", "scalar.field-byte-store", "none", "exact"))
+    return emitOpError("field byte store requires a closed byte span, mask and persistent chunk relation");
   return verifyLeafOperation(*this);
 }
 

@@ -28,6 +28,7 @@ add_mlir_dialect_library(WeftRISCVDialect
   WeftRISCVContracts
   WeftRISCVPlatform
   WeftKernelDialect
+  WeftAnalysis
   MLIRArithDialect
   MLIRSCFDialect
   MLIRIR

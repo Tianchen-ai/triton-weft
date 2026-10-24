@@ -583,11 +583,12 @@ private:
     return success();
   }
 
-  FailureOr<Value> sourceView(Value value, Operation *anchor) {
+  FailureOr<Value> sourceView(Value value, Operation *anchor, Operation *consumer = nullptr) {
     if (Value source = local(value)) return view(source, anchor);
     if (auto found = numericStorage.find(value); found != numericStorage.end()) {
       DominanceInfo dominance(module);
-      if (dominance.properlyDominates(found->second.getDefiningOp(), anchor)) return found->second;
+      if (dominance.properlyDominates(found->second.getDefiningOp(), consumer ? consumer : anchor))
+        return found->second;
     }
     auto type = cast<riscv::ValueType>(value.getType());
     auto groups = riscv_internal::residentRegisterGroups(value);
@@ -781,7 +782,7 @@ private:
         Operation *producer = source.getDefiningOp();
         if (producer) b.setInsertionPointAfter(producer);
         else b.setInsertionPoint(op);
-        input = sourceView(source, producer ? producer : op.getOperation());
+        input = sourceView(source, producer ? producer : op.getOperation(), op);
       }
       if (failed(input)) return failure();
       b.setInsertionPoint(op);

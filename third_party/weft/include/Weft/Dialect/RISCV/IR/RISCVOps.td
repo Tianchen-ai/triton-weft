@@ -1055,6 +1055,26 @@ def WeftRISCV_StorageStoreOp
   let hasVerifier = 1;
 }
 
+def WeftRISCV_FieldByteLoadOp : WeftRISCV_LeafOp<"field_byte_load"> {
+  let summary = "Read one byte from an explicitly projected encoded record";
+  let arguments = (ins Arg<WeftRISCV_MemDescType, "", [MemRead]>:$record,
+                       I64Attr:$byte_offset,
+                       I64Attr:$span_offset, I64Attr:$span_bytes, I64Attr:$chunk_bytes,
+                       WeftRISCV_LeafAttr:$leaf);
+  let results = (outs AnyInteger:$result);
+  let hasVerifier = 1;
+}
+
+def WeftRISCV_FieldByteStoreOp : WeftRISCV_LeafOp<"field_byte_store"> {
+  let summary = "Update selected bits of one byte in an explicitly projected record";
+  let arguments = (ins AnyInteger:$value,
+                       Arg<WeftRISCV_MemDescType, "", [MemRead, MemWrite]>:$record,
+                       I64Attr:$byte_offset, I64Attr:$mask,
+                       I64Attr:$span_offset, I64Attr:$span_bytes, I64Attr:$chunk_bytes,
+                       WeftRISCV_LeafAttr:$leaf);
+  let hasVerifier = 1;
+}
+
 def WeftRISCV_KernelOp
     : WeftRISCV_TerminalOp<"kernel", [Symbol, IsolatedFromAbove, SingleBlock]> {
   let arguments = (ins SymbolNameAttr:$sym_name, ArrayAttr:$arg_names,

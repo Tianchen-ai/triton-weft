@@ -8,6 +8,7 @@
 #include "LocalMemory.h"
 #include "ContractionSupply.h"
 #include "FieldStores.h"
+#include "FieldReads.h"
 
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
@@ -2900,16 +2901,20 @@ void projectScalarRecordFields(mlir::ModuleOp module,
       return rewriter.getDenseI64ArrayAttr(values.asArrayRef().drop_front(rank));
     };
     auto project = [&](riscv::ValueType value) {
-      auto layout = value.getLayout();
       auto axes = drop(value.getAxisIds());
-      auto projected = riscv::LayoutAttr::get(rewriter.getContext(), layout.getCarrier(), axes,
-          drop(layout.getTimeFactors()), drop(layout.getLaneFactors()),
-          drop(layout.getReplicaFactors()), drop(layout.getFragmentFactors()),
-          drop(layout.getLocalFactors()), layout.getSew(), layout.getLmulEighths(),
-          layout.getVl(), layout.getRegisterGroups(), layout.getValidity(), layout.getReplicaGroup());
-      return riscv::ValueType::get(rewriter.getContext(), value.getElementType(),
-                                  drop(value.getShape()), axes, projected);
+      auto result = riscv::ValueType::get(rewriter.getContext(), value.getElementType(),
+          drop(value.getShape()), axes, riscv_internal::unassignedLayout(rewriter, axes.asArrayRef()));
+      // Removing record axes changes replicas and possibly lane ownership.
+      // Re-project the carrier with target facts, including LMUL and residency;
+      // retaining the old group's count describes registers that no longer exist.
+      auto layout = riscv_internal::projectLayout(rewriter, result, value.getLayout(),
+          extract->getParentOfType<riscv::KernelOp>().getTarget());
+      return layout ? mlir::cast<riscv::ValueType>(riscv_internal::withLayout(result, layout)) : riscv::ValueType();
     };
+    auto projectedOwner = project(owner);
+    const bool scalarField = facts.logicalRank == 0;
+    mlir::Type projectedFieldType = scalarField ? fieldType.getElementType() : mlir::Type(project(fieldType));
+    if (!projectedOwner || !projectedFieldType) continue;
     rewriter.setInsertionPoint(extract);
     const int64_t alignment = std::gcd(memory.getAlignment(), memory.getStorageBits() / 8);
     auto descriptor = riscv::MemDescType::get(rewriter.getContext(), memory.getEncoding(),
@@ -2920,10 +2925,8 @@ void projectScalarRecordFields(mlir::ModuleOp module,
     selectors.push_back(rewriter.getStringAttr("all"));
     auto region = riscv::SliceOp::create(rewriter, extract.getLoc(), descriptor,
         load.getRegion(), extract.getIndices().take_front(rank), rewriter.getArrayAttr(selectors));
-    auto record = riscv::LoadOp::create(rewriter, extract.getLoc(), project(owner),
+    auto record = riscv::LoadOp::create(rewriter, extract.getLoc(), projectedOwner,
         region, mlir::Value(), load.getAccess(), riscv_internal::unselectedLeaf(rewriter));
-    const bool scalarField = facts.logicalRank == 0;
-    mlir::Type projectedFieldType = scalarField ? fieldType.getElementType() : mlir::Type(project(fieldType));
     auto projectedField = riscv::FieldOp::create(rewriter, extract.getLoc(), projectedFieldType,
         record.getResult(), field.getName(), field.getAccess(), field.getLeaf());
     riscv_internal::copyOrigin(extract, region);
@@ -3260,6 +3263,10 @@ public:
     mlir::Builder builder(&getContext());
     mlir::IRRewriter rewriter(&getContext());
     bool failed = false;
+    if (mlir::failed(riscv_internal::materializeFieldReads(getOperation(), rewriter))) {
+      signalPassFailure();
+      return;
+    }
     projectScalarRecordFields(getOperation(), rewriter);
     llvm::SmallVector<riscv::LoadOp> deadTableLoads;
     llvm::SmallVector<riscv::MaterializeOp> deadTableMaterializations;

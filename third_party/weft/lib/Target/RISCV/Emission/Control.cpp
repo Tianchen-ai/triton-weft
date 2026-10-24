@@ -481,6 +481,10 @@ mlir::LogicalResult Emitter::compileOperation(mlir::Operation &operation) {
     return compileAtomicRMW(atomic);
   if (auto commit = mlir::dyn_cast<riscv::StoreOp>(operation))
     return compileCommit(commit);
+  if (auto byte = mlir::dyn_cast<riscv::FieldByteStoreOp>(operation))
+    return compileFieldByteStore(byte);
+  if (auto byte = mlir::dyn_cast<riscv::FieldByteLoadOp>(operation))
+    return compileFieldByteLoad(byte);
   return fail(&operation, llvm::Twine("intrinsic-C emission has no rule for physical operation '") +
                               operation.getName().getStringRef() + "'");
 }

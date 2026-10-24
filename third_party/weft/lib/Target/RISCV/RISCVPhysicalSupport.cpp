@@ -1,4 +1,5 @@
 #include "RISCVPhysicalSupport.h"
+#include "Weft/Analysis/StorageBytes.h"
 #include "Weft/Dialect/Kernel/IR/ShapeBindings.h"
 #include "Weft/Dialect/RISCV/IR/Fragment.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
@@ -1521,6 +1522,10 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
     auto rounding = operation->getAttrOfType<mlir::StringAttr>("rounding");
     auto saturate = operation->getAttrOfType<mlir::BoolAttr>("saturate");
     if (carrierOf(operation->getResult(0).getType()) != "rvv") {
+      auto integer = mlir::dyn_cast<mlir::IntegerType>(target);
+      if (mlir::isa<mlir::IntegerType>(source) && integer && !integer.isSignless() &&
+          integer.getWidth() < 8 && !rounding && !(saturate && saturate.getValue()))
+        return integer.isSigned() ? "scalar.cast.subbyte-signed" : "scalar.cast.subbyte-unsigned";
       if (rounding && mlir::isa<mlir::FloatType>(source) &&
           mlir::isa<mlir::FloatType>(target) &&
           source.getIntOrFloatBitWidth() > target.getIntOrFloatBitWidth()) {
@@ -1795,35 +1800,12 @@ riscv_internal::fieldFacts(riscv::FieldOp operation) {
   if (result.bitOffset % 8 == 0)
     result.alignment = std::gcd<int64_t>(declaration.getAlignment(),
                                          result.bitOffset / 8);
-  auto layouts =
-      mlir::cast<mlir::ArrayAttr>(declaration.getFieldLayouts()[index]);
-  auto layoutKind = [](mlir::Attribute attribute) -> llvm::StringRef {
-    auto dictionary = mlir::dyn_cast<mlir::DictionaryAttr>(attribute);
-    auto kind = dictionary ? dictionary.getAs<mlir::StringAttr>("kind")
-                           : mlir::StringAttr();
-    return kind ? kind.getValue() : llvm::StringRef();
-  };
-  llvm::StringRef kind =
-      layouts.empty() ? llvm::StringRef() : layoutKind(layouts[0]);
-  if (kind == "natural") {
-    result.mapping = "natural";
-  } else if (kind == "joined") {
-    result.mapping = "joined";
-    auto joined = mlir::cast<mlir::DictionaryAttr>(layouts[0]);
-    result.group = joined.getAs<mlir::IntegerAttr>("size").getInt();
-    result.joinFields = joined.getAs<mlir::IntegerAttr>("fields").getInt();
-    result.joinLowBits = joined.getAs<mlir::IntegerAttr>("low_bits").getInt();
-    result.joinRole = joined.getAs<mlir::IntegerAttr>("role").getInt();
-    result.order = joined.getAs<mlir::StringAttr>("order").getValue();
-  } else if (kind == "grouped" && layouts.size() == 2 &&
-             layoutKind(layouts[1]) == "layered") {
-    result.mapping = "grouped_layered";
-    auto grouped = mlir::cast<mlir::DictionaryAttr>(layouts[0]);
-    auto layered = mlir::cast<mlir::DictionaryAttr>(layouts[1]);
-    result.group = grouped.getAs<mlir::IntegerAttr>("size").getInt();
-    result.layer = layered.getAs<mlir::IntegerAttr>("size").getInt();
-    result.order = layered.getAs<mlir::StringAttr>("order").getValue();
-  }
+  auto layout = analysis::fieldBitLayout(mlir::cast<mlir::TypeAttr>(declaration.getFieldTypes()[index]).getValue(),
+      mlir::cast<mlir::ArrayAttr>(declaration.getFieldLayouts()[index]));
+  result.mapping = layout.mapping;
+  result.group = layout.group; result.layer = layout.layer;
+  result.joinFields = layout.joinedFields; result.joinLowBits = layout.joinedLowBits; result.joinRole = layout.joinedRole;
+  if (layout.mapping != "natural") result.order = layout.highFirst ? "hi_first" : "lo_first";
   return result;
 }
 

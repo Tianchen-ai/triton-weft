@@ -32,6 +32,7 @@ add_library(WeftRISCVTarget STATIC
   SelectRISCVScalarPackets.cpp
   SimplifyRISCVControl.cpp
   PlanRISCVFieldStores.cpp
+  PlanRISCVFieldReads.cpp
   CanonicalizeRISCVLayouts.cpp
   ConsumerLayouts.cpp
   FuseRISCVBitplanes.cpp

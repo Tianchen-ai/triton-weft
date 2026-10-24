@@ -4,7 +4,7 @@
 #include "Weft/Analysis/ReductionIdentity.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/Kernel/IR/KernelInterface.h"
-#include "Storage.h"
+#include "Weft/Analysis/StorageBytes.h"
 #include "Arrays.h"
 #include "ArrayPackets.h"
 #include "IntegerReductions.h"
@@ -240,7 +240,7 @@ public:
       view.limits = view.extents;
       initializeStorage(view, kernel.getLoc());
       if (auto encoding = packedType(old.getType())) {
-        auto layout = weft::x86::storageLayout(sourceModule, encoding);
+        auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
         if (failed(layout)) return unsupported(kernel, "x86 packed View has no closed storage layout");
         view.recordBytes = indexConstant(kernel.getLoc(), layout->bytes());
         view.recordColumns = arith::DivUIOp::create(b, kernel.getLoc(), view.extents.back(), indexConstant(kernel.getLoc(), layout->elements()));
@@ -287,7 +287,7 @@ public:
       record["interleave_rows"] = 0;
       record["alignment"] = pointer ? bytes : 0;
       if (auto encoding = packedType(old.getType())) {
-        auto layout = weft::x86::storageLayout(sourceModule, encoding);
+        auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
         if (failed(layout)) return unsupported(kernel, "x86 packed ABI has no storage declaration");
         record["storage_bytes"] = layout->bytes();
         record["record_elements"] = layout->elements();
@@ -364,7 +364,7 @@ private:
     if (isa<wk::PointerType>(type)) return LLVM::LLVMPointerType::get(type.getContext());
     if (isa<wk::ValueType>(type)) {
       if (auto encoding = packedType(type)) {
-        auto layout = weft::x86::storageLayout(sourceModule, encoding);
+        auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
         auto sizes = shape(type);
         if (failed(layout) || sizes.empty() || sizes.back() == 0 ||
             (sizes.back() > 0 && sizes.back() % layout->elements()) ||
@@ -411,7 +411,7 @@ private:
   DenseMap<Value, Point> points;
 
   LogicalResult artifactBuilder(wk::KernelOp kernel, unsigned argument, wk::EncodingType encoding) {
-    auto layout = weft::x86::storageLayout(sourceModule, encoding);
+    auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
     if (failed(layout)) return unsupported(kernel, "x86 derived artifact has no closed interleave layout");
     Location loc = kernel.getLoc();
     std::string prefix = kernel.getSymName().str() + "_" + cast<StringAttr>(kernel.getArgNames()[argument]).getValue().str();
@@ -1231,13 +1231,13 @@ private:
     view.storageMap = LLVM::ZeroOp::create(b, loc, LLVM::LLVMPointerType::get(b.getContext()));
     view.fieldElements = view.recordBytes = view.recordColumns = view.interleaveRows = indexConstant(loc, 1);
   }
-  Value storageTable(Location loc, weft::x86::StorageLayout &layout, int field = -1, bool persistent = true) {
+  Value storageTable(Location loc, weft::analysis::EncodingBytes &layout, int field = -1, bool persistent = true) {
     unsigned width = field < 0 ? 8 : cast<TypeAttr>(layout.base.getFieldTypes()[field]).getValue().getIntOrFloatBitWidth();
     int64_t count = field < 0 ? layout.bytes() : volume(cast<DenseI64ArrayAttr>(layout.base.getFieldShapes()[field]).asArrayRef());
     int64_t slots = (width + 7) / 8 + 1;
     SmallVector<int64_t> data;
     for (int64_t index = 0; index < count; ++index) {
-      SmallVector<weft::x86::Fragment> fragments;
+      SmallVector<weft::analysis::StorageByteFragment> fragments;
       if (field < 0) {
         auto [byte, chunk] = layout.address(index);
         fragments.push_back({byte, 0, 255, 0, chunk});
@@ -1336,7 +1336,7 @@ private:
     return load ? loop.getResult(0) : Value();
   }
   LogicalResult field(wk::FieldOp op) {
-    auto layout = weft::x86::storageLayout(sourceModule, packedType(op.getOwner().getType()));
+    auto layout = weft::analysis::encodingBytes(sourceModule, packedType(op.getOwner().getType()));
     if (failed(layout)) return unsupported(op, "x86 field has no complete declared storage mapping");
     auto found = llvm::find(layout->base.getFieldNames(), b.getStringAttr(op.getName()));
     if (found == layout->base.getFieldNames().end()) return op.emitError("field is absent from its Encoding");
@@ -1425,7 +1425,7 @@ private:
       SmallVector<APInt> shifts, fields, outputShifts, required;
       for (int64_t lane = 0; lane < volume(shape(op.getResult().getType())); ++lane) {
         auto fragments = layout->fragments(fieldIndex, lane % fieldElements, false);
-        weft::x86::Fragment fragment = part < fragments.size() ? fragments[part] : weft::x86::Fragment{};
+        weft::analysis::StorageByteFragment fragment = part < fragments.size() ? fragments[part] : weft::analysis::StorageByteFragment{};
         indices.push_back(lane / fieldElements * layout->bytes() + fragment.byte);
         shifts.emplace_back(carrierBits, fragment.shift); fields.emplace_back(carrierBits, fragment.mask);
         outputShifts.emplace_back(carrierBits, fragment.resultShift); required.emplace_back(1, fragment.mask != 0);
@@ -1512,7 +1512,7 @@ private:
     auto field = descriptor.getDefiningOp<wk::FieldOp>();
     auto vectorType = dyn_cast<VectorType>(resultType);
     if (!field || !vectorType || !memoryType(field.getOwner().getType())) return {};
-    auto layout = weft::x86::storageLayout(sourceModule, packedType(field.getOwner().getType()));
+    auto layout = weft::analysis::encodingBytes(sourceModule, packedType(field.getOwner().getType()));
     if (failed(layout)) return {};
     auto found = llvm::find(layout->base.getFieldNames(), b.getStringAttr(field.getName()));
     if (found == layout->base.getFieldNames().end()) return {};
@@ -1535,7 +1535,7 @@ private:
     // a smaller field window without changing those record identities. Its
     // fragments determine exactly which bytes are read; outer record validity
     // and the original complete-record guard still mask every byte.
-    SmallVector<SmallVector<weft::x86::Fragment>> fragments;
+    SmallVector<SmallVector<weft::analysis::StorageByteFragment>> fragments;
     SmallVector<int64_t> bytes;
     unsigned parts = 0;
     for (int64_t lane = 0; lane < windowElements; ++lane) {
@@ -1754,7 +1754,7 @@ private:
       SmallVector<APInt> shifts, fields, outputShifts;
       for (int64_t lane = 0; lane < count; ++lane) {
         auto &pieces = fragments[lane % windowElements];
-        auto fragment = part < pieces.size() ? pieces[part] : weft::x86::Fragment{};
+        auto fragment = part < pieces.size() ? pieces[part] : weft::analysis::StorageByteFragment{};
         int64_t index = fragment.mask ? llvm::lower_bound(bytes, fragment.byte) - bytes.begin() : 0;
         indices.push_back(lane / windowElements * byteCount + index);
         shifts.emplace_back(carrierBits, fragment.shift);
@@ -1790,7 +1790,7 @@ private:
     Value recordLimit;
     int64_t recordBytes = 1;
     if (auto encoding = packedType(domain)) {
-      auto layout = weft::x86::storageLayout(sourceModule, encoding);
+      auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
       if (failed(layout)) return unsupported(op, "x86 encoded Value has no storage declaration");
       auto sizes = shape(domain);
       recordBytes = layout->bytes();
@@ -3232,7 +3232,7 @@ private:
     }
     int64_t recordElements = 1, recordBytes = 1;
     if (auto encoding = packedType(source.getType())) {
-      auto layout = weft::x86::storageLayout(sourceModule, encoding);
+      auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
       if (failed(layout)) return unsupported(op, "x86 encoded projection requires a closed record layout");
       recordElements = layout->elements(); recordBytes = layout->bytes();
       dimensions.back() = dimensions.back() / recordElements * recordBytes;
@@ -3606,7 +3606,7 @@ private:
     return packedType(type) ? Type(IntegerType::get(type.getContext(), 8)) : scalar(type);
   }
   Value recordBytes(Location loc, Value elements, Type type) {
-    auto layout = weft::x86::storageLayout(sourceModule, packedType(type));
+    auto layout = weft::analysis::encodingBytes(sourceModule, packedType(type));
     assert(succeeded(layout) && "verified encoded storage");
     return arith::MulIOp::create(b, loc,
         arith::DivUIOp::create(b, loc, elements, indexConstant(loc, layout->elements())),
@@ -3687,7 +3687,7 @@ private:
     masks[result] = packArray(loc, array.valid, physicalMask(result.getType()));
     arrayShapes[result] = array.extents;
     if (auto encoding = packedType(result.getType())) {
-      auto layout = weft::x86::storageLayout(sourceModule, encoding);
+      auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
       arrayShapes[result].back() = arith::MulIOp::create(b, loc,
           arith::DivUIOp::create(b, loc, array.extents.back(), indexConstant(loc, layout->bytes())),
           indexConstant(loc, layout->elements()));
@@ -3743,7 +3743,7 @@ private:
     auto extents = storageExtents(domain, loc); auto ids = axes(domain.getType()), memoryAxes = axes(region.getType());
     Type elementType = packedType(domain.getType()) ? Type(b.getIntegerType(8, IntegerType::Unsigned)) : element(domain.getType());
     if (auto encoding = packedType(domain.getType())) {
-      auto layout = weft::x86::storageLayout(sourceModule, encoding);
+      auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
       view.offset = recordBytes(loc, view.offset, domain.getType());
       for (size_t axis = 0; axis + 1 < view.strides.size(); ++axis)
         view.strides[axis] = recordBytes(loc, view.strides[axis], domain.getType());
@@ -3943,7 +3943,7 @@ private:
   }
   LogicalResult arrayField(wk::FieldOp op) {
     Location loc = op.getLoc();
-    auto layout = weft::x86::storageLayout(sourceModule, packedType(op.getOwner().getType()));
+    auto layout = weft::analysis::encodingBytes(sourceModule, packedType(op.getOwner().getType()));
     if (failed(layout)) return unsupported(op, "x86 encoded array has no closed field layout");
     auto found = llvm::find(layout->base.getFieldNames(), b.getStringAttr(op.getName()));
     if (found == layout->base.getFieldNames().end()) return op.emitError("field is absent from its Encoding");
@@ -4075,7 +4075,7 @@ private:
     if (rectangular) {
       SmallVector<int64_t> tile = shape(projected.getType());
       if (packedType(source.getType())) {
-        auto layout = weft::x86::storageLayout(sourceModule, packedType(source.getType()));
+        auto layout = weft::analysis::encodingBytes(sourceModule, packedType(source.getType()));
         tile.back() = tile.back() / layout->elements() * layout->bytes();
       }
       auto maskType = resultType.clone(b.getI1Type());
@@ -4727,7 +4727,7 @@ private:
         indices.push_back(index);
       }
       if (auto encoding = packedType(reshape.getInput().getType())) {
-        auto layout = weft::x86::storageLayout(sourceModule, encoding);
+        auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
         if (failed(layout)) return reshape.emitError("x86 encoded reshape has no storage mapping");
         int64_t elements = layout->elements(), bytes = layout->bytes();
         SmallVector<int64_t> byteIndices;

@@ -121,8 +121,7 @@ bool weft::riscv_internal::needsReadSnapshot(riscv::LoadOp load) {
       if (riscv::storageWrittenBetween(load.getRegion(), load, user))
         return true;
       if (mlir::isMemoryEffectFree(user) &&
-          !mlir::isa<riscv::RegisterMaterializeOp,
-                     riscv::EncodedLocalBindOp>(user))
+          !mlir::isa<riscv::EncodedLocalBindOp>(user))
         pending.append(user->result_begin(), user->result_end());
     }
   }

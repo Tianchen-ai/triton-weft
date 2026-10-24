@@ -1000,6 +1000,17 @@ mlir::LogicalResult Emitter::compileCastImpl(ConversionOp operation) {
   auto scalarExpression = [&](llvm::StringRef inputExpression)
       -> mlir::FailureOr<std::string> {
     std::string expression = inputExpression.str();
+    if (selected == "scalar.cast.subbyte-signed" || selected == "scalar.cast.subbyte-unsigned") {
+      auto integer = mlir::dyn_cast<mlir::IntegerType>(target);
+      if (!integer || integer.getWidth() >= 8 || integer.isSignless()) return mlir::failure();
+      const uint64_t mask = (uint64_t{1} << integer.getWidth()) - 1;
+      expression = "((uint64_t)(" + expression + ") & " + std::to_string(mask) + ")";
+      if (integer.isSigned()) {
+        const uint64_t sign = uint64_t{1} << (integer.getWidth() - 1);
+        expression = "(((int32_t)(" + expression + ") ^ " + std::to_string(sign) + ") - " + std::to_string(sign) + ")";
+      }
+      return "((" + *targetCType + ")(" + expression + "))";
+    }
     if (selected == "scalar.bitcast") {
       auto sourceCType = scalarCType(source);
       if (!sourceCType) return mlir::failure();

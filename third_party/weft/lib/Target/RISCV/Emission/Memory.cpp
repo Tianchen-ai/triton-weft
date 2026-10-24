@@ -837,6 +837,46 @@ mlir::LogicalResult Emitter::compileStorageLoad(
   return mlir::success();
 }
 
+mlir::LogicalResult Emitter::compileFieldByteLoad(riscv::FieldByteLoadOp operation) {
+  if (operation.getLeaf().getInstruction() != "scalar.field-byte-load")
+    return fail(operation, "field byte load requires its selected byte leaf");
+  auto record = recordForSlice(operation.getRecord());
+  if (mlir::failed(record)) return mlir::failure();
+  std::string address = record->recordPointer;
+  int64_t byte = operation.getByteOffset(), chunk = operation.getChunkBytes();
+  if (record->interleaveRows > 0) {
+    int64_t within = byte - operation.getSpanOffset();
+    int64_t offset = operation.getSpanOffset() * record->interleaveRows +
+        within / chunk * chunk * record->interleaveRows + within % chunk;
+    address += " + " + std::to_string(offset) + " + (" + record->interleaveRowOffset + ") * " + std::to_string(chunk - 1);
+  } else address += " + " + std::to_string(byte);
+  bindings[operation.getResult()] = scalar(materializeScalarRead("uint8_t", "*((const uint8_t *)(" + address + "))"));
+  return mlir::success();
+}
+
+mlir::LogicalResult Emitter::compileFieldByteStore(riscv::FieldByteStoreOp operation) {
+  if (operation.getLeaf().getInstruction() != "scalar.field-byte-store")
+    return fail(operation, "field byte store requires its selected byte update leaf");
+  auto record = recordForSlice(operation.getRecord());
+  auto input = bindings.lookup(operation.getValue());
+  if (mlir::failed(record) || input.kind != Binding::Kind::Scalar) return mlir::failure();
+  std::string address = record->recordPointer;
+  int64_t byte = operation.getByteOffset(), chunk = operation.getChunkBytes();
+  if (record->interleaveRows > 0) {
+    int64_t within = byte - operation.getSpanOffset();
+    int64_t offset = operation.getSpanOffset() * record->interleaveRows +
+        within / chunk * chunk * record->interleaveRows + within % chunk;
+    address += " + " + std::to_string(offset) + " + (" + record->interleaveRowOffset + ") * " + std::to_string(chunk - 1);
+  } else address += " + " + std::to_string(byte);
+  std::string pointer = fresh("field_byte");
+  line("uint8_t *" + pointer + " = (uint8_t *)(" + address + ");");
+  std::string expression = "((uint8_t)(" + input.scalar + ") & " + std::to_string(operation.getMask()) + ")";
+  if (operation.getMask() != 255)
+    expression = "(*" + pointer + " & " + std::to_string(255 ^ operation.getMask()) + ") | " + expression;
+  line("*" + pointer + " = (uint8_t)(" + expression + ");");
+  return mlir::success();
+}
+
 mlir::LogicalResult Emitter::compileStorageStore(
     riscv::StorageStoreOp operation) {
   if (operation.getLeaf().getInstruction() != "scalar.storage.store.u8")
