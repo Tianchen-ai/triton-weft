@@ -1,5 +1,6 @@
 #include "Weft/Target/X86Compiler.h"
 #include "Weft/Target/SourceSpecialization.h"
+#include "Weft/Analysis/LogicalAxes.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/Kernel/IR/KernelInterface.h"
 #include "Storage.h"
@@ -2298,6 +2299,15 @@ private:
     Location loc = op.getLoc();
     auto result = cast<wk::ValueType>(op.getResult(0).getType());
     auto outputShape = shape(result), outputAxes = axes(result);
+    SmallVector<SmallVector<int64_t>> inputShapes;
+    for (Value source : sources) inputShapes.push_back(shape(source.getType()));
+    SmallVector<weft::analysis::LogicalDomain> inputDomains;
+    for (auto [index, source] : llvm::enumerate(sources)) {
+      auto type = cast<wk::ValueType>(source.getType());
+      inputDomains.push_back({inputShapes[index], type.getAxisIds().asArrayRef()});
+    }
+    auto domain = weft::analysis::groupedAxes(inputDomains, {outputShape, outputAxes}, group);
+    if (!domain) return op.emitError("grouped arithmetic has no complete logical axis/group relation");
     if (group == 2 && sources.size() == 1 && element(result).isInteger(32)) {
       auto input = dyn_cast<IntegerType>(element(sources.front().getType()));
       if (input && input.getWidth() <= (input.isUnsigned() ? 15u : 16u)) {
@@ -2359,17 +2369,16 @@ private:
     for (int64_t member = 0; member < group; ++member) {
       SmallVector<Value> operands;
       Value memberActive = constant(loc, maskPhysical, b.getBoolAttr(true));
-      for (Value source : sources) {
+      for (auto [sourceNumber, source] : llvm::enumerate(sources)) {
         auto inputShape = shape(source.getType()), inputAxes = axes(source.getType());
         SmallVector<int64_t> indices;
         for (int64_t lane = 0; lane < volume(outputShape); ++lane) {
           int64_t index = 0;
           for (auto [position, axis] : llvm::enumerate(inputAxes)) {
-            auto found = llvm::find(outputAxes, axis);
-            if (found == outputAxes.end()) return op.emitError("x86 grouped operation lost an input axis");
-            int64_t outputAxis = found - outputAxes.begin();
+            int64_t outputAxis = domain->inputToOutput[sourceNumber][position];
             int64_t coordinate = lane / volume(ArrayRef(outputShape).drop_front(outputAxis + 1)) % outputShape[outputAxis];
             if (position + 1 == inputAxes.size()) coordinate = coordinate * group + member;
+            else if (inputShape[position] == 1) coordinate = 0;
             index = index * inputShape[position] + coordinate;
           }
           indices.push_back(index);
