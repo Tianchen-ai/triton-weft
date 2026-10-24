@@ -15,12 +15,16 @@ mlir::FailureOr<llvm::SmallVector<std::string>> emitSpacemitIME2MMA(
   // LLVM's Xsmtvdot spelling encodes DT=11 (i8). On A100 the same base
   // instruction uses 8x16 operands and an 8x8 accumulator, as verified by
   // the selected fragment contract. Register allocation remains LLVM's.
+  const bool nibbles = operation.getLhs().getType().getPacking().getStorageBits() == 4;
+  const auto lhsInteger = mlir::cast<mlir::IntegerType>(operation.getLhs().getType().getElementType());
+  const auto rhsInteger = mlir::cast<mlir::IntegerType>(operation.getRhs().getType().getElementType());
+  const unsigned signs = (lhsInteger.isSigned() ? 2 : 0) | (rhsInteger.isSigned() ? 1 : 0);
   emission.line("__asm__ volatile(");
   emission.line("  \".option push\\n\\t.option arch, +xsmtvdot\\n\\t\"");
   emission.line("  \"vsetvli t0, zero, e8, m1, ta, ma\\n\\t\"");
   for (size_t row = 0; row < lhs.size(); ++row)
     for (size_t column = 0; column < rhs.size(); ++column)
-      emission.line("  \"smt.vmadot %[acc" + std::to_string(row * rhs.size() + column) +
+      emission.line("  \"" + (nibbles ? ".insn r 0x2b, " + std::to_string(signs) + ", 0x61, " : std::string("smt.vmadot ")) + "%[acc" + std::to_string(row * rhs.size() + column) +
                     "], %[lhs" + std::to_string(row) + "], %[rhs" +
                     std::to_string(column) + "]\\n\\t\"");
   emission.line("  \".option pop\\n\\t\"");

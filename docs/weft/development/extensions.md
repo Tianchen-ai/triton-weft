@@ -91,7 +91,8 @@ For another matrix extension using the existing shared-RVV fragment contract:
    consume the same descriptions without linking MLIR or emission code.
 
 The `SpacemitIME1` module supplies M4/M1 i8 atoms at VLEN256. `SpacemitIME2`
-supplies M8/M4/M1 i8 atoms at VLEN1024, together with registered chunk-split
+supplies M8/M4/M1 signed i8 atoms and signed/unsigned I4 atom combinations
+at VLEN1024, together with registered chunk-split
 and row-merge permutation instructions. The latter transfer capabilities are
 selected by physical storage/coordinate proofs and do not own outer loops.
 Adding a module does not require editing a public instruction enum or a

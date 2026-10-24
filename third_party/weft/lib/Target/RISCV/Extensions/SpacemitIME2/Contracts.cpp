@@ -24,6 +24,22 @@ llvm::ArrayRef<weft::RISCVFragmentCapability> fragmentContracts() {
           1, 1, {"t0", "vl", "vtype"}, true, false,
           0, 0, 0, 1, 2, RISCVFragmentSignedness::Signed,
           rows, rows == 8 ? 4U : 1U, 4, 4, "spacemit-ime2-vupack128", "spacemit-ime2-vpack-rows"});
+      for (auto lhs : {RISCVFragmentSignedness::Signed, RISCVFragmentSignedness::Unsigned})
+        for (auto rhs : {RISCVFragmentSignedness::Signed, RISCVFragmentSignedness::Unsigned}) {
+          const std::string signs = std::string(lhs == RISCVFragmentSignedness::Signed ? "s" : "u") +
+                                    (rhs == RISCVFragmentSignedness::Signed ? "s" : "u");
+          result.push_back({
+              "spacemit-ime2-i4-" + signs + "-m" + std::to_string(rows) + "-mma",
+              "spacemit-ime2", 64, 1024, lhs, rhs, 4, 4, 32, 8, 8, 32, 1, 1, 2,
+              {"ime2-i4-m" + std::to_string(rows) + "-k32", {0, 1}, rows, 32,
+               "row_major", "row_major", 4, 1},
+              {"ime2-i4-n8-k32-transposed", {1, 0}, 8, 32, "row_major", "row_major", 4, 1},
+              {"ime2-i32-m" + std::to_string(rows) + "-n8", {0, 1}, rows, 8,
+               "row_major", "row_major", 32, 32},
+              1, 1, {"t0", "vl", "vtype"}, true, false, 0, 0, 0, 4, 2,
+              RISCVFragmentSignedness::Signed, rows, rows == 8 ? 4U : 1U, 4, 4,
+              "", "spacemit-ime2-vpack-rows"});
+        }
     }
     return result;
   }();
@@ -38,7 +54,7 @@ const RISCVExtension &getSpacemitIME2Extension() {
   // establish this fixed ISA profile; X100 cores have a different marchid.
   static const RISCVExtension extension{
       "spacemit-ime2", "matrix",
-      "A100 signed i8 matrix atoms with i32 accumulation in shared RVV registers",
+      "A100 i4 and signed i8 matrix atoms with i32 accumulation in shared RVV registers",
       {{64, 1024, 0x710, 0x8000000041000002, ""}}, fragmentContracts()};
   return extension;
 }

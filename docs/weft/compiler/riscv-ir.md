@@ -329,6 +329,17 @@ RVV↔IME handoff不用 generic conversion冒充：`ime_pack` 或已证明连续
 `new` 可以保存表示相同的 accumulator fragment 初值；普通 `scf.for` 通过同型参数/yield 携带
 它，原有 state birth、owner、lifetime 和 Level identity 不变。
 
+整数 accumulator 上的同位宽 add/sub/mul 可以保留在 fragment 表示中；兼容性同时要求
+元素类型、逻辑轴、shape、packing、layout、资源与目标扩展一致。不同输入 signedness 的
+MMA 可以产生相同的 accumulator 表示。单消费者的零初始 MMA 加上已有 accumulator
+可直接消费该值；有限位宽乘法的二次幂常量可选模左移。转换只在原有数值出口执行，
+不越过 cast、改变溢出宽度、重排浮点归约或移动 Level/lifetime 边界。
+
+原生 I4 fragment 保存相邻元素低 nibble 在前的字节布局；RVV 搬运使用真实 byte carrier，
+不宣称存在 SEW=4。自然 I4 字段可直接供应 fragment，跨两个完整存储 cohort 时分别
+按原地址和有效行读取。显式 I8→I4/U4 截断或右移后截断可选固定窄化 packing leaf；
+读取范围、原读取点、符号、尾部与临时资源由 Physical IR 验证，不能扩大到相邻记录。
+
 fragment factors 固定一个硬件 atom，replica factors 固定 M/N 上的有限重复，单 product 最多
 四个 atom 且不重复 K。input/result packing 与完整 resources 由同一 type/leaf 合同约束；
 共享 lhs、多个 accumulator 和最终 RVV 拼接都发生在这一层，不产生第三层 planning IR。

@@ -1362,7 +1362,7 @@ mlir::LogicalResult TargetAttr::verify(
       return emitError() << "fragment ISA/VLEN requirements disagree with the target";
     for (int64_t bits : {fragment.getLhsBits(), fragment.getRhsBits(),
                          fragment.getAccumulatorBits()})
-      if (!llvm::is_contained(supportedSEW.asArrayRef(), bits))
+      if (!llvm::is_contained(supportedSEW.asArrayRef(), std::max<int64_t>(8, bits)))
         return emitError() << "fragment handoff requires an unsupported RVV SEW";
   }
   return mlir::success();

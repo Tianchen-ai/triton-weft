@@ -1536,6 +1536,15 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
       return "rvv.identity";
     auto sourceInteger = mlir::dyn_cast<mlir::IntegerType>(source);
     auto targetInteger = mlir::dyn_cast<mlir::IntegerType>(target);
+    if (sourceInteger && targetInteger && !targetInteger.isSignless() &&
+        targetInteger.getWidth() < 8 && sourceInteger.getWidth() <= 8 &&
+        sourceInteger.getWidth() >= targetInteger.getWidth() &&
+        !rounding && !(saturate && saturate.getValue())) {
+      auto from = mlir::dyn_cast<riscv::ValueType>(operation->getOperand(0).getType());
+      auto to = mlir::dyn_cast<riscv::ValueType>(operation->getResult(0).getType());
+      if (from && to && from.getLayout() == to.getLayout() && from.getLayout().getSew() == 8)
+        return targetInteger.isSigned() ? "rvv.cast.subbyte-signed" : "rvv.cast.subbyte-unsigned";
+    }
     if (isSameWidthIntegerCast(operation))
       return "rvv.reinterpret";
     if (sourceInteger && targetInteger && (sourceInteger.isUnsigned() || sourceInteger.getWidth() == 1) &&

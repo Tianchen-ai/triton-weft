@@ -1134,6 +1134,29 @@ mlir::LogicalResult Emitter::compileCastImpl(ConversionOp operation) {
   }
   const bool identity = source == target;
   auto sourceInteger = mlir::dyn_cast<mlir::IntegerType>(source);
+  if (selected == "rvv.cast.subbyte-signed" || selected == "rvv.cast.subbyte-unsigned") {
+    auto integer = mlir::cast<mlir::IntegerType>(target);
+    const std::string suffix = vectorSuffix(resultValue), from = vectorSuffix(inputValue);
+    const int64_t shift = 8 - integer.getWidth();
+    Binding result;
+    result.kind = Binding::Kind::Vector;
+    for (int64_t part = 0; part < vectorPartCount(resultValue); ++part) {
+      auto sourcePart = mappedPart(rawOperation, 0, part);
+      if (!sourcePart || *sourcePart >= input->parts.size())
+        return fail(operation, "finite integer cast lost its selected coordinate mapping");
+      std::string value = input->parts[*sourcePart];
+      if (from != suffix) value = "__riscv_vreinterpret_v_" + from + "_" + suffix + "(" + value + ")";
+      const std::string vl = partVL(resultValue, part), out = fresh("finite_cast");
+      if (integer.isSigned())
+        value = "__riscv_vsra_vx_" + suffix + "(__riscv_vsll_vx_" + suffix + "(" + value + ", " + std::to_string(shift) + ", " + vl + "), " + std::to_string(shift) + ", " + vl + ")";
+      else
+        value = "__riscv_vand_vx_" + suffix + "(" + value + ", " + std::to_string((1 << integer.getWidth())-1) + ", " + vl + ")";
+      line(vectorType(resultValue) + " " + out + " = " + value + ";");
+      result.parts.push_back(out);
+    }
+    bindings[resultValue] = std::move(result);
+    return mlir::success();
+  }
   const bool integerReinterpret =
       riscv_internal::isSameWidthIntegerCast(rawOperation);
   if (selected == "rvv.identity" && !rounding && identity) {

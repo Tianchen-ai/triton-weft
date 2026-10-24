@@ -322,7 +322,7 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
     return mlir::failure();
   }
   auto contiguousOperand = [&](mlir::Value input, riscv::FragmentType fragment) -> mlir::Value {
-    if (!input.hasOneUse())
+    if (!input.hasOneUse() && !input.getDefiningOp<riscv::FieldOp>())
       return {};
     auto pointwise = input.getDefiningOp<riscv::BinaryOp>();
     mlir::Value projection = input;
@@ -337,17 +337,30 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
     } else {
       pointwise = {};
     }
-    if (auto widen = projection.getDefiningOp<riscv::WidenOp>())
-      projection = widen.getInput();
-    else if (auto cast = projection.getDefiningOp<riscv::CastOp>())
-      projection = cast.getInput();
-    if (!projection.hasOneUse())
+    if (fragment.getPacking().getStorageBits() != 4) {
+      if (auto widen = projection.getDefiningOp<riscv::WidenOp>())
+        projection = widen.getInput();
+      else if (auto cast = projection.getDefiningOp<riscv::CastOp>())
+        projection = cast.getInput();
+    }
+    if (!projection.hasOneUse() && !projection.getDefiningOp<riscv::FieldOp>())
       return {};
     auto field = riscv::fieldReadProjection(projection);
     auto load = field ? sourceLoad(field.getOwner()) : riscv::LoadOp();
     auto access = riscv::fragmentFieldReadAccess(projection, fragment);
     if (!load || needsReadSnapshot(load))
       return {};
+    if (auto cohorts = riscv::fragmentNibbleCohortReadAccess(projection, fragment); cohorts && !pointwise) {
+      mlir::OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointAfter(load);
+      auto fullField = mlir::cast<riscv::FieldOp>(rewriter.clone(*field));
+      auto read = riscv::IMEFragmentStorageLoadOp::create(rewriter, load.getLoc(), fragment,
+          fullField.getResult(), *cohorts, leaf(rewriter, "ime", "fragment-storage-load",
+              "ime.field-nibble-cohorts", "ime.field-nibble-cohorts", 0, 0, 2,
+              fragment.getResourceGroups(), "none", "agnostic"));
+      copyOrigin(load, read);
+      return read.getResult();
+    }
     auto integer = mlir::cast<mlir::IntegerType>(
         mlir::cast<riscv::ValueType>(projection.getType()).getElementType());
     const int64_t bits = integer.getWidth();
@@ -391,8 +404,9 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
       }
     }
     if (!access) return {};
-    auto point = bits < 8 ? originPoint(projection, innerAxis) : riscv::PhysicalPointOp();
-    if (bits < 8 && !point)
+    const bool byteDecode = bits < 8 && fragment.getPacking().getStorageBits() == 8;
+    auto point = byteDecode ? originPoint(projection, innerAxis) : riscv::PhysicalPointOp();
+    if (byteDecode && !point)
       return {};
     const bool windows = access->getForm() == "strided";
     const bool grouped = !windows && riscv::supportsFragmentGroupedLoad(fragment,
@@ -404,7 +418,7 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
             loadSpelling, 0, 0, grouped ? 0 : 1, fragment.getResourceGroups(), "none", "agnostic"));
     copyOrigin(projection.getDefiningOp(), read);
     mlir::Value supplied = read.getResult();
-    if (bits < 8) {
+    if (bits < 8 && fragment.getPacking().getStorageBits() == 8) {
       auto constant = [&](int64_t value) -> mlir::Value {
         return mlir::arith::ConstantIndexOp::create(rewriter, operation->getLoc(), value);
       };
@@ -438,6 +452,32 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
   };
   auto materializeOperand = [&](mlir::Value input, riscv::FragmentType fragment,
                                 llvm::StringRef role, riscv::AccessAttr access) -> mlir::Value {
+    if (fragment.getPacking().getStorageBits() == 4 && input.hasOneUse()) {
+      mlir::Value source;
+      if (auto cast = input.getDefiningOp<riscv::CastOp>()) source = cast.getInput();
+      if (auto narrow = input.getDefiningOp<riscv::NarrowOp>(); narrow && !narrow.getSaturate()) source = narrow.getInput();
+      int64_t shift = 0;
+      if (source) {
+        if (auto shifted = source.getDefiningOp<riscv::BinaryOp>(); shifted &&
+            shifted.getKind() == "shr" && source.hasOneUse() && constantInt(shifted.getRhs()) == 4) {
+          source = shifted.getLhs(); shift = 4;
+        }
+        auto field = source.getDefiningOp<riscv::FieldOp>();
+        auto load = field ? sourceLoad(field.getOwner()) : riscv::LoadOp();
+        auto geometry = field ? riscv::fragmentNibblePackReadAccess(source, fragment) : std::nullopt;
+        if (geometry && load && !needsReadSnapshot(load)) {
+          mlir::OpBuilder::InsertionGuard guard(rewriter);
+          rewriter.setInsertionPointAfter(load);
+          auto projection = mlir::cast<riscv::FieldOp>(rewriter.clone(*field));
+          auto packed = riscv::IMEFragmentStorageLoadOp::create(rewriter, input.getLoc(), fragment,
+              projection.getResult(), *geometry, leaf(rewriter, "ime", "fragment-storage-load",
+                  "ime.field-nibble-pack", "ime.field-nibble-pack", 0, 0, 5,
+                  fragment.getResourceGroups(), "none", "agnostic", {shift}));
+          copyOrigin(field, packed);
+          return packed.getResult();
+        }
+      }
+    }
     if (auto contiguous = contiguousOperand(input, fragment))
       return contiguous;
     return riscv::IMEPackOp::create(rewriter, operation->getLoc(), fragment,
@@ -478,6 +518,76 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
 
 namespace {
 using namespace weft::riscv_internal;
+void retainFragmentPointwise(mlir::IRRewriter &rewriter, mlir::ModuleOp module) {
+  llvm::SmallVector<riscv::BinaryOp> operations;
+  module.walk([&](riscv::BinaryOp operation) { operations.push_back(operation); });
+  for (auto operation : operations) {
+    if (operation.getKind() != "add" && operation.getKind() != "sub" && operation.getKind() != "mul")
+      continue;
+    mlir::Value lhs = operation.getLhs(), rhs = operation.getRhs();
+    auto unpack = lhs.getDefiningOp<riscv::IMEUnpackOp>();
+    if (!unpack && operation.getKind() != "sub") {
+      std::swap(lhs, rhs);
+      unpack = lhs.getDefiningOp<riscv::IMEUnpackOp>();
+    }
+    if (!unpack || !lhs.hasOneUse() || unpack->getBlock() != operation->getBlock() ||
+        lhs.getType() != operation.getResult().getType())
+      continue;
+    auto fragment = unpack.getInput().getType();
+    if (!riscv::compatibleFragmentAccumulators(fragment, fragment)) continue;
+    auto other = rhs.getDefiningOp<riscv::IMEUnpackOp>();
+    mlir::Value right = rhs;
+    if (other) {
+      if (!rhs.hasOneUse() || other->getBlock() != operation->getBlock() ||
+          rhs.getType() != lhs.getType() ||
+          !riscv::compatibleFragmentAccumulators(fragment, other.getInput().getType()))
+        continue;
+      right = other.getInput();
+    }
+    if (!riscv::fragmentPointwiseTemporaryGroups(fragment, right.getType())) continue;
+    mlir::Value computed;
+    // Integer dot + add is exact modulo the declared accumulator width.
+    // Keep the author's multiplication in that same width, then feed the
+    // compatible accumulator directly to the next already selected MMA.
+    if (other && operation.getKind() == "add") {
+      auto mma = other.getInput().getDefiningOp<riscv::IMEFragmentMMAOp>();
+      auto prior = unpack.getInput().getDefiningOp<riscv::IMEFragmentPointwiseOp>();
+      if (mma && !mma.getMemoryClobber() && mma->getBlock() == operation->getBlock() && mma.getResult().hasOneUse() &&
+          mma.getAccumulator().getDefiningOp<riscv::IMEZeroOp>() &&
+          (fragment == mma.getResult().getType() || (prior && prior->hasOneUse()))) {
+        if (prior) prior.getResult().setType(mma.getResult().getType());
+        mma.getAccumulatorMutable().assign(unpack.getInput());
+        mma->moveBefore(operation);
+        computed = mma.getResult();
+      }
+    }
+    rewriter.setInsertionPoint(operation);
+    if (!computed) {
+      llvm::StringRef kind = operation.getKind();
+      auto multiplier = constantInt(right);
+      if (kind == "mul" && multiplier && llvm::isPowerOf2_64(static_cast<uint32_t>(*multiplier))) {
+        auto element = mlir::cast<mlir::IntegerType>(fragment.getElementType());
+        right = riscv::ConstantOp::create(rewriter, operation.getLoc(), element,
+            rewriter.getIntegerAttr(element, llvm::Log2_64(static_cast<uint32_t>(*multiplier))));
+        kind = "shl";
+      }
+      auto instruction = ("ime.fragment." + kind).str();
+      auto selected = riscv::IMEFragmentPointwiseOp::create(rewriter, operation.getLoc(), fragment,
+          unpack.getInput(), right, kind, "copy",
+          leaf(rewriter, "ime", "fragment-pointwise", instruction, instruction, 0, 0, 0,
+               fragment.getResourceGroups()));
+      copyOrigin(operation, selected);
+      computed = selected.getResult();
+    }
+    auto final = riscv::IMEUnpackOp::create(rewriter, operation.getLoc(), operation.getResult().getType(),
+        computed, unpack.getConversion(), unpack.getLeaf());
+    copyOrigin(operation, final);
+    rewriter.replaceOp(operation, final.getResult());
+    rewriter.eraseOp(unpack);
+    if (other) rewriter.eraseOp(other);
+  }
+}
+
 void retainFragmentAccumulators(
     mlir::IRRewriter &rewriter, mlir::ModuleOp module) {
   llvm::SmallVector<riscv::IMEUnpackOp> operations;
@@ -560,6 +670,7 @@ public:
   llvm::StringRef getDescription() const override { return "Retain compatible integer fragment state across bounded physical issue loops"; }
   void runOnOperation() override {
     mlir::IRRewriter rewriter(&getContext());
+    retainFragmentPointwise(rewriter, getOperation());
     retainFragmentAccumulators(rewriter, getOperation());
   }
 };

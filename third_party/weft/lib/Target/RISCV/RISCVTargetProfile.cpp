@@ -204,8 +204,8 @@ bool weft::parseRISCVTargetProfile(llvm::StringRef march, llvm::StringRef abi,
     for (const auto &fragment : extension->fragments) {
       if (!profile.littleEndian || profile.xlen != fragment.xlen ||
           !profile.supportsFixedRVV() || profile.vlenBits != fragment.vlenBits ||
-          !profile.supportsVectorShape(fragment.lhsElementBits, 8) ||
-          !profile.supportsVectorShape(fragment.rhsElementBits, 8) ||
+          !profile.supportsVectorShape(std::max(8U, fragment.lhsElementBits), 8) ||
+          !profile.supportsVectorShape(std::max(8U, fragment.rhsElementBits), 8) ||
           !profile.supportsVectorShape(fragment.accumulatorElementBits, 8))
         continue;
       profile.fragmentCapabilities.push_back(fragment);

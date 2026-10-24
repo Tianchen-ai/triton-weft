@@ -17,6 +17,25 @@ using namespace weft::riscv;
 using namespace weft::riscv::detail;
 
 namespace {
+bool nativeNibbleFieldOrder(FieldOp field, MemDescType memory) {
+  auto encoding = mlir::dyn_cast<kernel::EncodingType>(memory.getEncoding());
+  auto module = field->getParentOfType<mlir::ModuleOp>();
+  if (!encoding || !module) return false;
+  llvm::StringRef family = encoding.getKind() == "base" ? encoding.getFamily() : llvm::StringRef();
+  module.walk([&](DerivedEncodingOp derived) {
+    if (family.empty() && derived.getResultFamily() == encoding.getFamily() &&
+        derived.getLayoutIdentity() == encoding.getLayoutIdentity() &&
+        derived.getParameterValues() == encoding.getParameters().asArrayRef())
+      family = derived.getSourceFamily();
+  });
+  bool nativeOrder = false;
+  module.walk([&](EncodingDeclOp declaration) {
+    if (declaration.getSymName() == family)
+      nativeOrder = declaration.getByteOrder() == "little" && declaration.getBitOrder() == "lsb_first";
+  });
+  return nativeOrder;
+}
+
 std::optional<int64_t> nonnegativeIndexUpperBound(mlir::Value value, unsigned depth = 0) {
   if (depth > 12)
     return std::nullopt;
@@ -96,6 +115,13 @@ weft::riscv::usedInstructionExtensions(KernelOp kernel) {
     return mlir::WalkResult::advance();
   });
   if (splits.wasInterrupted()) return mlir::failure();
+  auto narrowed = kernel.walk([&](IMEFragmentStorageLoadOp load) -> mlir::WalkResult {
+    if (load.getLeaf().getInstruction() != "ime.field-nibble-pack") return mlir::WalkResult::advance();
+    if (mlir::failed(load.verify())) return mlir::WalkResult::interrupt();
+    extensions.push_back(findRISCVFragmentCapability(load.getResult().getType().getFamily())->extension);
+    return mlir::WalkResult::advance();
+  });
+  if (narrowed.wasInterrupted()) return mlir::failure();
   auto unpacks = kernel.walk([&](IMEUnpackOp unpack) -> mlir::WalkResult {
     if (mlir::failed(unpack.verify())) return mlir::WalkResult::interrupt();
     const auto *contract = findRISCVFragmentCapability(unpack.getInput().getType().getFamily());
@@ -133,13 +159,17 @@ std::optional<AccessAttr> weft::riscv::fragmentFieldReadAccess(
   const auto packing = result.getPacking();
   const int64_t rows = result.getShape()[packing.getAxisOrder()[0]];
   const int64_t columns = packing.getColumnsPerTile();
+  const bool packedNibbles = packing.getStorageBits() == 4;
+  const int64_t rowBytes = packedNibbles ? columns / 2 : columns;
+  if (packedNibbles && !nativeNibbleFieldOrder(field, owner.getRegion().getType()))
+    return std::nullopt;
   const int64_t cohort = owner.getRegion().getType().getInterleaveRows();
   const int64_t rowAxis = result.getAxisIds()[packing.getAxisOrder()[0]];
   const int64_t innerAxis = result.getAxisIds()[packing.getAxisOrder()[1]];
   const bool singleNaturalRow = cohort == 0 && rows == 1 &&
       access.getMapping() == "natural";
   const bool rowWindows = cohort > 0 && access.getMapping() == "natural" &&
-      access.getFieldChunkBytes() > columns && access.getFieldChunkBytes() % columns == 0 &&
+      access.getFieldChunkBytes() > rowBytes && access.getFieldChunkBytes() % rowBytes == 0 &&
       fieldType.getShape()[1] % access.getFieldChunkBytes() == 0;
   if (!integer || integer.isSignless() || integer.getWidth() > 8 ||
       source.getAxisIds()[0] != rowAxis || source.getAxisIds()[1] != innerAxis ||
@@ -147,11 +177,11 @@ std::optional<AccessAttr> weft::riscv::fragmentFieldReadAccess(
       fieldType.getShape()[1] != owner.getRegion().getType().getElements() ||
       source.getShape()[1] != columns ||
       (!singleNaturalRow && (cohort < rows || cohort % rows ||
-                             (access.getFieldChunkBytes() != columns && !rowWindows))) ||
+                             (access.getFieldChunkBytes() != rowBytes && !rowWindows))) ||
       access.getBitOffset() % 8 || packing.getElementOrder() != "row_major" ||
       (access.getMapping() != "natural" && access.getMapping() != "grouped_layered"))
     return std::nullopt;
-  if (access.getMapping() == "natural" ? integer.getWidth() != 8
+  if (access.getMapping() == "natural" ? integer.getWidth() != (packedNibbles ? 4 : 8)
       : (8 % integer.getWidth() || access.getLayerSize() != columns ||
          access.getGroupSize() != columns * (8 / integer.getWidth())))
     return std::nullopt;
@@ -184,8 +214,8 @@ std::optional<AccessAttr> weft::riscv::fragmentFieldReadAccess(
       access.getOrder(), access.getFieldChunkBytes());
 }
 
-std::optional<AccessAttr> weft::riscv::fragmentChunkReadAccess(
-    mlir::Value input, FragmentType result) {
+static std::optional<AccessAttr> fragmentRowChunkAccess(
+    mlir::Value input, FragmentType result, bool nibblePack) {
   auto field = input.getDefiningOp<FieldOp>();
   auto owner = field ? field.getOwner().getDefiningOp<LoadOp>() : LoadOp();
   auto slice = owner ? owner.getRegion().getDefiningOp<SliceOp>() : SliceOp();
@@ -195,39 +225,27 @@ std::optional<AccessAttr> weft::riscv::fragmentChunkReadAccess(
   const auto *contract = findRISCVFragmentCapability(result.getFamily());
   auto element = type ? mlir::dyn_cast<mlir::IntegerType>(type.getElementType()) : mlir::IntegerType();
   const bool nibbles = element && !element.isSignless() && element.getWidth() == 4;
+  const bool nativeNibbles = nibbles && result.getPacking().getStorageBits() == 4;
   if (!field || !owner || owner.getSnapshotStorage() || !slice || !type || !capability ||
-      !contract || contract->chunkSplitInstruction != "spacemit-ime2-vupack128" ||
+      !contract || (!nibblePack && !nativeNibbles && contract->chunkSplitInstruction != "spacemit-ime2-vupack128") ||
       contract->vlenBits != 1024 || memory.getElements() != 32 ||
       type.getShape().size() != 2 || type.getAxisIds().size() != 2 ||
       type.getShape()[1] != 32 || field.getAccess().getMapping() != "natural" ||
       field.getAccess().getFieldChunkBytes() != (nibbles ? 16 : 32) || field.getAccess().getBitOffset() % 8 ||
       (!nibbles && (!integerSignednessMatches(type.getElementType(), "signed") || elementBitWidth(type.getElementType()) != 8)) ||
+      (nibblePack && (nibbles || result.getPacking().getStorageBits() != 4 ||
+                      field->getNumOperands() != 1 || contract->rowMergeInstruction != "spacemit-ime2-vpack-rows")) ||
       (result.getRole() != "lhs" && result.getRole() != "rhs"))
     return std::nullopt;
   if (nibbles) {
     auto parent = field->getParentOfType<KernelOp>();
     if (!parent || !llvm::is_contained(parent.getTarget().getLegalLMULEighths().asArrayRef(), 4))
       return std::nullopt;
-    auto encoding = mlir::dyn_cast<kernel::EncodingType>(memory.getEncoding());
-    auto module = field->getParentOfType<mlir::ModuleOp>();
-    if (!encoding || !module) return std::nullopt;
-    llvm::StringRef family = encoding.getKind() == "base" ? encoding.getFamily() : llvm::StringRef();
-    module.walk([&](DerivedEncodingOp derived) {
-      if (family.empty() && derived.getResultFamily() == encoding.getFamily() &&
-          derived.getLayoutIdentity() == encoding.getLayoutIdentity() &&
-          derived.getParameterValues() == encoding.getParameters().asArrayRef())
-        family = derived.getSourceFamily();
-    });
-    bool nativeOrder = false;
-    module.walk([&](EncodingDeclOp declaration) {
-      if (declaration.getSymName() == family)
-        nativeOrder = declaration.getByteOrder() == "little" && declaration.getBitOrder() == "lsb_first";
-    });
-    if (!nativeOrder) return std::nullopt;
+    if (!nativeNibbleFieldOrder(field, memory)) return std::nullopt;
   }
   const auto packing = result.getPacking();
   if (packing != (result.getRole() == "lhs" ? capability.getLhsPacking() : capability.getRhsPacking()) ||
-      packing.getColumnsPerTile() != 16 || fragmentPartResourceGroups(result) != 1 ||
+      packing.getColumnsPerTile() != (nibblePack || nativeNibbles ? 32 : 16) || fragmentPartResourceGroups(result) != 1 ||
       (packing.getRowsPerTile() != 1 && packing.getRowsPerTile() != 4 && packing.getRowsPerTile() != 8))
     return std::nullopt;
   const int64_t rows = type.getShape()[0], cohort = memory.getInterleaveRows();
@@ -253,6 +271,25 @@ std::optional<AccessAttr> weft::riscv::fragmentChunkReadAccess(
     inner |= axis == innerAxis;
   }
   return row && inner ? std::optional<AccessAttr>(field.getAccess()) : std::nullopt;
+}
+
+std::optional<AccessAttr> weft::riscv::fragmentChunkReadAccess(mlir::Value field, FragmentType result) {
+  if (result.getPacking().getStorageBits() != 8) return std::nullopt;
+  return fragmentRowChunkAccess(field, result, false);
+}
+
+std::optional<AccessAttr> weft::riscv::fragmentNibblePackReadAccess(mlir::Value field, FragmentType result) {
+  return fragmentRowChunkAccess(field, result, true);
+}
+
+std::optional<AccessAttr> weft::riscv::fragmentNibbleCohortReadAccess(mlir::Value input, FragmentType result) {
+  auto field = input.getDefiningOp<FieldOp>();
+  auto owner = field ? field.getOwner().getDefiningOp<LoadOp>() : LoadOp();
+  if (!owner || elementBitWidth(mlir::cast<ValueType>(input.getType()).getElementType()) != 4 ||
+      result.getPacking().getStorageBits() != 4 || result.getPacking().getRowsPerTile() != 8 ||
+      owner.getRegion().getType().getInterleaveRows() != 4)
+    return std::nullopt;
+  return fragmentRowChunkAccess(input, result, false);
 }
 
 bool weft::riscv::fragmentChunkNeedsRowGuard(mlir::Value input, FragmentType fragment) {
@@ -374,8 +411,25 @@ std::optional<AccessAttr> weft::riscv::fragmentWindowReadAccess(
   return access;
 }
 
+bool weft::riscv::compatibleFragmentAccumulators(FragmentType lhs, FragmentType rhs) {
+  const auto *a = findRISCVFragmentCapability(lhs.getFamily());
+  const auto *b = findRISCVFragmentCapability(rhs.getFamily());
+  return a && b && a->extension == b->extension && lhs.getRole() == "accumulator" &&
+      rhs.getRole() == "accumulator" && integerSignednessMatches(lhs.getElementType(), "signed") &&
+      elementBitWidth(lhs.getElementType()) == 32 && lhs.getElementType() == rhs.getElementType() &&
+      lhs.getShape() == rhs.getShape() && lhs.getAxisIds() == rhs.getAxisIds() &&
+      lhs.getPacking() == rhs.getPacking() && lhs.getLayout() == rhs.getLayout() &&
+      lhs.getResourceGroups() == rhs.getResourceGroups();
+}
+
 std::optional<int64_t> weft::riscv::fragmentPointwiseTemporaryGroups(
     FragmentType lhs, mlir::Type rhs) {
+  if (compatibleFragmentAccumulators(lhs, lhs)) {
+    auto other = mlir::dyn_cast<FragmentType>(rhs);
+    if (rhs == lhs.getElementType() || (other && compatibleFragmentAccumulators(lhs, other)))
+      return 0;
+    return std::nullopt;
+  }
   if (lhs.getRole() == "accumulator" || !integerSignednessMatches(lhs.getElementType(), "signed") ||
       elementBitWidth(lhs.getElementType()) != 8 || fragmentPartResourceGroups(lhs) != 1)
     return std::nullopt;
@@ -580,12 +634,33 @@ bool weft::riscv::supportsFragmentGroupedLoad(FragmentType fragment, TargetAttr 
   const int64_t parts = fragmentPartCount(fragment);
   auto packing = fragment.getPacking();
   return (parts == 2 || parts == 4) &&
-      fragment.getLayout().getValidity() == "full" && packing.getStorageBits() == 8 &&
-      packing.getRowsPerTile() * packing.getColumnsPerTile() * 8 == target.getVlenBits() &&
+      fragment.getLayout().getValidity() == "full" &&
+      (packing.getStorageBits() == 8 || packing.getStorageBits() == 4) &&
+      packing.getRowsPerTile() * packing.getColumnsPerTile() * packing.getStorageBits() == target.getVlenBits() &&
       llvm::is_contained(target.getLegalLMULEighths().asArrayRef(), parts * 8);
 }
 
 mlir::LogicalResult IMEFragmentStorageLoadOp::verify() {
+  if (getLeaf().getInstruction() == "ime.field-nibble-cohorts") {
+    auto expected = fragmentNibbleCohortReadAccess(getInput(), getResult().getType());
+    if (!expected || getAccess() != *expected ||
+        !exactLeaf(getLeaf(), "ime", "fragment-storage-load", "ime.field-nibble-cohorts", "none", "agnostic") ||
+        !getLeaf().getParameters().empty() || getLeaf().getTemporaryGroups() != 2 || getLeaf().getLocalBytes() ||
+        getLeaf().getFragmentGroups() != getResult().getType().getResourceGroups())
+      return emitOpError("packed nibble supply requires two complete four-row cohorts per fragment");
+    return mlir::success();
+  }
+  if (getLeaf().getInstruction() == "ime.field-nibble-pack") {
+    auto expected = fragmentNibblePackReadAccess(getInput(), getResult().getType());
+    auto parameters = getLeaf().getParameters().asArrayRef();
+    if (!expected || getAccess() != *expected ||
+        !exactLeaf(getLeaf(), "ime", "fragment-storage-load", "ime.field-nibble-pack", "none", "agnostic") ||
+        parameters.size() != 1 || (parameters[0] != 0 && parameters[0] != 4) ||
+        getLeaf().getTemporaryGroups() != 5 || getLeaf().getLocalBytes() ||
+        getLeaf().getFragmentGroups() != getResult().getType().getResourceGroups())
+      return emitOpError("nibble pack read requires exact block32 byte rows and a low/high nibble selection");
+    return mlir::success();
+  }
   auto expected = fragmentFieldReadAccess(getInput(), getResult().getType());
   const auto instruction = getLeaf().getInstruction();
   const bool grouped = instruction == "ime.field-raw-load.grouped" ||
@@ -620,6 +695,7 @@ mlir::LogicalResult IMEFragmentDecodeOp::verify() {
   auto kernel = (*this)->getParentOfType<KernelOp>();
   auto maximum = nonnegativeIndexUpperBound(getShift());
   if (getResult().getType() != fragment || fragment.getRole() == "accumulator" ||
+      fragment.getPacking().getStorageBits() != 8 ||
       fragmentPartResourceGroups(fragment) != 1 ||
       (bits != 1 && bits != 2 && bits != 4) || !maximum || *maximum > 8 - bits ||
       !knownIndexMultipleOf(getShift(), bits) ||
@@ -640,16 +716,23 @@ mlir::LogicalResult IMEFragmentPointwiseOp::verify() {
   const bool reuse = getLhsPolicy() == "reuse";
   const auto baseInstruction = ("ime.fragment." + getKind()).str();
   const bool grouped = getLeaf().getInstruction() == baseInstruction + ".grouped";
+  const bool accumulator = compatibleFragmentAccumulators(getLhs().getType(), getResult().getType());
   if (!temporaries || !fragmentCapability(*this, getResult().getType().getFamily()) ||
       (rhs && (!kernel || !supportsRVVLayout(kernel.getTarget(), rhs.getLayout()))) ||
-      getResult().getType() != getLhs().getType() ||
-      (getKind() != "add" && getKind() != "sub") ||
+      (getResult().getType() != getLhs().getType() && !accumulator) ||
+      (getKind() != "add" && getKind() != "sub" && !(accumulator && (getKind() == "mul" || getKind() == "shl"))) ||
       (getLhsPolicy() != "copy" && !reuse) || (reuse && !canReuseFragmentPointwise(*this)) ||
       !exactLeaf(getLeaf(), "ime", "fragment-pointwise",
                  baseInstruction + (grouped ? ".grouped" : ""), "none", "exact") ||
       getLeaf().getTemporaryGroups() != *temporaries || getLeaf().getLocalBytes() ||
       getLeaf().getFragmentGroups() != (reuse ? 0 : getResult().getType().getResourceGroups()))
     return emitOpError("fragment pointwise requires its exact integer domain and scalar/row broadcast");
+  if (getKind() == "shl") {
+    auto constant = getRhs().getDefiningOp<ConstantOp>();
+    auto value = constant ? mlir::dyn_cast<mlir::IntegerAttr>(constant.getValue()) : mlir::IntegerAttr();
+    if (!value || value.getValue().getSExtValue() < 0 || value.getValue().getSExtValue() >= 32)
+      return emitOpError("accumulator shift requires a scalar constant in [0, 31]");
+  }
   if (grouped && (getRhs().getType() != getLhs().getType() || !kernel ||
                   !supportsFragmentGroupedLoad(getLhs().getType(), kernel.getTarget())))
     return emitOpError("grouped fragment pointwise requires two matching complete register groups");
@@ -740,7 +823,8 @@ mlir::LogicalResult FragmentPackingAttr::verify(
       !axisOrder || axisOrder.size() != 2 || axisOrder[0] == axisOrder[1] ||
       llvm::any_of(axisOrder.asArrayRef(),
                    [](int64_t axis) { return axis < 0 || axis > 1; }) ||
-      storageBits <= 0 || storageBits % 8 || alignment <= 0)
+      storageBits <= 0 || (storageBits != 4 && storageBits % 8) ||
+      (rowsPerTile * columnsPerTile * storageBits) % 8 || alignment <= 0)
     return emitError()
            << "fragment packing requires one rank-two byte-addressable tiled storage mapping";
   auto validOrder = [](llvm::StringRef order) {
@@ -954,7 +1038,7 @@ mlir::LogicalResult IMEPackOp::verify() {
       fragmentPartResourceGroups(result) !=
           (getRole() == "lhs" ? capability.getLhsResourceGroups()
                               : capability.getRhsResourceGroups()) ||
-      getPacking().getStorageBits() != 8 ||
+      (getPacking().getStorageBits() != 8 && getPacking().getStorageBits() != 4) ||
       result.getLayout().getCarrier() != "ime" ||
       getLeaf().getParameters().asArrayRef() !=
           llvm::ArrayRef<int64_t>({capability.getMFactor(),
@@ -976,6 +1060,12 @@ mlir::LogicalResult IMEPackOp::verify() {
       }))
     return emitOpError("IME pack input and fragment logical domains must agree");
   auto layout = input.getLayout();
+  if (packing.getStorageBits() == 4) {
+    auto target = (*this)->getParentOfType<KernelOp>().getTarget();
+    if (layout.getLmulEighths() < 2 || !llvm::is_contained(target.getSupportedSEW().asArrayRef(), 16) ||
+        !llvm::is_contained(target.getLegalLMULEighths().asArrayRef(), layout.getLmulEighths() / 2))
+      return emitOpError("nibble register packing requires its half-width byte carrier and 16-bit reinterpretation");
+  }
   int64_t laneAxes = 0;
   if (layout.getCarrier() != "rvv" || layout.getSew() != 8 ||
       input.getShape().size() != layout.getTimeFactors().size() ||
