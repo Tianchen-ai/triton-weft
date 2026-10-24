@@ -1478,6 +1478,19 @@ private:
       windowElements = window.getExtents().back();
       if (windowOffset < 0 || windowElements <= 0) return {};
       descriptor = window.getBase();
+    } else if (auto slice = region.getDefiningOp<wk::SliceOp>()) {
+      auto selectors = slice.getSelectors().getValue();
+      if (selectors.empty() || slice.getIndices().size() != 1 ||
+          cast<StringAttr>(selectors.back()).getValue() != "index" ||
+          !llvm::all_of(selectors.drop_back(), [](Attribute selector) {
+            return cast<StringAttr>(selector).getValue() == "all";
+          })) return {};
+      APInt coordinate;
+      if (!matchPattern(mapped(slice.getIndices().front()), m_ConstantInt(&coordinate)) ||
+          coordinate.isNegative() || coordinate.getActiveBits() > 63) return {};
+      windowOffset = coordinate.getSExtValue();
+      windowElements = 1;
+      descriptor = slice.getBase();
     }
     auto field = descriptor.getDefiningOp<wk::FieldOp>();
     auto vectorType = dyn_cast<VectorType>(resultType);
