@@ -6,6 +6,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/Matchers.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/MathExtras.h"
@@ -44,7 +45,7 @@ std::optional<InstructionCost> instructionCost(Operation *op, const ResourceMode
     return elements * llvm::divideCeil(type.isIndex() ? 64u : type.getIntOrFloatBitWidth(), 8u);
   };
   if (op->hasTrait<OpTrait::IsTerminator>() ||
-      isa<arith::ConstantOp, arith::BitcastOp, vector::BitCastOp, vector::ShapeCastOp>(op))
+      isa<arith::ConstantOp, ub::PoisonOp, arith::BitcastOp, vector::BitCastOp, vector::ShapeCastOp>(op))
     return InstructionCost{};
   uint64_t packets = 1;
   for (Type type : op->getOperandTypes()) {
@@ -127,7 +128,8 @@ LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned 
       if (value.getParentBlock() != body) resident.insert(value);
   RegisterUsage live;
   for (Value value : resident)
-    if (!value.getDefiningOp<arith::ConstantOp>()) live += model.storage(value.getType());
+    if (!value.getDefiningOp<arith::ConstantOp>() && !value.getDefiningOp<ub::PoisonOp>())
+      live += model.storage(value.getType());
   result.surrounding = live;
   DenseMap<Value, unsigned> lastUse;
   for (auto [i, op] : llvm::enumerate(*body)) {
@@ -153,7 +155,10 @@ LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned 
   for (auto [i, op] : llvm::enumerate(*body)) {
     uint64_t issues = 0;
     for (Value value : op.getResults()) {
-      auto cost = model.storage(value.getType(), scalarLanes);
+      // Poison is an abstract unspecified value, not a saved physical vector.
+      // A later operation that defines lanes (including a freeze or a carry)
+      // remains charged normally; only the poison producer has no residency.
+      auto cost = isa<ub::PoisonOp>(op) ? RegisterUsage{} : model.storage(value.getType(), scalarLanes);
       costs[value] = cost; live += cost;
       issues = std::max(issues, cost.vectors + cost.predicates);
     }
