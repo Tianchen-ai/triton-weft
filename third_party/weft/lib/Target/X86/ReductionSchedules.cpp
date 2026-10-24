@@ -87,30 +87,34 @@ public:
       auto updates = combiners(source);
       if (updates.empty()) continue;
       APInt increment, lower, upper;
-      if (!matchPattern(source.getStep(), m_ConstantInt(&increment)) || increment.getSExtValue() <= 1) continue;
+      if (!matchPattern(source.getStep(), m_ConstantInt(&increment)) || increment.getSExtValue() <= 0) continue;
       int64_t step = increment.getSExtValue();
       auto model = weft::x86::ResourceModel::get(source);
       auto original = weft::x86::analyzeLoop(source, model);
+      if (original.unpricedOperations) continue;
       bool staticDomain = matchPattern(source.getLowerBound(), m_ConstantInt(&lower)) &&
           matchPattern(source.getUpperBound(), m_ConstantInt(&upper));
       uint64_t trips = staticDomain ? uint64_t(std::max(int64_t(0), upper.getSExtValue() - lower.getSExtValue())) / step : 0;
-      // Structural work units, not predicted CPU cycles. The recurrence term
-      // describes one sequential dependency per partial; controls charge the
-      // loop increment/test. Static domains also pay combine and packet tails.
-      auto cost = [&](unsigned copies) {
-        if (!staticDomain) return double(original.work) + 3.0 / copies;
+      // Price the actual candidate, including its expanded address/conversion
+      // work and SSA recurrence. Independent chains reduce dependency pressure
+      // but still pay all supply work and the final combine within the primitive.
+      auto cost = [&](unsigned copies, const weft::x86::LoopResources &resources) {
+        double iteration = std::max(resources.issueUnits, resources.carriedPath) + 3;
+        if (!staticDomain) return iteration / copies;
         uint64_t full = trips / copies, rest = trips % copies;
-        return double(trips) * original.work + double(full + rest) * 3 + double(copies - 1) * updates.size();
+        double tail = std::max(original.issueUnits, original.carriedPath) + 3;
+        return full * iteration + rest * tail + double(copies - 1) * updates.size();
       };
       unsigned selected = 1, visited = 1, rejected = 0;
-      double best = cost(1);
+      double best = cost(1, original);
       scf::ForOp chosen;
       weft::x86::LoopResources selectedResources = original;
       SmallVector<Attribute> candidates;
       auto recordCandidate = [&](unsigned copies, const weft::x86::LoopResources &resources, StringRef decision) {
         candidates.push_back(b.getDictionaryAttr({
           b.getNamedAttr("partial_copies", b.getI64IntegerAttr(copies)),
-          b.getNamedAttr("estimated_cost", b.getF64FloatAttr(cost(copies))),
+          b.getNamedAttr("estimated_cost", b.getF64FloatAttr(cost(copies, resources))),
+          b.getNamedAttr("final_combine_cost", b.getI64IntegerAttr((copies - 1) * updates.size())),
           b.getNamedAttr("resources", weft::x86::resourceAttributes(b, resources)),
           b.getNamedAttr("decision", b.getStringAttr(decision))}));
       };
@@ -123,11 +127,12 @@ public:
         ++visited;
         auto candidate = interleave(b, source, copies, step);
         auto resources = weft::x86::analyzeLoop(candidate, model);
-        if (!model.fits(resources.peak)) {
-          recordCandidate(copies, resources, "resource-limit"); ++rejected; b.eraseOp(candidate); continue;
+        if (resources.unpricedOperations || !model.fits(resources.peak)) {
+          recordCandidate(copies, resources, resources.unpricedOperations ? "unpriced-operation" : "resource-limit");
+          ++rejected; b.eraseOp(candidate); continue;
         }
         recordCandidate(copies, resources, "legal");
-        double work = cost(copies);
+        double work = cost(copies, resources);
         if (work < best) {
           if (chosen) b.eraseOp(chosen);
           chosen = candidate; best = work; selected = copies; selectedResources = resources;
@@ -138,7 +143,7 @@ public:
       record.set("partial_vectors", b.getI64IntegerAttr(selected * source.getNumResults()));
       record.set("candidate_count", b.getI64IntegerAttr(visited));
       record.set("rejected_resource_candidates", b.getI64IntegerAttr(rejected));
-      record.set("cost_basis", b.getStringAttr(staticDomain ? "static-domain-work-and-merge" : "steady-state-work-per-packet"));
+      record.set("cost_basis", b.getStringAttr(staticDomain ? "candidate-supply-dependency-tail-and-merge" : "steady-state-per-packet; merge-recorded-separately"));
       record.set("candidates", b.getArrayAttr(candidates));
       record.set("estimated_selected_cost", b.getF64FloatAttr(best));
       weft::x86::updateArraySchedule(source, b, record.getDictionary(&getContext()).getValue());

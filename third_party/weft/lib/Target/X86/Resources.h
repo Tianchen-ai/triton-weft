@@ -2,6 +2,7 @@
 #define WEFT_X86_RESOURCES_H
 
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include <optional>
 
 namespace weft::x86 {
 struct RegisterUsage {
@@ -24,7 +25,17 @@ struct ResourceModel {
 struct LoopResources {
   RegisterUsage peak, surrounding, scratch;
   uint64_t work = 0, loads = 0, stores = 0, conversions = 0;
+  double issueUnits = 0, criticalPath = 0, carriedPath = 0;
+  uint64_t readBytes = 0, writtenBytes = 0, permutations = 0, unpricedOperations = 0;
 };
+struct InstructionCost {
+  double issues = 0, latency = 0;
+  uint64_t readBytes = 0, writtenBytes = 0;
+};
+// Structural instruction classes and native packet widths, not CPU-cycle
+// predictions. An unknown operation makes the estimate incomplete.
+std::optional<InstructionCost> instructionCost(mlir::Operation *op,
+                                              const ResourceModel &model);
 // Actual SSA residency, including values retained across enclosing regions.
 // scalarLanes describes a candidate packetization of a scalar pointwise body.
 LoopResources analyzeLoop(mlir::scf::ForOp loop, const ResourceModel &model,

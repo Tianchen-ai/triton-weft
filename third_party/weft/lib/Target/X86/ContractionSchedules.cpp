@@ -1,5 +1,6 @@
 #include "Weft/Target/X86Compiler.h"
 #include "Resources.h"
+#include "ContractionOutputs.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -117,6 +118,32 @@ scf::ForOp packetize(IRRewriter &b, scf::ForOp source, unsigned lanes) {
   return loop;
 }
 
+void eraseDeadPure(IRRewriter &b, scf::ForOp loop) {
+  bool changed;
+  do {
+    changed = false;
+    for (Operation &op : llvm::make_early_inc_range(llvm::reverse(*loop.getBody())))
+      if (!op.getNumRegions() && !op.hasTrait<OpTrait::IsTerminator>() && op.use_empty() && isMemoryEffectFree(&op)) {
+        b.eraseOp(&op); changed = true;
+      }
+  } while (changed);
+}
+std::optional<double> outerWork(scf::ForOp outer, scf::ForOp reduction,
+                                const weft::x86::ResourceModel &model) {
+  if (!outer) return {};
+  double result = 3;
+  for (Operation &op : *outer.getBody()) {
+    if (&op == reduction.getOperation()) continue;
+    auto estimate = weft::x86::instructionCost(&op, model);
+    if (!estimate) return {};
+    result += estimate->issues;
+  }
+  return result;
+}
+double iterationCost(const weft::x86::LoopResources &resources) {
+  return std::max(resources.issueUnits, resources.carriedPath) + 3;
+}
+
 class ScheduleContractions : public PassWrapper<ScheduleContractions, OperationPass<ModuleOp>> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ScheduleContractions)
@@ -146,7 +173,7 @@ public:
         if (type.isIntOrFloat()) bits = std::max(bits, type.getIntOrFloatBitWidth());
       }
       for (Value value : source.getInitArgs()) {
-        supported &= matchPattern(value, m_Zero());
+        supported &= matchPattern(value, m_Zero()) || matchPattern(value, m_PosZeroFloat());
       }
       for (Operation &op : source.getBody()->without_terminator()) {
         if (auto load = dyn_cast<memref::LoadOp>(op)) {
@@ -161,26 +188,80 @@ public:
       if (!supported) continue;
       auto model = weft::x86::ResourceModel::get(source);
       bool known = matchPattern(source.getUpperBound(), m_ConstantInt(&count)) && !count.isNegative();
-      double scalarCost = weft::x86::analyzeLoop(source, model).work + 3;
-      double bestCost = known ? scalarCost * count.getLimitedValue() : scalarCost;
+      auto original = weft::x86::analyzeLoop(source, model);
+      if (original.unpricedOperations) continue;
+      double scalarCost = iterationCost(original);
+      auto outer = dyn_cast<scf::ForOp>(source->getParentOp());
+      auto sourceOuterCost = outerWork(outer, source, model);
+      double originalCost = known ? scalarCost * count.getLimitedValue() : scalarCost;
+      double bestCost = originalCost;
       scf::ForOp chosen;
+      scf::ForOp chosenOuter;
       SmallVector<Attribute> records;
       weft::x86::LoopResources chosenResources;
       unsigned chosenLanes = 1;
+      auto eraseChosen = [&]() {
+        if (chosenOuter) b.eraseOp(chosenOuter);
+        else if (chosen) b.eraseOp(chosen);
+        chosen = {}; chosenOuter = {};
+      };
+      if (outer && sourceOuterCost) {
+        APInt outputs;
+        bool knownOutputs = matchPattern(outer.getUpperBound(), m_ConstantInt(&outputs)) && outputs.isStrictlyPositive();
+        for (unsigned lanes = model.vectorBits / llvm::PowerOf2Ceil(bits); lanes >= 2; lanes /= 2) {
+          if (knownOutputs && outputs.getLimitedValue() < lanes) continue;
+          auto candidate = weft::x86::packetizeContractionOutputs(b, source, lanes);
+          if (failed(candidate)) continue;
+          auto resources = weft::x86::analyzeLoop(candidate->reduction, model);
+          auto outerResources = weft::x86::analyzeLoop(candidate->outer, model);
+          resources.peak.vectors = std::max(resources.peak.vectors, outerResources.peak.vectors);
+          resources.peak.predicates = std::max(resources.peak.predicates, outerResources.peak.predicates);
+          auto preparation = outerWork(candidate->outer, candidate->reduction, model);
+          if (!preparation) { b.eraseOp(candidate->outer); continue; }
+          double cost = iterationCost(resources) / lanes;
+          if (known) {
+            double packetCost = count.getLimitedValue() * iterationCost(resources) + *preparation;
+            if (knownOutputs)
+              cost = ((outputs.getLimitedValue() / lanes) * packetCost +
+                  (outputs.getLimitedValue() % lanes) * (originalCost + *sourceOuterCost)) /
+                  outputs.getLimitedValue() - *sourceOuterCost;
+            else cost = packetCost / lanes - *sourceOuterCost;
+          }
+          records.push_back(b.getDictionaryAttr({
+            b.getNamedAttr("packet_axis", b.getStringAttr("output")),
+            b.getNamedAttr("lanes", b.getI64IntegerAttr(lanes)),
+            b.getNamedAttr("estimated_cost", b.getF64FloatAttr(cost)),
+            b.getNamedAttr("preparation_and_store_cost", b.getF64FloatAttr(*preparation)),
+            b.getNamedAttr("resources", weft::x86::resourceAttributes(b, resources)),
+            b.getNamedAttr("decision", b.getStringAttr(resources.unpricedOperations ? "unpriced-operation" :
+                model.fits(resources.peak) ? "legal" : "resource-limit"))}));
+          if (!resources.unpricedOperations && model.fits(resources.peak) && cost < bestCost) {
+            eraseChosen();
+            chosenOuter = candidate->outer; chosen = candidate->reduction;
+            chosenLanes = lanes; chosenResources = resources; bestCost = cost;
+          } else b.eraseOp(candidate->outer);
+        }
+      }
       for (unsigned lanes = model.vectorBits / llvm::PowerOf2Ceil(bits); lanes >= 2; lanes /= 2) {
         if (known && count.getLimitedValue() < lanes) continue;
         auto candidate = packetize(b, source, lanes);
+        eraseDeadPure(b, candidate);
         auto resources = weft::x86::analyzeLoop(candidate, model);
-        double cost = double(resources.work + 3) / lanes;
-        if (known) cost = double(count.getLimitedValue() / lanes) * (resources.work + 3) +
-            (count.getLimitedValue() % lanes) * scalarCost + llvm::Log2_64(lanes) * source.getNumResults();
+        double finish = llvm::Log2_64(lanes) * source.getNumResults() *
+            (isa<FloatType>(source.getResult(0).getType()) ? 3.0 : 1.0);
+        double cost = iterationCost(resources) / lanes;
+        if (known) cost = double(count.getLimitedValue() / lanes) * iterationCost(resources) +
+            (count.getLimitedValue() % lanes) * scalarCost + finish;
         records.push_back(b.getDictionaryAttr({
+          b.getNamedAttr("packet_axis", b.getStringAttr("reduction")),
           b.getNamedAttr("lanes", b.getI64IntegerAttr(lanes)),
           b.getNamedAttr("estimated_cost", b.getF64FloatAttr(cost)),
+          b.getNamedAttr("result_conversion_cost", b.getF64FloatAttr(finish)),
           b.getNamedAttr("resources", weft::x86::resourceAttributes(b, resources)),
-          b.getNamedAttr("decision", b.getStringAttr(model.fits(resources.peak) ? "legal" : "resource-limit"))}));
-        if (model.fits(resources.peak) && cost < bestCost) {
-          if (chosen) b.eraseOp(chosen);
+          b.getNamedAttr("decision", b.getStringAttr(resources.unpricedOperations ? "unpriced-operation" :
+              model.fits(resources.peak) ? "legal" : "resource-limit"))}));
+        if (!resources.unpricedOperations && model.fits(resources.peak) && cost < bestCost) {
+          eraseChosen();
           chosen = candidate; chosenLanes = lanes; chosenResources = resources; bestCost = cost;
         } else b.eraseOp(candidate);
       }
@@ -188,11 +269,15 @@ public:
       SmallVector<Attribute> schedules;
       if (auto previous = function->getAttrOfType<ArrayAttr>("weft.x86.array_schedule")) llvm::append_range(schedules, previous);
       NamedAttrList record;
-      if (chosen) record.assign(weft::x86::resourceAttributes(b, chosenResources).getValue());
+      record.assign(weft::x86::resourceAttributes(b, chosen ? chosenResources : original).getValue());
+      record.set("resource_decision", b.getStringAttr(chosen || model.fits(original.peak) ?
+          "within-budget" : "original-requires-llvm-allocation"));
       record.set("kind", b.getStringAttr("contraction"));
+      record.set("packet_axis", b.getStringAttr(chosenOuter ? "output" : "reduction"));
       record.set("lanes", b.getI64IntegerAttr(chosenLanes));
       record.set("packet_candidates", b.getArrayAttr(records));
       record.set("packet_estimated_cost", b.getF64FloatAttr(bestCost));
+      record.set("cost_basis", b.getStringAttr(known ? "complete-reduction-with-tail-and-conversion" : "steady-state-per-product; startup-recorded-separately"));
       record.set("tail", b.getStringAttr("scalar-in-source-domain"));
       unsigned id = schedules.size(); schedules.push_back(record.getDictionary(&getContext()));
       function->setAttr("weft.x86.array_schedule", b.getArrayAttr(schedules));
@@ -201,6 +286,11 @@ public:
       chosen->setAttr("weft.x86.array_schedule_id", b.getI32IntegerAttr(id));
       chosen->setAttr("weft.x86.packet_lanes", b.getI64IntegerAttr(chosenLanes));
       if (auto scope = source->getAttr("weft.x86.array_scope")) chosen->setAttr("weft.x86.array_scope", scope);
+      if (chosenOuter) {
+        chosen->setAttr("weft.x86.output_packet", b.getUnitAttr());
+        outer.setLowerBound(chosenOuter.getUpperBound());
+        continue;
+      }
       b.setInsertionPointAfter(chosen);
       SmallVector<Value> initial;
       for (auto [i, value] : llvm::enumerate(chosen.getResults()))

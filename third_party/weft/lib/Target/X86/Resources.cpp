@@ -1,9 +1,12 @@
 #include "Resources.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/Matchers.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -29,6 +32,77 @@ RegisterUsage ResourceModel::storage(Type type, unsigned scalarLanes) const {
 static void maximize(RegisterUsage &a, RegisterUsage b) {
   a.vectors = std::max(a.vectors, b.vectors);
   a.predicates = std::max(a.predicates, b.predicates);
+}
+std::optional<InstructionCost> instructionCost(Operation *op, const ResourceModel &model) {
+  auto bytes = [](Type type) -> uint64_t {
+    uint64_t elements = 1;
+    if (auto vector = dyn_cast<VectorType>(type)) {
+      if (vector.isScalable()) return 0;
+      elements = vector.getNumElements(); type = vector.getElementType();
+    }
+    if (!type.isIntOrIndexOrFloat()) return 0;
+    return elements * llvm::divideCeil(type.isIndex() ? 64u : type.getIntOrFloatBitWidth(), 8u);
+  };
+  if (op->hasTrait<OpTrait::IsTerminator>() ||
+      isa<arith::ConstantOp, arith::BitcastOp, vector::BitCastOp, vector::ShapeCastOp>(op))
+    return InstructionCost{};
+  uint64_t packets = 1;
+  for (Type type : op->getOperandTypes()) {
+    auto usage = model.storage(type);
+    packets = std::max(packets, usage.vectors + usage.predicates);
+  }
+  for (Type type : op->getResultTypes()) {
+    auto usage = model.storage(type);
+    packets = std::max(packets, usage.vectors + usage.predicates);
+  }
+  auto cost = [&](double issues, double latency) {
+    return InstructionCost{issues * packets, latency, 0, 0};
+  };
+  if (isa<memref::LoadOp, vector::LoadOp>(op))
+    return InstructionCost{double(packets), 4, bytes(op->getResult(0).getType()), 0};
+  if (isa<memref::StoreOp, vector::StoreOp>(op))
+    return InstructionCost{double(packets), 1, 0, bytes(op->getOperand(0).getType())};
+  if (auto gather = dyn_cast<vector::GatherOp>(op)) {
+    auto type = cast<VectorType>(gather.getResult().getType());
+    return InstructionCost{double(type.getNumElements()), 4, bytes(type), 0};
+  }
+  if (auto scatter = dyn_cast<vector::ScatterOp>(op)) {
+    auto type = cast<VectorType>(scatter.getValueToStore().getType());
+    return InstructionCost{double(type.getNumElements()), 1, 0, bytes(type)};
+  }
+  if (isa<arith::DivSIOp, arith::DivUIOp, arith::RemSIOp, arith::RemUIOp>(op)) {
+    APInt divisor;
+    if (isa<arith::DivUIOp, arith::RemUIOp>(op) &&
+        matchPattern(op->getOperand(1), m_ConstantInt(&divisor)) && !divisor.isZero())
+      return divisor.isPowerOf2() ? cost(1, 1) : cost(4, 6);
+    // There is no general SIMD integer divide. Charge its scalar lanes, rather
+    // than pretending one wide IR operation is one machine instruction.
+    auto type = dyn_cast<VectorType>(op->getResult(0).getType());
+    return InstructionCost{24.0 * (type ? type.getNumElements() : 1), 24, 0, 0};
+  }
+  if (isa<arith::DivFOp>(op)) return cost(8, 12);
+  if (isa<math::SqrtOp>(op)) return cost(8, 12);
+  if (isa<arith::MulIOp>(op)) return cost(1, 3);
+  if (isa<arith::MulFOp, math::FmaOp>(op)) return cost(1, 4);
+  if (isa<arith::AddFOp, arith::SubFOp>(op)) return cost(1, 3);
+  if (isa<arith::MinNumFOp, arith::MaxNumFOp, arith::MinimumFOp, arith::MaximumFOp>(op))
+    return cost(2, 3);
+  if (isa<arith::AddIOp, arith::SubIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp,
+          arith::ShLIOp, arith::ShRUIOp, arith::ShRSIOp, arith::CmpIOp, arith::CmpFOp,
+          arith::SelectOp, arith::MinSIOp, arith::MaxSIOp, arith::MinUIOp, arith::MaxUIOp,
+          arith::NegFOp, math::AbsFOp>(op)) return cost(1, 1);
+  if (isa<arith::ExtFOp, arith::TruncFOp, arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp,
+          arith::SIToFPOp, arith::UIToFPOp, arith::FPToSIOp, arith::FPToUIOp,
+          arith::IndexCastOp, arith::IndexCastUIOp>(op)) return cost(1, 3);
+  if (isa<vector::BroadcastOp, vector::ExtractOp, vector::InsertOp,
+          vector::ExtractStridedSliceOp, vector::InsertStridedSliceOp, vector::ShuffleOp>(op))
+    return cost(1, 3);
+  if (auto reduction = dyn_cast<vector::ReductionOp>(op)) {
+    auto type = cast<VectorType>(reduction.getVector().getType());
+    double depth = llvm::Log2_64_Ceil(type.getNumElements());
+    return cost(depth, depth * (isa<FloatType>(type.getElementType()) ? 3 : 1));
+  }
+  return std::nullopt;
 }
 LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned scalarLanes) {
   LoopResources result;
@@ -57,6 +131,13 @@ LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned 
   result.surrounding = live;
   DenseMap<Value, unsigned> lastUse;
   for (auto [i, op] : llvm::enumerate(*body)) {
+    if (auto estimate = instructionCost(&op, model)) {
+      result.issueUnits += estimate->issues;
+      result.readBytes += estimate->readBytes;
+      result.writtenBytes += estimate->writtenBytes;
+    } else ++result.unpricedOperations;
+    result.permutations += isa<vector::ShuffleOp, vector::ExtractStridedSliceOp,
+                               vector::InsertStridedSliceOp, vector::BroadcastOp>(op);
     op.walk([&](Operation *nested) {
       for (Value value : nested->getOperands())
         if (value.getParentBlock() == body) lastUse[value] = i;
@@ -96,6 +177,8 @@ LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned 
       if (value.getParentBlock() != body && value.getDefiningOp<arith::ConstantOp>() && literals.insert(value).second) {
         scratch += model.storage(value.getType());
         result.work += model.storage(value.getType()).vectors;
+        auto literal = model.storage(value.getType());
+        result.issueUnits += literal.vectors + literal.predicates;
       }
     if (cast || isa<vector::GatherOp, vector::ScatterOp>(op)) ++scratch.vectors;
     if (isa<vector::GatherOp, vector::ScatterOp>(op)) {
@@ -113,6 +196,12 @@ LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned 
     for (Value value : op.getResults())
       if (!lastUse.count(value)) { live -= costs[value]; costs.erase(value); }
   }
+  auto dependency = weft::analysis::dependencyCost(*body, loop.getRegionIterArgs(), [&](Operation *op) {
+    auto estimate = instructionCost(op, model);
+    return estimate ? estimate->latency : 0;
+  });
+  result.criticalPath = dependency.criticalPath;
+  result.carriedPath = dependency.carriedPath;
   return result;
 }
 DictionaryAttr resourceAttributes(OpBuilder &b, const LoopResources &r) {
@@ -123,6 +212,13 @@ DictionaryAttr resourceAttributes(OpBuilder &b, const LoopResources &r) {
     b.getNamedAttr("surrounding_predicates", b.getI64IntegerAttr(r.surrounding.predicates)),
     b.getNamedAttr("scratch_vectors", b.getI64IntegerAttr(r.scratch.vectors)),
     b.getNamedAttr("work_units", b.getI64IntegerAttr(r.work)),
+    b.getNamedAttr("issue_units", b.getF64FloatAttr(r.issueUnits)),
+    b.getNamedAttr("critical_path", b.getF64FloatAttr(r.criticalPath)),
+    b.getNamedAttr("carried_path", b.getF64FloatAttr(r.carriedPath)),
+    b.getNamedAttr("read_bytes", b.getI64IntegerAttr(r.readBytes)),
+    b.getNamedAttr("written_bytes", b.getI64IntegerAttr(r.writtenBytes)),
+    b.getNamedAttr("permutations", b.getI64IntegerAttr(r.permutations)),
+    b.getNamedAttr("unpriced_operations", b.getI64IntegerAttr(r.unpricedOperations)),
     b.getNamedAttr("loads", b.getI64IntegerAttr(r.loads)),
     b.getNamedAttr("stores", b.getI64IntegerAttr(r.stores)),
     b.getNamedAttr("conversions", b.getI64IntegerAttr(r.conversions))});

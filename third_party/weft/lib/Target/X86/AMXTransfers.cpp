@@ -1,4 +1,5 @@
 #include "AMXContractions.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Matchers.h"
@@ -236,18 +237,6 @@ class ReuseAMXPacking : public PassWrapper<ReuseAMXPacking, OperationPass<Module
     }
     return merged;
   }
-  bool available(Value value, scf::ForOp loop, DominanceInfo &dominance,
-                 llvm::SmallPtrSetImpl<Operation *> &seen, SmallVectorImpl<Operation *> &ordered) {
-    if (dominance.dominates(value, loop)) return true;
-    Operation *op = value.getDefiningOp();
-    if (!op || op->getNumRegions() || op->hasTrait<OpTrait::IsTerminator>() || !isMemoryEffectFree(op) || !isSpeculatable(op) ||
-        !llvm::all_of(op->getResultTypes(), [](Type type) { return getElementTypeOrSelf(type).isIntOrIndex(); }) ||
-        seen.size() >= 4096) return false;
-    if (!seen.insert(op).second) return true;
-    for (Value operand : op->getOperands()) if (!available(operand, loop, dominance, seen, ordered)) return false;
-    ordered.push_back(op);
-    return true;
-  }
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReuseAMXPacking)
   StringRef getArgument() const override { return "weft-x86-reuse-amx-packing"; }
@@ -261,7 +250,6 @@ public:
       auto alloc = root ? root.getDefiningOp<memref::AllocOp>() : memref::AllocOp();
       if (alloc && seenAllocations.insert(alloc).second) allocations.push_back(alloc);
     });
-    DominanceInfo dominance(getOperation());
     int64_t reused = 0;
     for (auto alloc : allocations) {
       alloc->removeAttr("weft.x86.amx_pack_closed");
@@ -303,16 +291,17 @@ public:
       scf::ForOp destination;
       SmallVector<Operation *> producers;
       for (auto loop = alloc->getParentOfType<scf::ForOp>(); loop; loop = loop->getParentOfType<scf::ForOp>()) {
-        llvm::SmallPtrSet<Operation *, 32> seen;
-        SmallVector<Operation *> ordered;
-        bool invariant = llvm::all_of(alloc.getDynamicSizes(), [&](Value v) { return available(v, loop, dominance, seen, ordered); });
+        SmallVector<Value> roots(alloc.getDynamicSizes());
         for (auto store : stores) {
-          invariant &= available(store.getValueToStore(), loop, dominance, seen, ordered);
-          for (Value index : store.getIndices()) invariant &= available(index, loop, dominance, seen, ordered);
+          roots.push_back(store.getValueToStore());
+          llvm::append_range(roots, store.getIndices());
         }
-        if (!invariant) break;
+        auto ordered = weft::analysis::movablePureSlice(roots, loop, [](Operation *op) {
+          return llvm::all_of(op->getResultTypes(), [](Type type) { return getElementTypeOrSelf(type).isIntOrIndex(); });
+        }, 4096);
+        if (failed(ordered)) break;
         destination = loop;
-        producers = std::move(ordered);
+        producers = std::move(*ordered);
       }
       if (!destination) continue;
       for (Operation *producer : producers) producer->moveBefore(destination);

@@ -17,6 +17,7 @@ add_library(WeftX86Target STATIC
   IndexedValues.cpp
   IndexRelations.cpp
   ContractionSchedules.cpp
+  ContractionOutputs.cpp
   IntegerReductions.cpp
   Lookups.cpp
   LocalStorage.cpp
