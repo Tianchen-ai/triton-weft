@@ -251,6 +251,7 @@ Value weft::widenX86ScalarHalf(ModuleOp module, OpBuilder &b, Location loc,
           b.getFunctionType({fp, hp, fp, b.getI8Type(), b.getI32Type()}, {fp}));
       function.setPrivate();
     }
+    function->setAttr("weft.x86.preserves_tile_state", b.getUnitAttr());
     // Upper lanes are not part of the scalar value. Define their merge source
     // independently so the saved half has one numeric use and a legal original
     // load can fold into the scalar conversion's m16 operand.
@@ -273,6 +274,7 @@ Value weft::widenX86ScalarHalf(ModuleOp module, OpBuilder &b, Location loc,
         b.getFunctionType({carrier.getType(), fp, b.getI16Type(), b.getI32Type()}, {fp}));
     function.setPrivate();
   }
+  function->setAttr("weft.x86.preserves_tile_state", b.getUnitAttr());
   Value widened = func::CallOp::create(b, loc, function, ValueRange{carrier, zero, enabled, mode}).getResult(0);
   return vector::ExtractOp::create(b, loc, widened, ArrayRef<int64_t>{0});
 }
