@@ -10879,6 +10879,7 @@ mlir::LogicalResult RVVAxisBroadcastOp::verify() {
     size_t resultPosition = static_cast<size_t>(
         found - result.getAxisIds().asArrayRef().begin());
     preservesSourceDomain &=
+        input.getShape()[position] == 1 ||
         input.getShape()[position] == result.getShape()[resultPosition];
   }
   bool addsOnlySingletonAxes = true;
@@ -10902,8 +10903,7 @@ mlir::LogicalResult RVVAxisBroadcastOp::verify() {
       inputLayout.getLmulEighths() == resultLayout.getLmulEighths();
   const bool packed = getLeaf().getInstruction() == "rvv.axis-broadcast.packed";
   const bool repeated = getLeaf().getInstruction() == "rvv.axis-broadcast.repeat-tile";
-  if (!preservesSourceDomain || input.getAxisIds().size() >=
-                                    result.getAxisIds().size() ||
+  if (!preservesSourceDomain ||
       inputLayout.getCarrier() != "rvv" ||
       resultLayout.getCarrier() != "rvv" || !inputLanes || !resultLanes ||
       *inputLanes <= 0 ||

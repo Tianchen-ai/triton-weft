@@ -3334,6 +3334,34 @@ private:
     getOperation().walk<mlir::WalkOrder::PreOrder>([&](riscv::ReshapeOp reshape) {
       auto required = reshape.getResult().getType();
       auto layout = reshapeCarrierLayout(builder, reshape);
+      if (!layout && reshape.getInput().getType().getLayout().getCarrier() == "rvv" &&
+          required.getLayout().getCarrier() == "rvv" &&
+          !llvm::equal(reshape.getOrder(), reshape.getInput().getType().getAxisIds().asArrayRef()) &&
+          riscv::reshapeAxisPositions(reshape.getInput().getType(), required, reshape.getOrder())) {
+        // Permuting two coalesced lane axes changes the order inside a register;
+        // it is not a metadata-only reshape. Realize one ordered lane axis on
+        // this use edge, leaving the other coordinates in register parts. The
+        // ordinary conversion materializer owns the required shuffle/transfer.
+        mlir::OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPoint(reshape);
+        Roles source;
+        source.anchored = true;
+        source.fullLaneExtent = true;
+        source.laneAxis = reshape.getOrder().back();
+        addSmallReplicas(reshape.getInput(), source, source.laneAxis);
+        auto inputLayout = buildLayout(builder, reshape.getInput(), source,
+            std::max<int64_t>(1, riscv_internal::physicalExtent(reshape.getInput(), source.laneAxis)),
+            reshape.getInput().getType().getLayout().getLmulEighths());
+        if (inputLayout) {
+          auto conversion = riscv::ConvertLayoutOp::create(builder, reshape.getLoc(),
+              riscv_internal::withLayout(reshape.getInput().getType(), inputLayout), reshape.getInput(),
+              riscv_internal::layoutConversion(builder, reshape.getInput().getType().getLayout(), inputLayout),
+              riscv::AccessAttr(), riscv_internal::unselectedLeaf(builder));
+          riscv_internal::copyOrigin(reshape, conversion);
+          reshape.getInputMutable().assign(conversion);
+          layout = reshapeCarrierLayout(builder, reshape);
+        }
+      }
       if (!layout || layout == required.getLayout()) return;
       setValueLayout(reshape.getResult(), layout);
       mlir::OpBuilder::InsertionGuard guard(builder);
@@ -3650,22 +3678,31 @@ private:
           operand.set(sourceValue);
           continue;
         }
-        bool properSubdomain = operandType.getAxisIds().size() <
-                                   result.getAxisIds().size() &&
-                               operandType.getElementType() ==
-                                   result.getElementType() &&
+        // Broadcast the operand's bits, independently of the consumer's
+        // element type (notably the predicate of a select). Singleton source
+        // coordinates are proper sub-domains too, even at equal logical rank.
+        auto broadcastType = riscv::ValueType::get(builder.getContext(),
+            operandType.getElementType(), result.getShape(), result.getAxisIds(),
+            result.getLayout());
+        auto broadcastLayout = operandType.getElementType() == result.getElementType()
+            ? result.getLayout()
+            : riscv_internal::projectLayout(builder, broadcastType,
+                                            result.getLayout(), kernel.getTarget());
+        bool properSubdomain = broadcastLayout &&
                                operandType.getLayout().getCarrier() == "rvv" &&
-                               result.getLayout().getCarrier() == "rvv" &&
-                               operandType.getLayout().getSew() ==
-                                   result.getLayout().getSew();
+                               broadcastLayout.getCarrier() == "rvv" &&
+                               operandType.getLayout().getSew() == broadcastLayout.getSew();
+        if (broadcastLayout)
+          broadcastType = mlir::cast<riscv::ValueType>(
+              riscv_internal::withLayout(broadcastType, broadcastLayout));
         for (auto [position, axis] :
              llvm::enumerate(operandType.getAxisIds().asArrayRef())) {
           auto found = llvm::find(result.getAxisIds().asArrayRef(), axis);
           properSubdomain &=
               found != result.getAxisIds().asArrayRef().end() &&
-              operandType.getShape()[position] ==
+              (operandType.getShape()[position] == 1 || operandType.getShape()[position] ==
                   result.getShape()[static_cast<size_t>(
-                      found - result.getAxisIds().asArrayRef().begin())];
+                      found - result.getAxisIds().asArrayRef().begin())]);
         }
         auto inputLanes = riscv_internal::staticProduct(
             operandType.getLayout().getLaneFactors().asArrayRef());
@@ -3694,12 +3731,12 @@ private:
           continue;
         }
         auto broadcast = riscv::RVVAxisBroadcastOp::create(builder,
-            operation->getLoc(), operation->getResult(0).getType(), sourceValue,
+            operation->getLoc(), broadcastType, sourceValue,
             riscv_internal::leaf(
                 builder, "rvv", "axis-broadcast", "rvv.axis-broadcast",
                 "rvv.axis-broadcast",
                 operandType.getLayout().getRegisterGroups(),
-                result.getLayout().getRegisterGroups(), 1, 0, "none", "exact",
+                broadcastLayout.getRegisterGroups(), 1, 0, "none", "exact",
                 {*inputLanes, *resultLanes}));
         riscv_internal::copyOrigin(operation, broadcast);
         operand.set(broadcast.getResult());

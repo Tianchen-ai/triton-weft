@@ -12,7 +12,7 @@ from triton.language import core as tl
 from triton.language.weft.dtypes import DTypeCategory
 
 from .ir import Value
-from .types import LocalValueType, ScalarType, axes_of, element_type, shape_of
+from .types import LocalValueType, ScalarType, axes_of, element_type, shape_of, value_type
 
 
 class LogicalType(tl.base_type):
@@ -32,6 +32,19 @@ class LogicalType(tl.base_type):
 
     def is_block(self):
         return isinstance(self.canonical, LocalValueType)
+
+    def get_block_shapes(self):
+        if not self.is_block():
+            raise TypeError("a scalar logical type has no block shape")
+        return tl.tuple(self.shape)
+
+    def with_element_ty(self, scalar_ty):
+        from .source import normalize_static
+        dtype = (scalar_ty.canonical_dtype if isinstance(scalar_ty, FiniteDType)
+                 else normalize_static(scalar_ty))
+        if not isinstance(element_type(self.canonical), ScalarType):
+            raise TypeError("only numeric logical values admit an element-type substitution")
+        return LogicalType(value_type(ScalarType(dtype), self.shape, axes_of(self.canonical)))
 
     def is_ptr(self):
         return False

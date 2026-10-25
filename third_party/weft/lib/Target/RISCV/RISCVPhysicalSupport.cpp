@@ -819,7 +819,7 @@ bool riscv_internal::selectLaneRepack(mlir::Builder &builder, riscv::ConvertLayo
   auto conversion = operation.getConversion();
   if (!kernel || kernel.getResourcesMaterialized() || conversion.getEffect() != "pure" ||
       (conversion.getKind() != "register_to_lane" && conversion.getKind() != "time_to_lane" &&
-       conversion.getKind() != "tuple") ||
+       conversion.getKind() != "lane_to_register" && conversion.getKind() != "tuple") ||
       riscv::fieldReadProjection(operation.getInput())) return false;
   auto source = operation.getInput().getType(), target = operation.getResult().getType();
   if (conversion.getKind() == "tuple" &&

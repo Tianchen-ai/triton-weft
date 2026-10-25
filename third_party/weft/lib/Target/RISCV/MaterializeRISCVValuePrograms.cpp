@@ -573,7 +573,11 @@ private:
           SmallVector<Value> inputCoordinates(coordinates.size());
           for (auto [position, sourcePosition] : llvm::enumerate(*positions))
             inputCoordinates[sourcePosition] = coordinates[position];
-          auto sourcePiece = fragment(inputType, axis, width, target);
+          auto outputAxes = outputType.getAxisIds().asArrayRef();
+          auto lane = llvm::find(outputAxes, axis);
+          if (lane == outputAxes.end()) return failure();
+          int64_t sourceAxis = inputType.getAxisIds()[(*positions)[lane - outputAxes.begin()]];
+          auto sourcePiece = fragment(inputType, sourceAxis, width, target);
           auto resultPiece = fragment(outputType, axis, width, target);
           if (!sourcePiece || !resultPiece) return failure();
           auto value = load(*input, inputType, inputCoordinates, sourcePiece, op);

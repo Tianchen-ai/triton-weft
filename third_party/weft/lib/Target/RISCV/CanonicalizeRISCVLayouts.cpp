@@ -912,7 +912,7 @@ public:
       const auto kind = conversion.getConversion().getKind();
       if (hasFinalResourceContract(conversion) ||
           !isPureRepresentationConversion(conversion) ||
-          (kind != "register_to_lane" && kind != "time_to_lane"))
+          (kind != "register_to_lane" && kind != "time_to_lane" && kind != "lane_to_register"))
         continue;
       auto source = conversion.getInput().getType();
       auto target = conversion.getResult().getType();

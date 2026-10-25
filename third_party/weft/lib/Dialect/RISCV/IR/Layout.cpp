@@ -550,6 +550,15 @@ std::optional<int64_t> weft::riscv::rvvBroadcastSourcePart(
     if (found == b.getAxisIds().asArrayRef().end())
       return std::nullopt;
     const size_t j = found - b.getAxisIds().asArrayRef().begin();
+    if (input.getShape()[i] == 1 && result.getShape()[j] != 1) {
+      // This source coordinate is always zero, including when the destination
+      // broadcasts it into time or replica coordinates as well as SIMD lanes.
+      if (a.getTimeFactors()[i] != 1 || a.getLaneFactors()[i] != 1 ||
+          a.getReplicaFactors()[i] != 1 || a.getFragmentFactors()[i] != 1 ||
+          a.getLocalFactors()[i] != 1)
+        return std::nullopt;
+      continue;
+    }
     if ((a.getReplicaGroup() > 1 || b.getReplicaGroup() > 1) &&
         rvvLaneCount(input) == rvvLaneCount(result) && a.getLaneFactors()[i] > 1) {
       auto sourceStride = boundedProduct(a.getLaneFactors().asArrayRef().drop_front(i + 1));

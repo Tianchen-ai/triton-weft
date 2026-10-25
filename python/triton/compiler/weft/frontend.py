@@ -197,7 +197,13 @@ class CanonicalSemantic(TritonSemantic):
                 raise NotImplementedError("View store cache modifiers support the .cs streaming hint")
             self.extension._mark_view_access(ptr.handle, "write")
             stored = value.handle
-            if not is_logical(value) and shape_of(stored.type):
+            shape = shape_of(stored.type)
+            # A finite-width dtype constructor can wrap an ordinary Triton
+            # tensor in LogicalType without changing its positional axes.
+            # Coordinate identity, not that Python wrapper, owns the binding
+            # from a positional tensor to a destination View.
+            positional = shape and axes_of(stored.type) == self.builder.positional_axes(len(shape))
+            if shape and (not is_logical(value) or positional):
                 if shape_of(stored.type) != shape_of(ptr.handle.type):
                     raise ValueError("a positional tensor stored into a View must match its logical shape")
                 stored = self.builder.reshape_axes(stored, shape_of(ptr.handle.type), axes_of(ptr.handle.type))
