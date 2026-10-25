@@ -1021,6 +1021,9 @@ masked remainder。它只消除由该循环边界证明恒真的比较和 `min(r
 每个 kernel 的有限预算，并设置绝对代码增长上限。调度、buffer 版本和最终资源分析在
 变换后重新处理实际程序。RISC-V 物理 index 保留无符号范围，不用有符号负数裁剪它；
 无符号循环关系也不能被用来证明一个有符号比较。x86 保留原 signed SCF 空域规则。
+完整块与尾块仍使用已有 SCF 简化；RISC-V carrier／fragment 的分支结果保留结构化控制，
+不应用将任意 dialect type 改成 `arith.select` 的通用折叠。最终 verifier 也检查 scalar
+`arith.select` 的输入类型，不能让缺少物理 transfer 合同的选择直到 C emission 才失败。
 
 ### `ScheduleRISCVLevels` 与 `PipelineRISCVLevels`
 

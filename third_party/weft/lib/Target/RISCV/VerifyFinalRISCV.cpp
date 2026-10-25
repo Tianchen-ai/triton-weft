@@ -218,6 +218,15 @@ public:
     });
     llvm::DenseSet<std::pair<int64_t, int64_t>> partialBirths;
     getOperation().walk([&](mlir::Operation *operation) {
+      if (auto select = mlir::dyn_cast<mlir::arith::SelectOp>(operation)) {
+        auto type = select.getType();
+        if (!select.getCondition().getType().isInteger(1) ||
+            !mlir::isa<mlir::IntegerType, mlir::IndexType, mlir::FloatType>(type)) {
+          select.emitError("physical arith.select requires scalar numeric values; "
+                           "carrier and fragment transfers must retain structured control");
+          failed = true;
+        }
+      }
       auto grouped = [](mlir::Type type) {
         auto value = mlir::dyn_cast<riscv::ValueType>(type);
         return value && value.getLayout().getReplicaGroup() > 1;

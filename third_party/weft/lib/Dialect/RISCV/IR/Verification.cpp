@@ -17,6 +17,16 @@ bool weft::riscv::knownIndexMultipleOf(mlir::Value value, int64_t divisor, unsig
       return knownIndexMultipleOf(loop.getLowerBound(), divisor, depth + 1) &&
              knownIndexMultipleOf(loop.getStep(), divisor, depth + 1);
   auto *operation = value.getDefiningOp();
+  if (auto subtract = mlir::dyn_cast_if_present<mlir::arith::SubIOp>(operation)) {
+    auto remainder = subtract.getRhs().getDefiningOp<mlir::arith::RemUIOp>();
+    auto modulus = remainder ? remainder.getRhs().getDefiningOp<mlir::arith::ConstantIndexOp>()
+                             : mlir::arith::ConstantIndexOp();
+    // Full-tile splitting retains x - (x % tile) as the remainder's lower
+    // bound. Unsigned remainder is at most x, so this subtraction does not
+    // wrap, and a tile divisible by divisor proves the complete-row origin.
+    if (remainder && remainder.getLhs() == subtract.getLhs() && modulus &&
+        modulus.value() > 0 && modulus.value() % divisor == 0) return true;
+  }
   if (operation && mlir::isa<mlir::arith::AddIOp, mlir::arith::SubIOp>(operation))
     return knownIndexMultipleOf(operation->getOperand(0), divisor, depth + 1) &&
            knownIndexMultipleOf(operation->getOperand(1), divisor, depth + 1);

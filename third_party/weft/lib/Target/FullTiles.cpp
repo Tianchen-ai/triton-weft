@@ -186,6 +186,13 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
     if (!unsignedIndices)
       scf::ForOp::getCanonicalizationPatterns(simplification, context);
     vector::ShuffleOp::getCanonicalizationPatterns(simplification, context);
+    // RISC-V fragment/state results retain structured control. SCF's generic
+    // select conversion accepts these dialect types, but an arith.select has
+    // no selected physical fragment transfer or resource contract.
+    if (unsignedIndices)
+      llvm::erase_if(simplification.getNativePatterns(), [](const auto &pattern) {
+        return pattern->getDebugName().contains("ConvertTrivialIfToSelect");
+      });
     FrozenRewritePatternSet patterns(std::move(simplification));
     // Bound growth per function relative to the program already present.
     // A fixed module-wide allowance makes independently useful full-tile
