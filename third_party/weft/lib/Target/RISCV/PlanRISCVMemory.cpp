@@ -16,6 +16,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Dominance.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
@@ -31,6 +33,77 @@
 using namespace weft;
 
 namespace {
+
+mlir::FailureOr<mlir::Value> materializeLookupSnapshot(
+    mlir::Value table, mlir::Operation *consumer, mlir::IRRewriter &b) {
+  auto type = mlir::cast<riscv::ValueType>(table.getType());
+  mlir::OpBuilder::InsertionGuard guard(b);
+  auto definition = table.getDefiningOp();
+  if (definition) b.setInsertionPointAfter(definition);
+  else b.setInsertionPointToStart(table.getParentBlock());
+  auto owner = definition ? definition : consumer;
+  mlir::Value storage = table;
+  if (type.getLayout().getCarrier() != "local") {
+    int64_t identity = riscv_internal::lastLocalIdentity(consumer->getParentOfType<mlir::ModuleOp>());
+    auto allocated = riscv_internal::allocateLocalValue(b, type, owner, identity);
+    if (mlir::failed(allocated) || mlir::failed(riscv_internal::initializeLocalValue(b, *allocated, table, owner)))
+      return mlir::failure();
+    storage = *allocated;
+  }
+  auto view = riscv_internal::localView(b, storage, owner);
+  if (mlir::failed(view)) return consumer->emitError("saved lookup value lost its numerical snapshot geometry"), mlir::failure();
+  return *view;
+}
+
+// A logical flattened table index follows row-major coordinates, even when
+// storage is transposed, broadcast or padded. Resolve that map in the physical
+// program; the terminal gather only receives element offsets.
+mlir::LogicalResult materializeLookupStorageOffsets(riscv::LookupOp op, mlir::IRRewriter &b) {
+  auto table = mlir::dyn_cast<riscv::MemDescType>(op.getTable().getType());
+  if (!table || riscv::hasContiguousDenseStorage(table) || op->hasAttr("weft.riscv.lookup_storage_offsets"))
+    return mlir::success();
+  auto loc = op.getLoc();
+  b.setInsertionPoint(op);
+  auto u64 = mlir::IntegerType::get(b.getContext(), 64, mlir::IntegerType::Unsigned);
+  mlir::Type domain = u64;
+  if (auto input = mlir::dyn_cast<riscv::ValueType>(op.getIndices().getType())) {
+    auto type = riscv::ValueType::get(b.getContext(), u64, input.getShape(), input.getAxisIds(),
+        riscv_internal::unassignedLayout(b, input.getAxisIds().asArrayRef()));
+    auto layout = riscv_internal::projectLayout(b, type, input.getLayout(), op->getParentOfType<riscv::KernelOp>().getTarget());
+    if (!layout) return op.emitError("lookup address width has no legal target carrier");
+    domain = riscv_internal::withLayout(type, layout);
+  }
+  auto cast = [&](mlir::Value value, mlir::Type type) -> mlir::Value {
+    if (value.getType() == type) return value;
+    return riscv::CastOp::create(b, loc, type, value, riscv_internal::unselectedLeaf(b));
+  };
+  auto binary = [&](mlir::Value a, mlir::Value c, llvm::StringRef kind) -> mlir::Value {
+    return riscv::BinaryOp::create(b, loc, domain, a, c, kind, riscv_internal::unselectedLeaf(b));
+  };
+  mlir::Value remaining = cast(op.getIndices(), domain);
+  mlir::Value offset = riscv::ConstantOp::create(b, loc, u64, b.getIntegerAttr(u64, 0));
+  for (int64_t axis = table.getShape().size(); axis-- > 0;) {
+    mlir::Value coordinate = remaining;
+    if (axis) {
+      mlir::Value extent = b.createOrFold<riscv::ExtentOp>(loc, b.getIndexType(), op.getTable(), axis);
+      extent = cast(extent, u64);
+      coordinate = binary(remaining, extent, "mod");
+      remaining = binary(remaining, extent, "div");
+    }
+    mlir::Value stride;
+    if (auto view = op.getTable().getDefiningOp<riscv::MemoryViewOp>()) stride = view.getStrides()[axis];
+    else if (auto view = op.getTable().getDefiningOp<riscv::LocalViewOp>()) stride = view.getStrides()[axis];
+    else if (table.getStrides()[axis] >= 0)
+      stride = mlir::arith::ConstantIndexOp::create(b, loc, table.getStrides()[axis]);
+    else if (auto argument = riscv::denseArgumentStride(op.getTable(), table.getAxisIds()[axis]))
+      stride = riscv::StrideOp::create(b, loc, b.getIndexType(), argument->first, argument->second);
+    if (!stride) return op.emitError("lookup storage map lost an explicit descriptor stride");
+    offset = binary(offset, binary(coordinate, cast(stride, u64), "mul"), "add");
+  }
+  op.getIndicesMutable().assign(offset);
+  op->setAttr("weft.riscv.lookup_storage_offsets", b.getUnitAttr());
+  return mlir::success();
+}
 
 bool preferUnitStrideProbe(mlir::Value memory, mlir::Type value) {
   auto descriptor = mlir::dyn_cast<riscv::MemDescType>(memory.getType());
@@ -2471,6 +2544,7 @@ void selectTwoWindowByteLookups(mlir::ModuleOp module,
   llvm::SmallVector<riscv::LookupOp> lookups;
   module.walk([&](riscv::LookupOp lookup) { lookups.push_back(lookup); });
   for (riscv::LookupOp lookup : lookups) {
+    if (lookup->hasAttr("weft.riscv.lookup_storage_offsets")) continue;
     auto result = mlir::dyn_cast<riscv::ValueType>(lookup.getResult().getType());
     auto storage = mlir::dyn_cast<riscv::MemDescType>(lookup.getTable().getType());
     auto sum = lookup.getIndices().getDefiningOp<riscv::BinaryOp>();
@@ -4960,6 +5034,7 @@ public:
     getOperation().walk(
         [&](riscv::LookupOp operation) { entryLookups.push_back(operation); });
     for (riscv::LookupOp operation : entryLookups) {
+      if (operation->hasAttr("weft.riscv.lookup_storage_offsets")) continue;
       auto table = mlir::dyn_cast<riscv::MemDescType>(
           operation.getTable().getType());
       riscv::LoadOp tableLoad;
@@ -5074,6 +5149,9 @@ public:
                                : std::optional<int64_t>();
       bool registerTable =
           indexed && tableLayout && resultLayout &&
+          tableLayout.getValidity() == "full" &&
+          llvm::all_of(mlir::cast<riscv::ValueType>(operation.getTable().getType()).getShape().asArrayRef(),
+                       [](int64_t extent) { return extent > 0; }) &&
           tableLayout.getCarrier() == "rvv" &&
           tableLayout.getSew() == resultLayout.getSew() &&
           tableLayout.getLmulEighths() == resultLayout.getLmulEighths() &&
@@ -5083,10 +5161,47 @@ public:
           *tableReplicas == 1;
       if (!registerTable && tableLoad) {
         if (riscv::readCrossesWrite(tableLoad, operation)) {
+          // A consumer whose index is already available can save exactly its
+          // demanded value at the original read. This preserves the snapshot
+          // across the write without allocating the entire unobserved table.
+          if (!tableMaterialize && tableLoad->getBlock() == operation->getBlock() &&
+              riscv::hasContiguousDenseStorage(tableLoad.getRegion().getType())) {
+            mlir::Value savedIndex = operation.getIndices();
+            mlir::DominanceInfo dominance(getOperation());
+            auto literal = savedIndex.getDefiningOp();
+            bool available = dominance.properlyDominates(savedIndex, tableLoad) ||
+                (literal && mlir::isa<riscv::ConstantOp, mlir::arith::ConstantOp>(literal));
+            if (available) {
+              mlir::OpBuilder::InsertionGuard guard(rewriter);
+              rewriter.setInsertionPoint(tableLoad);
+              if (!dominance.properlyDominates(savedIndex, tableLoad))
+                savedIndex = rewriter.clone(*literal)->getResult(0);
+              auto capture = riscv::LookupOp::create(rewriter, operation.getLoc(), operation.getResult().getType(),
+                  tableLoad.getRegion(), savedIndex, operation.getBounds(),
+                  makeAccess(builder, indexed ? "indexed" : "unit", "natural", 1),
+                  riscv_internal::leaf(builder, indexed ? "rvv" : "scalar", "lookup",
+                      indexed ? "rvv.vluxei" : "scalar.lookup", indexed ? "rvv.vluxei" : "scalar.lookup", 0, 0));
+              riscv_internal::copyOrigin(operation, capture);
+              capture->setAttr("weft.riscv.lookup_saved_read", builder.getUnitAttr());
+              if (!llvm::is_contained(deadTableLoads, tableLoad)) deadTableLoads.push_back(tableLoad);
+              rewriter.replaceOp(operation, capture.getResult());
+              return;
+            }
+          }
           mlir::Value table = operation.getTable();
           mlir::Value snapshot = tableSnapshots.lookup(table);
+          auto memory = tableLoad.getRegion().getType();
+          // A dynamic/noncontiguous numerical load already owns a full Value
+          // snapshot. Materialize that Value through the common local program
+          // instead of treating its source View as a contiguous memcpy range.
+          if (!snapshot && (memory.getShape().size() != 1 || memory.getShape()[0] <= 0 ||
+                            memory.getStrides()[0] != 1)) {
+            auto view = materializeLookupSnapshot(table, operation, rewriter);
+            if (mlir::failed(view)) { failed = true; return; }
+            snapshot = *view;
+            tableSnapshots[table] = snapshot;
+          }
           if (!snapshot) {
-            auto memory = tableLoad.getRegion().getType();
             auto encoding = mlir::cast<kernel::EncodingType>(memory.getEncoding());
             auto kernel = operation->getParentOfType<riscv::KernelOp>();
             const int64_t elementBytes = memory.getStorageBits() / 8;
@@ -5207,11 +5322,25 @@ public:
             0));
         return;
       }
-      if (mlir::isa<riscv::ValueType>(operation.getTable().getType())) {
-        operation.emitError(
-            "materialized lookup table has no complete register or memory realization");
-        failed = true;
-        return;
+      if (auto type = mlir::dyn_cast<riscv::ValueType>(operation.getTable().getType())) {
+        mlir::Value table = operation.getTable();
+        mlir::Value snapshot = tableSnapshots.lookup(table);
+        if (!snapshot) {
+          auto kernel = operation->getParentOfType<riscv::KernelOp>();
+          auto elements = riscv_internal::staticProduct(type.getShape().asArrayRef());
+          const unsigned bytes = std::max(1u, (riscv_internal::logicalBitWidth(type) + 7) / 8);
+          if (!elements || *elements <= 0 || type.getLayout().getValidity() != "full" ||
+              *elements > kernel.getTarget().getMaxPrivateStackBytes() / bytes) {
+            operation.emitError("numeric lookup requires a complete target-bounded snapshot");
+            failed = true;
+            return;
+          }
+          auto view = materializeLookupSnapshot(table, operation, rewriter);
+          if (mlir::failed(view)) { failed = true; return; }
+          snapshot = *view;
+          tableSnapshots[table] = snapshot;
+        }
+        operation.getTableMutable().assign(snapshot);
       }
       if (riscv::isContiguousRecordField(operation.getTable())) {
         rewriter.setInsertionPoint(operation);
@@ -5222,6 +5351,7 @@ public:
         riscv_internal::copyOrigin(operation, view);
         operation.getTableMutable().assign(view.getResult());
       }
+      if (mlir::failed(materializeLookupStorageOffsets(operation, rewriter))) { failed = true; return; }
       llvm::StringRef form = indexed ? "indexed" : "unit";
       if (indexed &&
           !operation->getParentOfType<riscv::KernelOp>()

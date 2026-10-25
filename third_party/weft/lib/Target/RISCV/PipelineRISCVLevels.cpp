@@ -32,7 +32,23 @@ FailureOr<PipelineExpansion> riscv_internal::expandPipeline(
   if (failed(schedule.verify()) || failed(verifyPipelineShapeStages(schedule.loop))) return failure();
   return expandPhysicalPipeline(schedule, b, [&](IRRewriter &rewriter, Operation *source, IRMapping &values) {
     return clonePipelineOperation(rewriter, source, values, shapeIdentity);
-  }, copyLoopAttributes);
+  }, copyLoopAttributes,
+  [&](IRRewriter &rewriter, const PhysicalPipelineBuffer &buffer) -> FailureOr<Value> {
+    auto original = cast<riscv::LocalType>(buffer.allocation->getResult(0).getType());
+    int64_t id = ++shapeIdentity;
+    auto type = riscv::LocalType::get(rewriter.getContext(), rewriter.getI8Type(),
+        rewriter.getDenseI64ArrayAttr({}), rewriter.getDenseI64ArrayAttr({}),
+        buffer.bytes * buffer.versions(), buffer.alignment, id, "pipeline",
+        original.getOwnerDomainId(), id, original.getLifetimeEndDomainId(), "versioned-local");
+    auto loc = buffer.allocation->getLoc();
+    auto size = arith::ConstantIndexOp::create(rewriter, loc, type.getSizeBytes());
+    return riscv::LocalAllocOp::create(rewriter, loc, type, size).getResult();
+  }, [](IRRewriter &rewriter, const PhysicalPipelineBuffer &buffer,
+        Value storage, Value slot) -> FailureOr<Value> {
+    return riscv::LocalSlotOp::create(rewriter, buffer.allocation->getLoc(),
+        buffer.allocation->getResult(0).getType(), storage, slot,
+        rewriter.getI64IntegerAttr(buffer.bytes), rewriter.getI64IntegerAttr(buffer.versions())).getResult();
+  });
 }
 
 namespace {

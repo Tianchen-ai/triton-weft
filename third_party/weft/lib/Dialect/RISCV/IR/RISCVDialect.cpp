@@ -9,6 +9,7 @@
 #include "Weft/Dialect/Kernel/IR/StrideABI.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "Weft/Dialect/RISCV/IR/Numerics.h"
+#include "Weft/Analysis/IntegerFacts.h"
 #include "Weft/Dialect/Kernel/IR/SubviewBounds.h"
 #include "Weft/Dialect/RISCV/IR/Fragment.h"
 #include "Weft/Dialect/RISCV/IR/LocalTransfer.h"
@@ -4725,6 +4726,11 @@ mlir::LogicalResult LookupOp::verify() {
   if (getAccess().getForm() == "unassigned" &&
       getLeaf().getEngine() == "unselected")
     return verifyLeafOperation(*this);
+  if (auto table = mlir::dyn_cast<MemDescType>(getTable().getType());
+      table && !hasContiguousDenseStorage(table) &&
+      (!(*this)->hasAttrOfType<mlir::UnitAttr>("weft.riscv.lookup_storage_offsets") ||
+       !indexElement || !indexElement.isUnsigned() || indexElement.getWidth() != 64))
+    return emitOpError("noncontiguous lookup requires explicit target-width storage offsets");
   if (auto indices = mlir::dyn_cast<ValueType>(getIndices().getType()))
     if (auto result = mlir::dyn_cast<ValueType>(getResult().getType()))
       for (size_t position = 0; position < indices.getAxisIds().size(); ++position)
@@ -4736,6 +4742,8 @@ mlir::LogicalResult LookupOp::verify() {
     auto tableLayout = tableValue.getLayout();
     auto indexValue = mlir::dyn_cast<ValueType>(getIndices().getType());
     if (!indexValue || !resultValue || carrier != "rvv" ||
+        tableLayout.getValidity() != "full" ||
+        llvm::any_of(tableValue.getShape().asArrayRef(), [](int64_t extent) { return extent <= 0; }) ||
         tableLayout.getCarrier() != "rvv" ||
         resultValue.getLayout().getCarrier() != "rvv" ||
         tableLayout.getSew() != resultValue.getLayout().getSew() ||
@@ -5740,6 +5748,28 @@ mlir::LogicalResult LocalAllocOp::verify() {
       return emitOpError(
           "static local allocation size SSA value must equal its LocalType size");
   }
+  return mlir::success();
+}
+
+mlir::LogicalResult LocalSlotOp::verify() {
+  auto backing = getStorage().getType();
+  auto slot = getResult().getType();
+  auto count = getVersions(), stride = getStrideBytes();
+  auto range = weft::analysis::integerRange(getIndex(),
+      mlir::IntegerType::get(getContext(), 64, mlir::IntegerType::Unsigned));
+  if (!getStorage().getDefiningOp<LocalAllocOp>() ||
+      backing.getPurpose() != "pipeline" || backing.getSchema() != "versioned-local" ||
+      count < 2 || count > 4 || stride <= 0 ||
+      stride > std::numeric_limits<int64_t>::max() / count ||
+      backing.getSizeBytes() != stride * count || slot.getSizeBytes() <= 0 ||
+      slot.getSizeBytes() > stride || slot.getAlignment() > backing.getAlignment() ||
+      stride % slot.getAlignment() || slot.getPurpose() != "pack" ||
+      (slot.getSchema() != "physical-share" && slot.getSchema() != "local-value-copy" &&
+       slot.getSchema() != "control-value") ||
+      slot.getOwnerDomainId() != backing.getOwnerDomainId() ||
+      slot.getLifetimeEndDomainId() != backing.getLifetimeEndDomainId() ||
+      !range || range->minimum < 0 || range->maximum >= count)
+    return emitOpError("pipeline slot requires bounded versions, original private ownership and aligned backing capacity");
   return mlir::success();
 }
 

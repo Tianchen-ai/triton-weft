@@ -82,6 +82,7 @@ public:
     nextIdentity = riscv_internal::lastLocalIdentity(module);
     if (failed(projectSharedDomains())) return failure();
     if (failed(riscv_internal::materializeDenseValuePrograms(module))) return failure();
+    if (failed(prepareScalarProjectionValidity())) return failure();
     nextIdentity = riscv_internal::lastLocalIdentity(module);
     SmallVector<Operation *> operations;
     module.walk<WalkOrder::PreOrder>([&](Operation *op) { operations.push_back(op); });
@@ -259,8 +260,46 @@ private:
   ModuleOp module;
   IRRewriter b;
   DenseMap<Value, Value> numericStorage;
+  DenseMap<Value, Value> projectionValidity;
   llvm::SmallPtrSet<Operation *, 32> delayed;
   int64_t nextIdentity = 0;
+
+  // A local snapshot has a capacity as well as a smaller active domain. Capture
+  // the latter before replacing the numeric source with an address descriptor,
+  // and propagate it to effects through the shared SSA/control-flow analysis.
+  LogicalResult prepareScalarProjectionValidity() {
+    SmallVector<Operation *> operations;
+    SmallVector<riscv::ExtractOp> projections;
+    int64_t nextAxis = 0;
+    module.walk<WalkOrder::PreOrder>([&](Operation *op) {
+      operations.push_back(op);
+      for (Type type : op->getOperandTypes())
+        for (int64_t axis : riscv_internal::logicalAxes(type)) nextAxis = std::max(nextAxis, axis + 1);
+      for (Type type : op->getResultTypes())
+        for (int64_t axis : riscv_internal::logicalAxes(type)) nextAxis = std::max(nextAxis, axis + 1);
+      auto extract = dyn_cast<riscv::ExtractOp>(op);
+      if (extract && extract.getResult().getType().isIntOrIndexOrFloat() &&
+          extract.getInput().getType().getLayout().getValidity() != "full" &&
+          llvm::all_of(extract.getSelectors(), [](Attribute a) { return cast<StringAttr>(a).getValue() == "index"; }))
+        projections.push_back(extract);
+    });
+    for (auto extract : projections) {
+      b.setInsertionPoint(extract);
+      auto bounds = riscv_internal::activeNumericExtents(b, extract.getInput());
+      if (failed(bounds) || bounds->size() != extract.getIndices().size())
+        return extract.emitError("scalar projection lost its numerical active domain");
+      Value valid = arith::ConstantIntOp::create(b, extract.getLoc(), 1, 1);
+      for (auto [coordinate, bound] : llvm::zip(extract.getIndices(), *bounds)) {
+        if (!coordinate.getType().isIndex())
+          coordinate = riscv::CastOp::create(b, extract.getLoc(), b.getIndexType(), coordinate,
+                                            riscv_internal::unselectedLeaf(b));
+        Value inside = b.createOrFold<arith::CmpIOp>(extract.getLoc(), arith::CmpIPredicate::ult, coordinate, bound);
+        valid = b.createOrFold<arith::AndIOp>(extract.getLoc(), valid, inside);
+      }
+      projectionValidity[extract.getResult()] = valid;
+    }
+    return riscv_internal::propagateNumericValidity(b, operations, projectionValidity, nextAxis);
+  }
 
   // Local numerical state can enter a block through a control argument, so it
   // need not have an in-block load producer. Once the complete source version
@@ -930,6 +969,24 @@ private:
       b.setInsertionPoint(op);
       SmallVector<Value> coordinates(op.getIndices());
       Value region = address(*input, coordinates, op);
+      Value active = projectionValidity.lookup(op.getResult());
+      if (active) {
+        auto branch = scf::IfOp::create(b, op.getLoc(), TypeRange{op.getResult().getType()}, active, true);
+        {
+          OpBuilder::InsertionGuard guard(b);
+          b.setInsertionPointToStart(branch.thenBlock());
+          auto loaded = riscv::LoadOp::create(b, op.getLoc(), op.getResult().getType(), region, Value(),
+              riscv_internal::unassignedAccess(b), riscv_internal::unselectedLeaf(b));
+          riscv_internal::copyOrigin(op, loaded);
+          scf::YieldOp::create(b, op.getLoc(), loaded.getResult());
+          b.setInsertionPointToStart(branch.elseBlock());
+          auto zero = riscv::ConstantOp::create(b, op.getLoc(), op.getResult().getType(), b.getZeroAttr(op.getResult().getType()));
+          scf::YieldOp::create(b, op.getLoc(), zero.getResult());
+        }
+        projectionValidity.erase(op.getResult());
+        b.replaceOp(op, branch.getResults());
+        return success();
+      }
       auto loaded = riscv::LoadOp::create(b, op.getLoc(), op.getResult().getType(), region, Value(),
           riscv_internal::unassignedAccess(b), riscv_internal::unselectedLeaf(b));
       riscv_internal::copyOrigin(op, loaded);

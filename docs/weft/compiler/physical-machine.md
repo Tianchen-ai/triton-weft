@@ -270,11 +270,11 @@ RISC-V 与 x86 的实现将 scheduler 与共用 expander 分开。depth=1 是顺
 在有限深度内写出每条操作的 stage/order。不可传递的坐标/shape 身份与其使用保持同阶段。
 expander 为多个 source carries 生成真实 prologue/steady-state/epilogue；每个跨阶段 SSA
 值只保存其生产至最后消费之间需要的版本，不统一复制 depth 份。闭合普通 `for/if` 保持为
-阶段内有序单元。静态 `physical-share` / `local-value-copy` 数组的 allocation、全部 alias 和读写用户可共同
-留在 consumer stage，按实际迭代克隆独立存储；没有 local descriptor 跨阶段传递。
-作者 birth、外部 write/unknown effect 没有重排合同，会明确拒绝。async transfer、wait、
-任意多阶段 DAG、显式 local-storage ping-pong 和非零 prefetch 尚未形成合法 physical
-program，不能仅通过设置参数声称支持。
+阶段内有序单元。静态编译器私有数组的完整 alias 与读写闭包决定是否能够版本化；满足资源
+与平坦 descriptor 条件时，slot 数由首次和最后 payload 阶段决定，按真实 source iteration
+选择 slot。每个阶段重建自己的地址视图；不传递上一实例的裸地址。其余私有数组保持原有
+同阶段存储。作者 birth、外部 write/unknown effect 没有重排合同，会明确拒绝。
+async transfer、wait、任意多阶段 DAG 和非零 prefetch 尚未形成合法 physical program。
 
 同一iteration内，闭合grouped/layered raw window可以选择一个target-local
 `scalar-prime + vector-load` leaf。它只改变该memory edge的有限指令拼写，不读取下一iteration，
@@ -314,7 +314,7 @@ local memory-leaf variant和prefetch distance。target提供有限合法域，tu
 在emission前拒绝。当前RISC-V compiler API暴露LMUL、unroll、pipeline depth和boolean
 scalar-load-prime；后者适用于已证明的单 window grouped/layered partial supply，或完整的
 二至四 atom 连续 byte fragment supply，均只在当前局部读取范围内选择固定指令序列。
-跨阶段版本按实际 SSA 活跃范围生成，consumer 内私有存储按其最后读取点复用；buffer
+跨阶段 SSA 与私有 buffer 版本按实际活跃范围生成，同阶段私有存储按其最后读取点复用；buffer
 count 不是独立调参维度。prefetch 固定为 0。
 
 ## 14. Target profile

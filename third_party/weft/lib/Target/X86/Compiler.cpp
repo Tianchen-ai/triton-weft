@@ -2427,18 +2427,16 @@ private:
         Type storedType = vector.clone(storageElement);
         if (vector != storedType)
           value = operation(loc, isa<FloatType>(vector.getElementType()) ? "arith.bitcast" : "arith.extui", storedType, value);
-        Value pointer;
-        {
-          OpBuilder::InsertionGuard guard(b);
-          Operation *owner = b.getInsertionBlock()->getParentOp();
-          while (!isa<func::FuncOp>(owner)) owner = owner->getParentOp();
-          b.setInsertionPointToStart(&cast<func::FuncOp>(owner).getBody().front());
-          Value count = arith::ConstantIntOp::create(b, loc, vector.getNumElements(), 64);
-          pointer = LLVM::AllocaOp::create(b, loc, LLVM::LLVMPointerType::get(b.getContext()),
-              storageElement, count, target.vectorBits / 8);
-        }
-        LLVM::StoreOp::create(b, loc, value, pointer, 1);
-        return pointer;
+        // Keep the snapshot's allocation and effects in its actual scope.
+        // LocalStorage and the pipeline passes own physical slot residency;
+        // an entry-block LLVM pointer would hide per-iteration ownership.
+        auto storageType = MemRefType::get({vector.getNumElements()}, storageElement);
+        auto storage = memref::AllocOp::create(b, loc, storageType);
+        storage.setAlignment(target.vectorBits / 8);
+        auto flat = VectorType::get({vector.getNumElements()}, storageElement);
+        if (value.getType() != flat) value = vector::ShapeCastOp::create(b, loc, flat, value);
+        vector::StoreOp::create(b, loc, value, storage, ValueRange{indexConstant(loc, 0)});
+        return storage;
       };
       Type elem = tableType.getElementType(), storageElement = elem;
       if (auto integer = dyn_cast<IntegerType>(elem)) {
@@ -2462,13 +2460,28 @@ private:
       };
       Value indices = castValue(loc, mapped(op.getIndices()), op.getIndices().getType(), withElement(b.getI64Type()));
       Value active = valid(op.getIndices(), loc);
+      auto gather = [&](Value storage, Type element, Value mask) -> Value {
+        auto shaped = dyn_cast<VectorType>(indices.getType());
+        if (shaped) {
+          auto vector = shaped.clone(element);
+          return vector::GatherOp::create(b, loc, vector, storage, ValueRange{indexConstant(loc, 0)}, indices, mask, zero(loc, vector));
+        }
+        auto branch = scf::IfOp::create(b, loc, TypeRange{element}, mask, true);
+        OpBuilder::InsertionGuard guard(b);
+        b.setInsertionPointToStart(branch.thenBlock());
+        Value offset = arith::IndexCastOp::create(b, loc, b.getIndexType(), indices);
+        auto loaded = memref::LoadOp::create(b, loc, storage, ValueRange{offset});
+        scf::YieldOp::create(b, loc, loaded.getResult());
+        b.setInsertionPointToStart(branch.elseBlock());
+        scf::YieldOp::create(b, loc, zero(loc, element));
+        return branch.getResult(0);
+      };
       if (!fullyValid) {
-        Value selectedValid = access(loc, validity, indices, active, zero(loc, resultMask), maskType(domain), true, false);
+        Value bytes = gather(validity, b.getI8Type(), active);
+        Value selectedValid = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, bytes, zero(loc, bytes.getType()));
         active = arith::AndIOp::create(b, loc, active, selectedValid);
       }
-      Type storageDomain = withElement(storageElement);
-      Value selected = lookupTransfer(loc, payload, indices, active,
-          zero(loc, physicalType(storageDomain)), storageDomain, op.getIndices());
+      Value selected = gather(payload, storageElement, active);
       if (storageElement != elem)
         selected = operation(loc, isa<FloatType>(elem) ? "arith.bitcast" : "arith.trunci", result, selected);
       values.map(op.getResult(), selected);

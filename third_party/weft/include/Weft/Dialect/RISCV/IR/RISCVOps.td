@@ -1610,6 +1610,14 @@ def WeftRISCV_LocalAllocOp
   let hasVerifier = 1;
 }
 
+def WeftRISCV_LocalSlotOp : WeftRISCV_TerminalOp<"local_slot", [Pure]> {
+  let summary = "Select a bounded version of a compiler-owned pipeline buffer";
+  let arguments = (ins WeftRISCV_LocalType:$storage, Index:$index,
+                       I64Attr:$stride_bytes, I64Attr:$versions);
+  let results = (outs WeftRISCV_LocalType:$result);
+  let hasVerifier = 1;
+}
+
 def WeftRISCV_LocalSizeOp : WeftRISCV_LeafOp<"local_size", [MemoryEffects<[]>]> {
   let arguments = (ins Variadic<Index>:$extents, I64Attr:$element_bytes,
                        WeftRISCV_LeafAttr:$leaf);

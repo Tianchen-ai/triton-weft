@@ -8,6 +8,18 @@
 
 namespace weft {
 
+// One compiler-owned allocation. Descriptor operations can be replayed from a
+// selected slot; payload accesses keep their selected stage and memory order.
+struct PhysicalPipelineBuffer {
+  mlir::Operation *allocation = nullptr;
+  llvm::SmallVector<mlir::Operation *> descriptors;
+  llvm::SmallVector<mlir::Operation *> accesses;
+  unsigned firstStage = 0, lastStage = 0;
+  uint64_t bytes = 0, alignment = 1;
+
+  unsigned versions() const { return lastStage - firstStage + 1; }
+};
+
 // A transient view of selected operations in one physical loop. Targets verify
 // their effects and ownership and write stage/order into IR before expansion.
 struct PhysicalPipeline {
@@ -15,6 +27,8 @@ struct PhysicalPipeline {
   llvm::SmallVector<mlir::Operation *> producers, consumers, ordered, invariants;
   llvm::SmallVector<mlir::Value> transported;
   llvm::DenseMap<mlir::Operation *, unsigned> stages;
+  llvm::DenseMap<mlir::Operation *, llvm::SmallVector<mlir::Operation *>> orderedAfter;
+  llvm::SmallVector<PhysicalPipelineBuffer> buffers;
   bool transportInduction = false;
   bool descending = false;
   unsigned depth = 2;
@@ -24,6 +38,11 @@ struct PhysicalPipeline {
   unsigned stage(mlir::Operation *op) const {
     auto found = stages.find(op);
     return found == stages.end() ? (isProducer(op) ? 0 : depth - 1) : found->second;
+  }
+  bool isBufferDescriptor(mlir::Operation *op) const {
+    return llvm::any_of(buffers, [&](const auto &buffer) {
+      return buffer.allocation == op || llvm::is_contained(buffer.descriptors, op);
+    });
   }
 };
 
@@ -39,6 +58,14 @@ using PipelineLoopAttributes = llvm::function_ref<void(
     mlir::scf::ForOp, mlir::Operation *, bool)>;
 using PipelineDependencies = llvm::function_ref<mlir::FailureOr<
     llvm::SmallVector<mlir::Value>>(mlir::Operation *)>;
+using PipelineBufferAllocator = llvm::function_ref<mlir::FailureOr<mlir::Value>(
+    mlir::IRRewriter &, const PhysicalPipelineBuffer &)>;
+using PipelineBufferSelector = llvm::function_ref<mlir::FailureOr<mlir::Value>(
+    mlir::IRRewriter &, const PhysicalPipelineBuffer &, mlir::Value, mlir::Value)>;
+
+void addPipelineMemoryOrder(PhysicalPipeline &schedule,
+                           llvm::ArrayRef<mlir::Operation *> accesses);
+void closePhysicalPipelineBuffers(PhysicalPipeline &schedule);
 
 // Subdivide the existing independent producer frontier along its read/use-def
 // chain. Ownership/shape dependencies that cannot travel remain in one stage.
@@ -57,7 +84,9 @@ mlir::LogicalResult verifyPhysicalPipeline(const PhysicalPipeline &schedule,
 // selected guard. Numerical carries are updated once per original iteration.
 mlir::FailureOr<PhysicalPipelineExpansion> expandPhysicalPipeline(
     const PhysicalPipeline &schedule, mlir::IRRewriter &rewriter,
-    PipelineClone clone, PipelineLoopAttributes attributes);
+    PipelineClone clone, PipelineLoopAttributes attributes,
+    PipelineBufferAllocator allocate = nullptr,
+    PipelineBufferSelector select = nullptr);
 
 } // namespace weft
 #endif

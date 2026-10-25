@@ -83,12 +83,15 @@ public:
     } else if (auto lookup = dyn_cast<riscv::LookupOp>(op)) {
       // A rectangular index domain does not prove validity of arbitrary table
       // entries. Only an independently complete computed table qualifies here.
-      auto table = dyn_cast<riscv::ValueType>(lookup.getTable().getType());
-      auto tableExtents = get(lookup.getTable());
-      if (!table || failed(tableExtents)) return failure();
-      for (auto [bound, expected] : llvm::zip(*tableExtents, table.getShape().asArrayRef())) {
-        APInt actual;
-        if (!matchPattern(bound, m_ConstantInt(&actual)) || actual.getSExtValue() != expected) return failure();
+      if (auto table = dyn_cast<riscv::ValueType>(lookup.getTable().getType())) {
+        auto tableExtents = get(lookup.getTable());
+        if (failed(tableExtents)) return failure();
+        for (auto [bound, expected] : llvm::zip(*tableExtents, table.getShape().asArrayRef())) {
+          APInt actual;
+          if (!matchPattern(bound, m_ConstantInt(&actual)) || actual.getSExtValue() != expected) return failure();
+        }
+      } else if (!isa<riscv::MemDescType>(lookup.getTable().getType())) {
+        return failure();
       }
       auto extents = get(lookup.getIndices());
       if (failed(extents)) return failure();

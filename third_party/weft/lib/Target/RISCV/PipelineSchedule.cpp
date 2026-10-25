@@ -1,6 +1,7 @@
 #include "PipelineSchedule.h"
 #include "PipelineShapeBindings.h"
 #include "PhysicalLoopControl.h"
+#include "LocalMemory.h"
 #include "RISCVPhysicalSupport.h"
 #include "ValueLiveness.h"
 #include "Weft/Analysis/PhysicalDependence.h"
@@ -11,6 +12,7 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Support/MathExtras.h"
 #include <limits>
 
 using namespace mlir;
@@ -43,13 +45,16 @@ InFlightDiagnostic unsupportedPipeline(Operation *operation, bool admission,
   return operation->emitError(message);
 }
 
-// A compiler-created array is scratch for one source iteration, not an author
-// state/stage birth. Keep its complete address/use closure in the consumer
-// stage: no descriptor crosses the pipeline frontier, and each cloned consumer
-// instance allocates its own storage. Numeric inputs may still be pipelined.
+constexpr StringLiteral bufferVersions = "weft.pipeline.buffer_versions";
+
+// Collect iteration-private storage separately from its payload effects. Only
+// a flat descriptor recipe can be reconstructed from a versioned backing slot;
+// nested storage stays with its original consuming instance.
 struct PipelineStorage {
   llvm::DenseSet<Value> allocations;
   llvm::SmallPtrSet<Operation *, 32> consumers;
+  SmallVector<PhysicalPipelineBuffer> candidates;
+  SmallVector<SmallVector<Operation *>> memoryOrder;
 
   static FailureOr<PipelineStorage> get(scf::ForOp loop, bool admission = false) {
     PipelineStorage result;
@@ -61,9 +66,19 @@ struct PipelineStorage {
         return WalkResult::advance();
       SmallVector<Value> pending{allocation.getResult()};
       llvm::DenseSet<Value> visited;
+      llvm::SmallPtrSet<Operation *, 32> descriptors, accesses;
+      bool eligible = allocation->getBlock() == loop.getBody() &&
+          llvm::all_of(type.getShape().asArrayRef(), [](int64_t extent) { return extent > 0; });
       while (!pending.empty()) {
         Value value = pending.pop_back_val();
         if (!visited.insert(value).second) continue;
+        if (value != allocation.getResult()) {
+          auto definition = value.getDefiningOp();
+          if (definition && definition->getBlock() == loop.getBody()) {
+            eligible &= isMemoryEffectFree(definition) && !definition->getNumRegions();
+            descriptors.insert(definition);
+          }
+        }
         for (OpOperand &use : value.getUses()) {
           if (++edges > maximumEdges) {
             unsupportedPipeline(allocation, admission, "pipeline private-storage alias domain exceeds its bound");
@@ -75,15 +90,121 @@ struct PipelineStorage {
             return WalkResult::interrupt();
           }
           result.consumers.insert(owner);
+          if (!isMemoryEffectFree(use.getOwner())) accesses.insert(owner);
           riscv::appendStorageAliases(use, pending);
         }
       }
       result.allocations.insert(allocation.getResult());
       result.consumers.insert(ancestorInBlock(allocation, loop.getBody()));
+      PhysicalPipelineBuffer buffer;
+      buffer.allocation = allocation;
+      buffer.alignment = type.getAlignment();
+      buffer.bytes = llvm::alignTo(uint64_t(type.getSizeBytes()), buffer.alignment);
+      for (Operation *descriptor : descriptors) {
+        auto operands = stageDependencies(descriptor);
+        if (failed(operands)) return WalkResult::interrupt();
+        for (Value operand : *operands) {
+          if (operand == allocation.getResult()) continue;
+          auto definition = ancestorInBlock(operand.getDefiningOp(), loop.getBody());
+          if (definition && !descriptors.contains(definition) && !isa<arith::ConstantOp>(definition)) eligible = false;
+          if (auto argument = dyn_cast<BlockArgument>(operand); argument && argument.getOwner() == loop.getBody()) eligible = false;
+        }
+      }
+      for (Operation &operation : loop.getBody()->without_terminator()) {
+        if (descriptors.contains(&operation)) buffer.descriptors.push_back(&operation);
+        if (accesses.contains(&operation)) buffer.accesses.push_back(&operation);
+      }
+      result.memoryOrder.push_back(buffer.accesses);
+      if (eligible && buffer.accesses.size() >= 2) result.candidates.push_back(std::move(buffer));
       return WalkResult::advance();
     });
     if (walked.wasInterrupted()) return failure();
     return result;
+  }
+
+  void dependencies(PhysicalPipeline &schedule) const {
+    for (const auto &accesses : memoryOrder) addPipelineMemoryOrder(schedule, accesses);
+  }
+
+  void select(PhysicalPipeline &schedule) {
+    dependencies(schedule);
+    auto kernel = schedule.loop->getParentOfType<riscv::KernelOp>();
+    auto footprint = staticLocalFootprint(kernel);
+    auto limit = uint64_t(kernel.getTarget().getMaxPrivateStackBytes());
+    if (!footprint || footprint->hasDynamicObjects || uint64_t(footprint->bytes) >= limit) return;
+    uint64_t occupied = footprint->bytes;
+    for (const auto &candidate : candidates) {
+      if (candidate.bytes > (limit - occupied) / (schedule.depth - 1)) continue;
+      occupied += candidate.bytes * (schedule.depth - 1);
+      schedule.buffers.push_back(candidate);
+    }
+    retainUnversioned(schedule);
+  }
+
+  void retainUnversioned(const PhysicalPipeline &schedule) {
+    consumers.clear();
+    auto loop = schedule.loop;
+    // An operation using another non-versioned object is still constrained by
+    // that object's same-instance ownership, even if it also touches a ring.
+    for (Value object : allocations) {
+      if (llvm::any_of(schedule.buffers, [&](const auto &buffer) { return buffer.allocation == object.getDefiningOp(); })) continue;
+      SmallVector<Value> pending{object};
+      llvm::DenseSet<Value> visited;
+      while (!pending.empty()) {
+        Value value = pending.pop_back_val();
+        if (!visited.insert(value).second) continue;
+        consumers.insert(ancestorInBlock(value.getDefiningOp(), loop.getBody()));
+        for (OpOperand &use : value.getUses()) {
+          consumers.insert(ancestorInBlock(use.getOwner(), loop.getBody()));
+          riscv::appendStorageAliases(use, pending);
+        }
+      }
+    }
+  }
+
+  LogicalResult read(PhysicalPipeline &schedule) const {
+    dependencies(schedule);
+    for (Value value : allocations) {
+      auto allocation = value.getDefiningOp();
+      auto count = allocation->getAttrOfType<IntegerAttr>(bufferVersions);
+      if (!count) continue;
+      auto found = llvm::find_if(candidates, [&](const auto &buffer) { return buffer.allocation == allocation; });
+      if (found == candidates.end()) return allocation->emitError("pipeline buffer lost its private descriptor closure");
+      auto buffer = *found;
+      buffer.firstStage = schedule.depth;
+      for (Operation *access : buffer.accesses) {
+        buffer.firstStage = std::min(buffer.firstStage, schedule.stage(access));
+        buffer.lastStage = std::max(buffer.lastStage, schedule.stage(access));
+      }
+      if (count.getInt() != buffer.versions() || schedule.stage(allocation) != buffer.firstStage ||
+          llvm::any_of(buffer.descriptors, [&](Operation *op) { return schedule.stage(op) != buffer.firstStage; }))
+        return allocation->emitError("selected pipeline versions disagree with their payload lifetime");
+      schedule.buffers.push_back(std::move(buffer));
+    }
+    return success();
+  }
+
+  LogicalResult verifyUnversioned(const PhysicalPipeline &schedule) const {
+    auto loop = schedule.loop;
+    for (Value object : allocations) {
+      if (llvm::any_of(schedule.buffers, [&](const auto &buffer) { return buffer.allocation == object.getDefiningOp(); })) continue;
+      auto allocation = ancestorInBlock(object.getDefiningOp(), loop.getBody());
+      const unsigned stage = schedule.stage(allocation);
+      if (schedule.isInvariant(allocation)) return allocation->emitError("private storage cannot be an invariant allocation");
+      SmallVector<Value> pending{object};
+      llvm::DenseSet<Value> visited;
+      while (!pending.empty()) {
+        Value value = pending.pop_back_val();
+        if (!visited.insert(value).second) continue;
+        for (OpOperand &use : value.getUses()) {
+          auto owner = ancestorInBlock(use.getOwner(), loop.getBody());
+          if (schedule.stage(owner) != stage || schedule.isInvariant(owner))
+            return owner->emitError("unversioned private storage must remain in one selected stage");
+          riscv::appendStorageAliases(use, pending);
+        }
+      }
+    }
+    return success();
   }
 
   bool owns(Value value) const {
@@ -274,7 +395,7 @@ void collectTransport(PipelineSchedule &schedule) {
   for (Value returned : yield->getOperands())
     schedule.transportInduction |= returned == schedule.loop.getInductionVar();
   for (Operation *producer : schedule.producers)
-    if (!schedule.isInvariant(producer))
+    if (!schedule.isInvariant(producer) && !schedule.isBufferDescriptor(producer))
     for (Value result : producer->getResults()) {
       bool crosses = llvm::any_of(result.getUses(), [&](OpOperand &use) {
         auto owner = ancestorInBlock(use.getOwner(), body);
@@ -289,7 +410,7 @@ LogicalResult verifyTransport(const PipelineSchedule &schedule) {
   collectTransport(expected);
   if (expected.transported != schedule.transported || expected.transportInduction != schedule.transportInduction)
     return schedule.loop->emitError("pipeline transport does not match the physical use-def frontier");
-  if (schedule.transported.empty() && schedule.invariants.empty())
+  if (schedule.transported.empty() && schedule.invariants.empty() && schedule.buffers.empty())
     return schedule.loop->emitError("pipeline has no value crossing its producer/consumer stages");
   for (Value value : schedule.transported)
     if (!carryType(value.getType()))
@@ -307,19 +428,12 @@ LogicalResult PipelineSchedule::verify() const {
     return loop.emitError("pipeline stage membership or ordered domain is incomplete");
   auto storage = PipelineStorage::get(loop);
   if (failed(storage)) return failure();
-  if (failed(verifyPhysicalPipeline(*this, stageDependencies))) return failure();
-  llvm::DenseMap<Operation *, unsigned> positions;
-  for (auto [position, operation] : llvm::enumerate(ordered)) positions[operation] = position;
-  std::optional<unsigned> previousStorage;
+  PhysicalPipeline effects(*this);
+  storage->dependencies(effects);
+  if (failed(verifyPhysicalPipeline(effects, stageDependencies)) ||
+      failed(storage->verifyUnversioned(*this))) return failure();
   for (Operation &operation : loop.getBody()->without_terminator()) {
     if (failed(readonlyUnit(&operation, *storage))) return failure();
-    if (storage->consumers.contains(&operation)) {
-      unsigned position = positions.lookup(&operation);
-      if (isProducer(&operation) || isInvariant(&operation) ||
-          (previousStorage && position <= *previousStorage))
-        return operation.emitError("pipeline private storage must preserve consumer-stage memory order");
-      previousStorage = position;
-    }
   }
   if (failed(verifyTransport(*this))) return failure();
   return success();
@@ -327,6 +441,8 @@ LogicalResult PipelineSchedule::verify() const {
 
 void PipelineSchedule::write() const {
   Builder builder(loop->getContext());
+  for (const auto &buffer : buffers)
+    buffer.allocation->setAttr(bufferVersions, builder.getI64IntegerAttr(buffer.versions()));
   for (auto [position, operation] : llvm::enumerate(ordered)) {
     operation->setAttr(pipelineStage, builder.getI64IntegerAttr(stage(operation)));
     operation->setAttr(pipelineOrder, builder.getI64IntegerAttr(position));
@@ -367,6 +483,8 @@ FailureOr<PipelineSchedule> PipelineSchedule::read(scf::ForOp loop) {
         return operation->emitError("pipeline invariant marker must be the selected unit attribute"), failure();
       result.invariants.push_back(operation);
     }
+  auto storage = PipelineStorage::get(loop);
+  if (failed(storage) || failed(storage->read(result))) return failure();
   collectTransport(result);
   if (failed(result.verify()) || failed(verifyPipelineShapeStages(loop))) return failure();
   return result;
@@ -383,6 +501,7 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
   if (failed(materializeContractionReads(loop))) return failure();
   auto storage = PipelineStorage::get(loop, true);
   if (failed(storage)) return failure();
+  storage->select(result);
   SmallVector<Operation *> operations;
   llvm::SmallPtrSet<Operation *, 32> consumerSet(storage->consumers.begin(), storage->consumers.end());
   unsigned edges = 0;
@@ -405,6 +524,8 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
           consumerSet.contains(ancestorInBlock(operand.getDefiningOp(), loop.getBody())))
         consumerSet.insert(&operation);
     }
+    for (Operation *before : result.orderedAfter.lookup(&operation))
+      if (consumerSet.contains(before)) consumerSet.insert(&operation);
   }
   auto yield = loop.getBody()->getTerminator();
   for (Value value : yield->getOperands())
@@ -417,9 +538,11 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
     if (failed(dependencies)) return failure();
     for (Value operand : *dependencies)
       if (consumerSet.contains(ancestorInBlock(operand.getDefiningOp(), loop.getBody()))) consumerSet.insert(operation);
+    for (Operation *before : result.orderedAfter.lookup(operation))
+      if (consumerSet.contains(before)) consumerSet.insert(operation);
   }
   for (Operation *operation : llvm::reverse(operations)) {
-    if (consumerSet.contains(operation) || !replayableDescriptor(operation)) continue;
+    if (consumerSet.contains(operation) || result.isBufferDescriptor(operation) || !replayableDescriptor(operation)) continue;
     bool seen = false, onlyConsumers = true;
     for (Value value : operation->getResults())
       for (OpOperand &use : value.getUses()) {
@@ -440,7 +563,7 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
     if (auto mapped = consumerDescriptors.lookupOrNull(value)) return mapped;
     Operation *definition = value.getDefiningOp();
     if (!definition || definition->getBlock() != loop.getBody() || consumerSet.contains(definition) ||
-        carryType(value.getType())) return value;
+        carryType(value.getType()) || result.isBufferDescriptor(definition)) return value;
     if (!replayableDescriptor(definition) || definition->getNumRegions() || ++clonedDescriptors > maximumOperations)
       return definition->emitError("pipeline cannot replay a payload or ownership boundary as a descriptor"), failure();
     for (Value operand : definition->getOperands()) {
@@ -473,7 +596,8 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
   if (result.producers.empty() || result.consumers.empty()) return std::optional<PipelineSchedule>{};
   llvm::SmallPtrSet<Operation *, 32> invariantSet;
   for (Operation *operation : result.producers) {
-    bool invariant = true;
+    bool invariant = !result.isBufferDescriptor(operation) &&
+        (isPipelineShapeBinding(operation) || riscv::hasOnlyReadEffects(operation));
     auto dependencies = stageDependencies(operation);
     if (failed(dependencies)) return failure();
     for (Value operand : *dependencies) {
@@ -501,11 +625,13 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
           }
         });
         return reads;
-      }, [](Value value) {
-        return !value.getDefiningOp<riscv::LocalShapeOp>() && carryType(value.getType());
+      }, [&](Value value) {
+        return result.isBufferDescriptor(value.getDefiningOp()) ||
+            (!value.getDefiningOp<riscv::LocalShapeOp>() && carryType(value.getType()));
       }))) return failure();
+  closePhysicalPipelineBuffers(result);
   collectTransport(result);
-  if (result.transported.empty() && result.invariants.empty()) return std::optional<PipelineSchedule>{};
+  if (result.transported.empty() && result.invariants.empty() && result.buffers.empty()) return std::optional<PipelineSchedule>{};
   for (Value value : result.transported)
     if (!carryType(value.getType()))
       return rejectRISCVCandidate(value.getDefiningOp(), RISCVFailureCategory::Unsupported,
@@ -686,6 +812,10 @@ FailureOr<SmallVector<Operation *>> riscv_internal::orderPipelineFrontiers(
     const PipelineSchedule &schedule, const PipelineExpansion &expansion, int64_t registerBudget) {
   auto steady = expansion.steady;
   if (registerBudget < 1) return steady.emitError("pipeline frontier has no available register budget"), failure();
+  // Slot recipes occur in every active stage, rather than mapping one-to-one
+  // to their source descriptors. Preserve that complete selected order; the
+  // expanded program still goes through the ordinary peak/resource analysis.
+  if (!schedule.buffers.empty()) return schedule.ordered;
   auto liveness = FrontierLiveness::get(expansion.steady);
   if (failed(liveness)) return failure();
   SmallVector<Operation *> ordered;

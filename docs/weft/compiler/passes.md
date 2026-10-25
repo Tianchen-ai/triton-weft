@@ -417,6 +417,10 @@ stride 用于整个合并后的 VL。转换保持原访问点、完整 shape/axe
 没有可能别名写入，包括嵌套循环的较早迭代。无法保持原读取且没有合法的已物化 table
 表示时，明确拒绝该候选。memory-descriptor lookup 声明 Read effect；只有寄存器 table
 lookup 是 pure，CSE 不得跨写入合并前者。
+同一 block 内，lookup 的 index 若已支配原 load，或是可以原样复制的常量，则可以在
+原 load 点保存所需的数值。此时跨写入传递的是已读取的结果，不能在写入后重读 View；
+未被观察的整张表不需要占据局部存储。该规则不跨控制边界，不移动作者 stage birth，
+其余消费者继续使用原 Value。动态 table 不能仅凭一个 register layout 就被当作完整寄存器表。
 同轴的一维full寄存器table若以`iota + 常量`读取完整、对齐且不越界的连续窗口，
 可直接选已有`rvv_issue_slice`，不再生成向量gather索引。常量求值最多访问32个节点，
 只处理无溢出的index加乘与值域可精确保留的cast；iota及加法也必须在索引位宽内。
@@ -424,6 +428,19 @@ lookup 是 pure，CSE 不得跨写入合并前者。
 不能合法延迟的静态连续 dense table 在原 load 点形成 `local_alloc → dense_snapshot`，
 后续 lookup 读取该私有 descriptor。显式 stage 的 owner/birth/lifetime 保存在 allocation；
 没有 stage 时采用原读取的 Level owner。超出目标 local 容量或非连续、非静态表明确拒绝。
+由算术得到的完整静态 table 若无法由一份寄存器 gather 表示，则复用 numeric local-value
+分配、初始化与 view：在原数值定义的作用域保存快照，后续 lookup 消费同一逻辑值。
+已有 local carrier 直接提供其 descriptor，不再复制一次。该物理表示不重新执行原读取，
+也不改变作者的 Level、stage 或数值支路；容量仍受同一目标预算约束。
+尾部 numeric Value 被保存为容量固定的 local object 时，容量不等于有效元素数。标量投影
+在表示改写前捕获实际 active extents，局部读取受该谓词保护；共同 validity propagation
+把同一谓词传给后续 store、atomic、分支和 carry。无效位置既不读取未初始化的快照，也不
+产生可观察写入，不能用填零代替这项 effect 合同。
+非连续 dense table 的 lookup 在访存 pass 中把 row-major 逻辑 index 分解成坐标，再按
+descriptor 的实际 stride 合成为目标宽度的 element offset；动态 stride、转置与广播使用同一
+SSA 地址程序。`weft.riscv.lookup_storage_offsets` 标记这项已经完成的物理映射，后续窗口
+物化与布局转换必须保留它，不能再次把 offset 当作逻辑 table index。终端 gather 只执行
+这些显式偏移，不能假定所有 dense Encoding 都是连续存储。
 
 indexed-entry 的地址索引若仅由同形、同轴的 unsigned 8/16-bit value 扩展至 32-bit，
 且完整 byte offset 范围可由 16-bit 表示，可以直接选择 16-bit extension/identity 与
@@ -950,11 +967,15 @@ scheduler 另枚举由真实循环 carry 依赖确定的边界：把独立算术
 依赖与展开验证，最终资源 pass 仍可拒绝该候选。它不删除作者算术、隐式降低精度或取消
 所请求的流水，不把较小驻留量当作实际加速证据。
 
-静态 `physical-share` / `local-value-copy` 私有数组若能证明全部 storage aliases 留在分配作用域内，调度器将
-allocation、descriptor 和所有读写用户放入 consumer stage，并保留它们的原始内存顺序。
-仅数值输入跨 stage；私有 descriptor 不进入 carry，也不被当作 invariant 外提。expander
-为每个实际 consumer instance 克隆独立 allocation 与物理身份，最终资源 pass 重新核算
-存储峰值。该规则不接纳作者 state/stage birth、动态容量或跨 stage 的 local-storage ping-pong。
+静态 `physical-share` / `local-value-copy` / `control-value` 私有数组须证明全部 storage aliases
+留在当前迭代内。具有闭合平坦 descriptor 配方、已知容量且满足私有存储预算的对象，可以由
+前一阶段填充、后一阶段读取；scheduler 保留 payload 的原始内存顺序，写出首次至最后访问的
+阶段区间。expander 按该区间分配版本，而不是给所有 buffer 复制固定 depth 份。
+descriptor 在使用阶段从当前迭代的 slot 重建，不进入数值 carry，也不重新执行源级 birth。
+RISC-V 的 `local_slot` 明确记录 backing、index、byte stride 和版本容量；verifier 检查索引范围、
+对齐、大小及原 owner/lifetime，alias 与资源分析沿 slot 回到真实 allocation。x86 使用相同
+阶段区间与 expander，物化 memref backing/view。非平坦、嵌套或无法在预算内版本化的私有数组
+仍按其原作用域保持同阶段；作者 state/stage birth 不参与这一选择。展开后重新核算全部资源。
 
 `PipelineRISCVLevels` 与 x86 的 `PipelineLevels` 使用同一个 `expandPhysicalPipeline`。
 depth 1 顺序执行；depth 2/3/4 的操作进入所选 stage，并按各个值的生产阶段与最后消费阶段
@@ -964,13 +985,13 @@ depth 1 顺序执行；depth 2/3/4 的操作进入所选 stage，并按各个值
 
 x86 的 `ScheduleLevels` 写入 stage/order/invariant；expander 只读取并验证该决定。
 LLVM intrinsic 的纯度来自其内建 effect、termination 和 synchronization 属性，不能由名称
-前缀判断。私有 allocation 的完整使用闭包保留在 consumer 内；分支可向本次迭代的后续
+前缀判断。版本化和同阶段私有存储都保留完整读写顺序；分支可向本次迭代的后续
 操作交付 buffer，但不能将本次新建的地址传到本次迭代的回边。stack slot 分配在展开后运行，
 向量/谓词驻留重新分析。x86 谓词构造与其使用保持同阶段，避免多个廉价掩码版本占满
 AVX-512 的有限 k 寄存器。RISC-V 同样在展开后完成 local storage 与寄存器资源闭合。
 
 `backend_options["pipeline_depth"]` 在两目标上接受整数 1/2/3/4，默认 1，与 GPU `num_stages`
-无隐式映射。当前仍不接纳跨阶段 local descriptor ping-pong 或 async transfer。
+无隐式映射。当前版本化限于编译器私有静态存储，不接纳逃逸 descriptor 或 async transfer。
 显式深度不能建立合法 producer/consumer
 关系时给出诊断。Physical IR 保留 `weft.pipeline.expanded_depth`、每阶段操作数与版本数量；这些是编译
 决定，实际性能仍由相同计时边界验证。

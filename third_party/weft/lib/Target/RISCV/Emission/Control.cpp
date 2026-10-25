@@ -234,6 +234,8 @@ mlir::LogicalResult Emitter::compileOperation(mlir::Operation &operation) {
     return compileRegisterMaterialize(materialize);
   if (auto allocation = mlir::dyn_cast<riscv::LocalAllocOp>(operation))
     return compileLocalAlloc(allocation);
+  if (auto slot = mlir::dyn_cast<riscv::LocalSlotOp>(operation))
+    return compileLocalSlot(slot);
   if (auto reuse = mlir::dyn_cast<riscv::LocalReuseOp>(operation)) {
     bindings[reuse.getResult()] = bindings.lookup(reuse.getPrevious());
     return mlir::success();

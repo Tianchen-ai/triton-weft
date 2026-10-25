@@ -1629,6 +1629,18 @@ mlir::LogicalResult Emitter::compileLocalAlloc(riscv::LocalAllocOp operation) {
   return mlir::success();
 }
 
+mlir::LogicalResult Emitter::compileLocalSlot(riscv::LocalSlotOp operation) {
+  Binding storage = bindings.lookup(operation.getStorage());
+  Binding index = bindings.lookup(operation.getIndex());
+  if (storage.kind != Binding::Kind::LocalArray || index.kind != Binding::Kind::Scalar)
+    return fail(operation, "pipeline slot has no selected backing or scalar index");
+  storage.scalar = "((uint8_t *)(" + storage.scalar + ") + (" + index.scalar + ") * " +
+      std::to_string(operation.getStrideBytes()) + ")";
+  storage.localElements = std::to_string(operation.getResult().getType().getSizeBytes());
+  bindings[operation.getResult()] = std::move(storage);
+  return mlir::success();
+}
+
 mlir::LogicalResult Emitter::emitReadSnapshot(
     mlir::Operation *operation, riscv::LeafAttr leaf,
     llvm::StringRef destination, llvm::StringRef source, int64_t bytes) {

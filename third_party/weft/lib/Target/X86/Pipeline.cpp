@@ -10,11 +10,13 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/ModRef.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
 namespace {
@@ -73,6 +75,82 @@ Operation *unsupportedEffect(Operation *operation, llvm::LLVMContext &context,
   return nullptr;
 }
 
+constexpr StringLiteral bufferVersions = "weft.pipeline.buffer_versions";
+
+SmallVector<Operation *> payloadOrder(scf::ForOp loop, const weft::analysis::StorageUses &uses) {
+  llvm::SmallPtrSet<Operation *, 32> accesses;
+  for (Operation *user : uses.users)
+    if (!isMemoryEffectFree(user) && !isa<memref::AllocOp, memref::AllocaOp>(user))
+      if (auto top = inBody(user, loop.getBody())) accesses.insert(top);
+  SmallVector<Operation *> ordered;
+  for (Operation &operation : loop.getBody()->without_terminator())
+    if (accesses.contains(&operation)) ordered.push_back(&operation);
+  return ordered;
+}
+
+std::optional<uint64_t> allocationBytes(Operation *allocation) {
+  if (!isa<memref::AllocOp, memref::AllocaOp>(allocation)) return {};
+  auto type = cast<MemRefType>(allocation->getResult(0).getType());
+  if (!type.hasStaticShape() || !type.getLayout().isIdentity() || !type.getElementType().isIntOrFloat()) return {};
+  unsigned bits = type.getElementTypeBitWidth();
+  if (isa<IntegerType>(type.getElementType())) bits = llvm::PowerOf2Ceil(std::max(8u, bits));
+  uint64_t bytes = llvm::divideCeil(bits, 8u);
+  for (int64_t extent : type.getShape()) {
+    if (extent <= 0 || uint64_t(extent) > weft::x86::privateStorageBudget / bytes) return {};
+    bytes *= extent;
+  }
+  return bytes;
+}
+
+// Only flat descriptor projections are rematerialized. Their non-address
+// operands must be constants or values already dominating this loop, so slot
+// selection never replays a numerical producer or a source-level birth.
+std::optional<weft::PhysicalPipelineBuffer> bufferCandidate(
+    Operation *allocation, scf::ForOp loop, const weft::analysis::StorageUses &uses) {
+  auto bytes = allocationBytes(allocation);
+  if (!bytes || allocation->getBlock() != loop.getBody() || allocation->hasAttr("weft.x86.birth")) return {};
+  weft::PhysicalPipelineBuffer result;
+  result.allocation = allocation;
+  result.alignment = 64;
+  if (auto alignment = allocation->getAttrOfType<IntegerAttr>("alignment"))
+    result.alignment = std::max<uint64_t>(result.alignment, alignment.getInt());
+  if (!llvm::isPowerOf2_64(result.alignment) || result.alignment > weft::x86::privateStorageBudget) return {};
+  result.bytes = llvm::alignTo(*bytes, result.alignment);
+  llvm::SmallPtrSet<Operation *, 32> descriptors;
+  for (Value alias : uses.aliases) {
+    if (alias == allocation->getResult(0)) continue;
+    auto operation = alias.getDefiningOp();
+    if (!operation) return {};
+    if (operation->getBlock() != loop.getBody()) continue;
+    if (!isa<memref::CastOp, ViewLikeOpInterface>(operation) || operation->getNumRegions()) return {};
+    descriptors.insert(operation);
+  }
+  for (Operation *descriptor : descriptors)
+    for (Value operand : descriptor->getOperands()) {
+      if (operand == allocation->getResult(0)) continue;
+      auto definition = inBody(operand.getDefiningOp(), loop.getBody());
+      if (definition && !descriptors.contains(definition) && !isa<arith::ConstantOp>(definition)) return {};
+      if (auto arg = dyn_cast<BlockArgument>(operand); arg && arg.getOwner() == loop.getBody()) return {};
+    }
+  for (Operation *user : uses.users) {
+    auto top = inBody(user, loop.getBody());
+    if (!top || top->hasTrait<OpTrait::IsTerminator>()) return {};
+    if (top == user && isMemoryEffectFree(user) && !descriptors.contains(user)) return {};
+  }
+  for (Operation &operation : loop.getBody()->without_terminator()) {
+    if (descriptors.contains(&operation)) result.descriptors.push_back(&operation);
+  }
+  result.accesses = payloadOrder(loop, uses);
+  if (result.accesses.size() < 2) return {};
+  return result;
+}
+
+void addBufferDependencies(weft::PhysicalPipeline &schedule,
+                           ArrayRef<weft::PhysicalPipelineBuffer> buffers) {
+  for (const auto &buffer : buffers)
+    weft::addPipelineMemoryOrder(schedule, buffer.accesses);
+}
+
 FailureOr<weft::PhysicalPipeline> schedule(scf::ForOp loop, unsigned depth,
                                           llvm::LLVMContext &context) {
   weft::PhysicalPipeline result;
@@ -86,20 +164,58 @@ FailureOr<weft::PhysicalPipeline> schedule(scf::ForOp loop, unsigned depth,
     return loop.emitError("x86 pipeline carry requires numeric SSA; storage ownership cannot escape its instance"), failure();
 
   llvm::SmallPtrSet<Operation *, 32> consumers, privateEffects;
+  SmallVector<std::pair<Operation *, weft::analysis::StorageUses>> privateStorage;
+  uint64_t occupied = 0;
+  loop->getParentOfType<func::FuncOp>().walk([&](Operation *allocation) {
+    if (auto stack = dyn_cast<LLVM::AllocaOp>(allocation)) {
+      APInt elements;
+      Type type = stack.getElemType();
+      uint64_t count = 1;
+      if (auto vector = dyn_cast<VectorType>(type)) { count = vector.getNumElements(); type = vector.getElementType(); }
+      if (!type.isIntOrFloat() || !matchPattern(stack.getArraySize(), m_ConstantInt(&elements)) ||
+          elements.isNegative() || elements.getActiveBits() > 32) {
+        occupied = weft::x86::privateStorageBudget; return;
+      }
+      uint64_t width = llvm::divideCeil(type.getIntOrFloatBitWidth(), 8u);
+      if (count > weft::x86::privateStorageBudget / width ||
+          elements.getZExtValue() > (weft::x86::privateStorageBudget - occupied) / (count * width))
+        occupied = weft::x86::privateStorageBudget;
+      else occupied = std::min(weft::x86::privateStorageBudget,
+          occupied + llvm::alignTo(count * width * elements.getZExtValue(), 64));
+      return;
+    }
+    if (!isa<memref::AllocOp, memref::AllocaOp>(allocation)) return;
+    auto bytes = allocationBytes(allocation);
+    if (!bytes || *bytes > weft::x86::privateStorageBudget - occupied)
+      occupied = weft::x86::privateStorageBudget;
+    else occupied += llvm::alignTo(*bytes, 64);
+    occupied = std::min(occupied, weft::x86::privateStorageBudget);
+  });
   bool escaped = false;
   loop.walk([&](Operation *allocation) {
     if (!isa<memref::AllocOp, memref::AllocaOp>(allocation)) return;
     auto uses = weft::x86::privateStorageUses(allocation->getResult(0), loop);
     if (failed(uses)) { escaped = true; return; }
     privateEffects.insert(allocation);
-    consumers.insert(inBody(allocation, loop.getBody()));
     for (Operation *user : uses->users) {
       if (!loop->isProperAncestor(user)) { escaped = true; continue; }
       privateEffects.insert(user);
-      consumers.insert(inBody(user, loop.getBody()));
     }
+    privateStorage.emplace_back(allocation, std::move(*uses));
   });
   if (escaped) return loop.emitError("x86 pipeline private storage escapes its original iteration"), failure();
+  for (const auto &[allocation, uses] : privateStorage) {
+    weft::addPipelineMemoryOrder(result, payloadOrder(loop, uses));
+    auto candidate = bufferCandidate(allocation, loop, uses);
+    if (candidate && candidate->bytes <= (weft::x86::privateStorageBudget - occupied) / (depth - 1)) {
+      occupied += candidate->bytes * (depth - 1);
+      result.buffers.push_back(std::move(*candidate));
+    } else {
+      consumers.insert(inBody(allocation, loop.getBody()));
+      for (Operation *user : uses.users) consumers.insert(inBody(user, loop.getBody()));
+    }
+  }
+  addBufferDependencies(result, result.buffers);
   SmallVector<Operation *> operations;
   for (Operation &op : loop.getBody()->without_terminator()) {
     if (operations.size() == 4096)
@@ -113,12 +229,15 @@ FailureOr<weft::PhysicalPipeline> schedule(scf::ForOp loop, unsigned depth,
     operations.push_back(&op);
   }
   auto closeConsumers = [&] {
-    for (Operation *op : operations)
+    for (Operation *op : operations) {
       for (Value operand : externalOperands(op)) {
         auto arg = dyn_cast<BlockArgument>(operand);
         if ((arg && arg.getOwner() == loop.getBody() && arg != loop.getInductionVar()) ||
             consumers.contains(inBody(operand.getDefiningOp(), loop.getBody()))) consumers.insert(op);
       }
+      for (Operation *before : result.orderedAfter.lookup(op))
+        if (consumers.contains(before)) consumers.insert(op);
+    }
   };
   closeConsumers();
   auto yield = loop.getBody()->getTerminator();
@@ -156,16 +275,19 @@ FailureOr<weft::PhysicalPipeline> schedule(scf::ForOp loop, unsigned depth,
           }
         });
         return reads;
-      }, [](Value value) {
+      }, [&](Value value) {
         // Keep mask construction with its use. Retaining several versions of
         // these cheap predicates spends the small AVX-512 k-register bank on
         // bookkeeping instead of the numerical supply being pipelined.
         auto vector = dyn_cast<VectorType>(value.getType());
-        return numeric(value.getType()) && !(vector && vector.getElementType().isInteger(1));
+        return result.isBufferDescriptor(value.getDefiningOp()) ||
+            (numeric(value.getType()) && !(vector && vector.getElementType().isInteger(1)));
       }))) return failure();
+  weft::closePhysicalPipelineBuffers(result);
   for (Operation *op : result.producers) {
     if (result.isInvariant(op)) continue;
     for (Value value : op->getResults()) {
+      if (result.isBufferDescriptor(op)) continue;
       bool crosses = llvm::any_of(value.getUses(), [&](OpOperand &use) {
         auto owner = inBody(use.getOwner(), loop.getBody());
         return owner == yield || (owner && result.stage(owner) > result.stage(op));
@@ -176,7 +298,7 @@ FailureOr<weft::PhysicalPipeline> schedule(scf::ForOp loop, unsigned depth,
       result.transported.push_back(value);
     }
   }
-  if (result.transported.empty())
+  if (result.transported.empty() && result.buffers.empty())
     return loop.emitError("x86 pipeline has no iteration-varying numerical supply"), failure();
   return result;
 }
@@ -211,6 +333,29 @@ FailureOr<weft::PhysicalPipeline> readSchedule(scf::ForOp loop) {
     (result.stage(op) == result.depth - 1 ? result.consumers : result.producers).push_back(op);
     if (op->hasAttr(scheduleInvariant)) result.invariants.push_back(op);
   }
+  bool invalidBuffers = false;
+  loop.walk([&](Operation *allocation) {
+    if (!isa<memref::AllocOp, memref::AllocaOp>(allocation)) return;
+    auto uses = weft::x86::privateStorageUses(allocation->getResult(0), loop);
+    if (failed(uses)) { allocation->emitError("pipeline private storage escaped its selected iteration"); invalidBuffers = true; return; }
+    weft::addPipelineMemoryOrder(result, payloadOrder(loop, *uses));
+    auto versions = allocation->getAttrOfType<IntegerAttr>(bufferVersions);
+    if (!versions) return;
+    auto buffer = bufferCandidate(allocation, loop, *uses);
+    if (!buffer) { allocation->emitError("selected pipeline buffer lost its private descriptor closure"); invalidBuffers = true; return; }
+    buffer->firstStage = result.depth;
+    for (Operation *access : buffer->accesses) {
+      buffer->firstStage = std::min(buffer->firstStage, result.stage(access));
+      buffer->lastStage = std::max(buffer->lastStage, result.stage(access));
+    }
+    if (versions.getInt() != buffer->versions() || result.stage(allocation) != buffer->firstStage ||
+        llvm::any_of(buffer->descriptors, [&](Operation *op) { return result.stage(op) != buffer->firstStage; })) {
+      allocation->emitError("selected buffer versions disagree with its actual stage lifetime"); invalidBuffers = true; return;
+    }
+    result.buffers.push_back(std::move(*buffer));
+  });
+  if (invalidBuffers) return failure();
+  addBufferDependencies(result, result.buffers);
   for (Operation *op : result.consumers)
     for (Value value : externalOperands(op)) result.transportInduction |= value == loop.getInductionVar();
   auto yield = loop.getBody()->getTerminator();
@@ -218,7 +363,7 @@ FailureOr<weft::PhysicalPipeline> readSchedule(scf::ForOp loop) {
   for (Operation *op : result.producers) {
     if (result.isInvariant(op)) continue;
     for (Value value : op->getResults())
-      if (llvm::any_of(value.getUses(), [&](OpOperand &use) {
+      if (!result.isBufferDescriptor(op) && llvm::any_of(value.getUses(), [&](OpOperand &use) {
             auto owner = inBody(use.getOwner(), loop.getBody());
             return owner == yield || (owner && result.stage(owner) > result.stage(op));
           })) result.transported.push_back(value);
@@ -254,6 +399,8 @@ public:
       auto selected = schedule(loop, depth, context);
       if (failed(selected)) { signalPassFailure(); return; }
       loop->setAttr(scheduleDepth, b.getI64IntegerAttr(depth));
+      for (const auto &buffer : selected->buffers)
+        buffer.allocation->setAttr(bufferVersions, b.getI64IntegerAttr(buffer.versions()));
       for (auto [position, op] : llvm::enumerate(selected->ordered)) {
         op->setAttr(scheduleStage, b.getI64IntegerAttr(selected->stage(op)));
         op->setAttr(scheduleOrder, b.getI64IntegerAttr(position));
@@ -293,6 +440,18 @@ public:
               if (attr.getName() == "weft.x86.level" && !owner) continue;
               target->setAttr(attr.getName(), attr.getValue());
             }
+          }, [](IRRewriter &b, const weft::PhysicalPipelineBuffer &buffer) -> FailureOr<Value> {
+            auto oldType = cast<MemRefType>(buffer.allocation->getResult(0).getType());
+            auto type = MemRefType::get({int64_t(buffer.bytes * buffer.versions())}, b.getI8Type(), MemRefLayoutAttrInterface{}, oldType.getMemorySpace());
+            auto allocation = memref::AllocaOp::create(b, buffer.allocation->getLoc(), type);
+            allocation.setAlignment(buffer.alignment);
+            allocation->setAttr("weft.pipeline.buffer_slots", b.getI64IntegerAttr(buffer.versions()));
+            return allocation.getResult();
+          }, [](IRRewriter &b, const weft::PhysicalPipelineBuffer &buffer, Value storage, Value slot) -> FailureOr<Value> {
+            auto loc = buffer.allocation->getLoc();
+            Value bytes = arith::ConstantIndexOp::create(b, loc, buffer.bytes);
+            Value offset = b.createOrFold<arith::MulIOp>(loc, slot, bytes);
+            return memref::ViewOp::create(b, loc, buffer.allocation->getResult(0).getType(), storage, offset, ValueRange{}).getResult();
           });
       if (failed(expanded)) { signalPassFailure(); return; }
       b.replaceOp(loop, expanded->guard.getResults());
@@ -314,6 +473,7 @@ public:
           b.getNamedAttr("depth", b.getI64IntegerAttr(depth)),
           b.getNamedAttr("saved_values", expanded->steady->getAttr("weft.pipeline.version_values")),
           b.getNamedAttr("stage_operations", expanded->steady->getAttr("weft.pipeline.stage_operations")),
+          b.getNamedAttr("buffer_versions", expanded->steady->getAttr("weft.pipeline.buffer_versions")),
           b.getNamedAttr("vector_peak", b.getI64IntegerAttr(peak.vectors)),
           b.getNamedAttr("predicate_peak", b.getI64IntegerAttr(peak.predicates))}));
       function->setAttr("weft.x86.pipeline_schedule", b.getArrayAttr(records));

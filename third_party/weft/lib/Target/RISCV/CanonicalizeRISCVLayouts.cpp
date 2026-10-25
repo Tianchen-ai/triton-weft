@@ -610,6 +610,8 @@ public:
               lookup.getBounds(), riscv_internal::unassignedAccess(rewriter),
               riscv_internal::unselectedLeaf(rewriter));
           riscv_internal::copyOrigin(lookup, rematerialized);
+          if (lookup->hasAttr("weft.riscv.lookup_storage_offsets"))
+            rematerialized->setAttr("weft.riscv.lookup_storage_offsets", rewriter.getUnitAttr());
           conversion.getResult().replaceAllUsesWith(rematerialized.getResult());
           rewriter.eraseOp(conversion);
           rewriter.eraseOp(lookup);

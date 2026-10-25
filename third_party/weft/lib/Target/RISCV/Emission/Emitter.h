@@ -802,6 +802,7 @@ private:
   mlir::LogicalResult
   compileLocalCapacityGuard(riscv::LocalCapacityGuardOp operation);
   mlir::LogicalResult compileLocalAlloc(riscv::LocalAllocOp operation);
+  mlir::LogicalResult compileLocalSlot(riscv::LocalSlotOp operation);
   mlir::LogicalResult compileLocalSize(riscv::LocalSizeOp operation);
   mlir::LogicalResult compileLocalBind(riscv::LocalBindOp operation);
   mlir::LogicalResult compileLocalView(riscv::LocalViewOp operation);
