@@ -4537,6 +4537,18 @@ mlir::LogicalResult ReduceOp::verify() {
       getAxis() < 0 || static_cast<size_t>(getAxis()) >= input.getShape().size() ||
       elementOf(getInput().getType()) != elementOf(getResult().getType()))
     return emitOpError("physical reduce requires physical values");
+  if (!getActiveLengths().empty()) {
+    auto coordinates = RegisterCoordinates::get(input.getLayout());
+    if (!getLeaf().getInstruction().starts_with("rvv.lane-reduce.") ||
+        !coordinates || getActiveLengths().size() != size_t(coordinates->parts()))
+      return emitOpError("explicit reduction lengths require one index per selected RVV lane carrier");
+    for (mlir::Value length : getActiveLengths()) {
+      llvm::APInt constant;
+      if (mlir::matchPattern(length, mlir::m_ConstantInt(&constant)) &&
+          (constant.isNegative() || constant.getZExtValue() > uint64_t(coordinates->lanes())))
+        return emitOpError("reduction active length exceeds its selected carrier");
+    }
+  }
   llvm::SmallVector<int64_t> expectedShape(input.getShape().asArrayRef());
   llvm::SmallVector<int64_t> expectedAxes(input.getAxisIds().asArrayRef());
   expectedShape.erase(expectedShape.begin() + getAxis());

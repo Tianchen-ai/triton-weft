@@ -274,14 +274,14 @@ class ValidityPropagation {
       return shape.empty() ? element : Type(domainType(b, element, shape, axes));
     };
     Value reduced = riscv::ReduceOp::create(b, loc, resultType(element), filled,
-        op.getKindAttr(), op.getAxisAttr(), unselectedLeaf(b));
+        op.getKindAttr(), op.getAxisAttr(), unselectedLeaf(b), ValueRange{});
     auto byte = IntegerType::get(b.getContext(), 8, IntegerType::Unsigned);
     auto maskType = cast<riscv::ValueType>(mask.getType());
     Value bytes = riscv::CastOp::create(b, loc,
         domainType(b, byte, maskType.getShape().asArrayRef(), maskType.getAxisIds().asArrayRef()),
         mask, unselectedLeaf(b));
     Value any = riscv::ReduceOp::create(b, loc, resultType(byte), bytes,
-        "max", op.getAxis(), unselectedLeaf(b));
+        "max", op.getAxis(), unselectedLeaf(b), ValueRange{});
     Value zero = riscv::ConstantOp::create(b, loc, byte, b.getIntegerAttr(byte, 0));
     Value active = riscv::CompareOp::create(b, loc, resultType(b.getI1Type()), any, zero, "ne", unselectedLeaf(b));
     if (auto output = dyn_cast<riscv::ValueType>(op.getResult().getType())) {

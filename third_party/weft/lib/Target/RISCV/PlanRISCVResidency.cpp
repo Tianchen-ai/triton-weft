@@ -2,6 +2,7 @@
 
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
+#include "Weft/Dialect/RISCV/IR/Memory.h"
 #include "RISCVPhysicalSupport.h"
 
 #include "llvm/ADT/DenseSet.h"
@@ -188,8 +189,15 @@ mlir::LogicalResult weft::planRISCVResidency(mlir::ModuleOp module) {
       return;
     }
     auto kernel = materialize->getParentOfType<riscv::KernelOp>();
-    if (kernel && requiresAddressableReload(materialize, kernel.getTarget()))
-      materialize.setPlacementAttr(builder.getStringAttr("reload"));
+    if (kernel && requiresAddressableReload(materialize, kernel.getTarget())) {
+      auto load = riscv_internal::sourceLoad(materialize.getInput());
+      // A stage is a saved numerical value. Addressable supply may repeat its
+      // original read only when every consumer remains in that read epoch,
+      // including writes after a use in a repeated child region.
+      if (load && llvm::all_of(materialize.getResult().getUsers(),
+          [&](mlir::Operation *user) { return !riscv::readCrossesWrite(load, user); }))
+        materialize.setPlacementAttr(builder.getStringAttr("reload"));
+    }
   });
   return mlir::failure(invalid);
 }

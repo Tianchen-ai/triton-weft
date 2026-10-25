@@ -70,6 +70,7 @@ add_library(WeftRISCVTarget STATIC
   SelectRISCVScalarLoadPrimes.cpp
   ContractRISCVIntegerPointwise.cpp
   MaterializeRISCVReadSnapshots.cpp
+  MaterializeRISCVReductionBounds.cpp
   MaterializeRISCVResources.cpp
   FuseRISCVPhysicalIssueLoops.cpp
   EliminateDeadRISCVLayouts.cpp

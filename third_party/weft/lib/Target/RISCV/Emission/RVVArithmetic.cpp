@@ -1946,7 +1946,15 @@ mlir::LogicalResult Emitter::compileReduce(riscv::ReduceOp operation) {
   result.kind = resultParts == 1 ? Binding::Kind::Scalar
                                  : Binding::Kind::ScalarTuple;
   const bool combineFullStreams =
-      streams > 1 && inputType.getLayout().getValidity() == "full";
+      streams > 1 && inputType.getLayout().getValidity() == "full" &&
+      operation.getActiveLengths().empty();
+  llvm::SmallVector<std::string> activeLengths;
+  for (mlir::Value length : operation.getActiveLengths()) {
+    Binding active = bindings.lookup(length);
+    if (active.kind != Binding::Kind::Scalar)
+      return fail(operation, "reduction active length has no scalar binding");
+    activeLengths.push_back(active.scalar);
+  }
   std::string horizontalStem;
   if (operation.getLeaf().getTail() != "exact")
     return fail(operation, "lane reduction requires its selected seed-preserving destination policy");
@@ -1974,7 +1982,7 @@ mlir::LogicalResult Emitter::compileReduce(riscv::ReduceOp operation) {
       const std::string reduced = fresh("reduce_vector");
       line(baseType + " " + reduced + " = __riscv_" + horizontalStem +
            "_vs_" + sourceSuffix + "_" + baseSuffix + "_tu(" + seed + ", " + source.str() +
-           ", " + seed + ", " + partVL(operation.getInput(), index) + ");");
+           ", " + seed + ", " + (activeLengths.empty() ? partVL(operation.getInput(), index) : activeLengths[index]) + ");");
       if (floating)
         line(accumulator + " = __riscv_vfmv_f_s_" + baseSuffix + "_f" +
              std::to_string(sew) + "(" + reduced + ");");

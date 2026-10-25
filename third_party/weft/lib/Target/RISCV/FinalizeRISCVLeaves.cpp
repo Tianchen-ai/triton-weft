@@ -1065,7 +1065,7 @@ public:
           auto layout = input.getLayout();
           auto streams = riscv_internal::staticProduct(layout.getTimeFactors().asArrayRef());
           temporaries = 1;
-          if (streams && *streams > 1 && layout.getValidity() == "full")
+          if (streams && *streams > 1 && layout.getValidity() == "full" && reduce.getActiveLengths().empty())
             temporaries += (layout.getLmulEighths() + 7) / 8;
         }
       } else if (mlir::isa<riscv::Fold2Op>(operation)) {

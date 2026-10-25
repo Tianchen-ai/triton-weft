@@ -1464,7 +1464,7 @@ def WeftRISCV_MacGroupsOp : WeftRISCV_Op<"mac_groups", [Pure]> {
 
 def WeftRISCV_ReduceOp : WeftRISCV_LeafOp<"reduce", [Pure]> {
   let arguments = (ins AnyType:$input, StrAttr:$kind, I64Attr:$axis,
-                       WeftRISCV_LeafAttr:$leaf);
+                       WeftRISCV_LeafAttr:$leaf, Variadic<Index>:$active_lengths);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
 }

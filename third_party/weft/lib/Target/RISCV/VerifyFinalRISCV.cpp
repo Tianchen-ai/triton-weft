@@ -1,5 +1,6 @@
 #include "Weft/Target/RISCVPasses.h"
 #include "PhysicalLoopControl.h"
+#include "ReductionBounds.h"
 
 #include "RISCVPhysicalSupport.h"
 
@@ -324,9 +325,13 @@ public:
           reduce && reduce.getLeaf().getInstruction().starts_with("rvv.lane-reduce.")) {
         auto input = mlir::cast<riscv::ValueType>(reduce.getInput().getType());
         auto layout = input.getLayout();
+        if (reduce.getActiveLengths().empty() && riscv_internal::needsSavedReductionBounds(reduce)) {
+          reduce.emitError("tail reduction through reshape requires explicit saved active lengths");
+          failed = true;
+        }
         auto streams = riscv_internal::staticProduct(layout.getTimeFactors().asArrayRef());
         int64_t temporaries = 1;
-        if (streams && *streams > 1 && layout.getValidity() == "full")
+        if (streams && *streams > 1 && layout.getValidity() == "full" && reduce.getActiveLengths().empty())
           temporaries += (layout.getLmulEighths() + 7) / 8;
         if (reduce.getLeaf().getTail() != "exact" ||
             reduce.getLeaf().getTemporaryGroups() != temporaries) {

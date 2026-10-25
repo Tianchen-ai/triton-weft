@@ -90,6 +90,7 @@ ConvertWeftToRISCV
 → FinalizeRISCVLeaves
 → SelectRISCVScalarLoadPrimes
 → MaterializeRISCVReadSnapshots
+→ MaterializeRISCVReductionBounds
 → CloseRISCVLeafResources
 → RISCV physical CSE
 → FuseRISCVPhysicalIssueLoops
@@ -111,6 +112,16 @@ raw-window load 与显式 layer decode。exact leaf
 
 最终 layout 改写前先清理失去消费者的纯 index/conversion 链，避免死路径阻止基于真实
 use 数量的 rematerialization；资源闭合后的清理不能替代这个位置的清理。
+
+`MaterializeRISCVReductionBounds` 在 carrier 映射固定后，沿 register reshape 的
+`part_order` 将归约各 part 对应回保存的数值域，把真实活动长度写成 index SSA operands。
+长度包含 lane offset 和其它轴的活动条件；空 part 使用零长度并保留归约 seed。
+逐元素算术、转换和广播沿逻辑坐标投影这些长度；轴改名后的算术结果不能单凭布局的
+`full` 标签扩大原保存数值的有效域。显式长度阻止不合法的整宽 stream 合并，并更新
+对应的 temporary register 需求。
+这些 operands 随 spill/reload 保留，emitter 只读取它们，不按改名后的轴猜测尾块长度。
+当前前缀长度表示要求一个 lane axis；有孔的 Cartesian 域必须有显式 mask，不能伪装成前缀。
+
 派生节点继承已有 `source_origin`；只有没有来源标签时才从 location 建立初始来源。
 解析 Physical IR 的文件位置不能覆盖作者来源，否则同一程序重放会改变 CSE 的匹配集合。
 
@@ -334,6 +345,10 @@ storage layer 宽度约束 raw field 和保持表示的 cast/conversion 链；lo
 table 完整元素能放入所需 register capacity 时，shared materialize 或同 SEW 的单消费者
 table load 可匹配查询的 LMUL；原读取点、逻辑 extent、VL 和 lane/time mapping 均不改变。
 不同 SEW 的 memory lookup 不属于该寄存器匹配候选，仍由 typed indexed-memory 关系选择。
+
+dense stage 的 addressable supply 不可只凭投影形式或大小选成 reload。候选必须证明从原
+load 到每个 consumer 都处于同一 read epoch，包括重复子区域中 consumer 之后的写入。
+无法证明时保留数值快照，不能把存储 descriptor 当作原 stage 的内容。
 
 同一个 widening contraction 的两个 operand 必须共享一套 reduction carrier。两侧
 storage proposal 一致时保留该 mapping；不一致但拥有相同 reduction axes 与 extents 时，
@@ -698,6 +713,14 @@ fragment/replica 分解明确的类型，并共享不同 N atom 的 lhs。最多
 terminal 只枚举已选重复数和明确的输出坐标，不决定 microtile 或扩大 kernel 遍历。
 
 ### `MaterializeRISCVValuePrograms`
+
+同一有界 dense stage 被多个 consumer 同时按两个或更多 domain 轴切分时，在 producer graph
+改写前先闭合整组供应。可安全延迟的读取使用原 descriptor；其它情况在原数值 producer 后
+保存一次私有快照，所有投影复用该快照。原 dtype、完整 shape 和轴身份必须相同，源窗口的
+physical origins 与活动范围必须可证明。子 point 的全局 base 减去该源窗口 base，得到私有
+存储的相对坐标；活动长度同时受原快照边界与当前 child 限制。空窗口使用安全的零 offset。
+结果是显式 physical point、slice 和 load，不由 emitter 重建多轴提取算法。已有单轴
+寄存器投影仍保留原路线，作者的 stage birth 与原读取位置不变。
 
 严格子域上的数学 producer 可以先在自身已有轴上完成一个 bounded value program，再供应
 较大的 broadcast consumer。不得把本可向量执行的子域 exp/log 强制嵌入另一个 lane 轴、

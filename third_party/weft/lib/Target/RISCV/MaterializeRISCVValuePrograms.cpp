@@ -8,6 +8,7 @@
 #include "DenseIssue.h"
 #include "LocalLifetime.h"
 #include "ValueLiveness.h"
+#include "NumericalValidity.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -78,6 +79,8 @@ public:
   }
 
   LogicalResult run() {
+    nextIdentity = riscv_internal::lastLocalIdentity(module);
+    if (failed(projectSharedDomains())) return failure();
     if (failed(riscv_internal::materializeDenseValuePrograms(module))) return failure();
     nextIdentity = riscv_internal::lastLocalIdentity(module);
     SmallVector<Operation *> operations;
@@ -600,7 +603,10 @@ private:
       else diagnostic << "block argument";
       return failure();
     }
-    auto storage = allocate(type, anchor);
+    auto stage = dyn_cast<riscv::RegisterMaterializeOp>(anchor);
+    const bool preservesStage = stage && stage.getResult() == value &&
+        stage.getRealization() != "physical-share";
+    auto storage = allocate(type, anchor, preservesStage);
     if (failed(storage)) return failure();
     auto memory = view(*storage, anchor);
     if (failed(memory)) return failure();
@@ -614,6 +620,125 @@ private:
         riscv_internal::unselectedLeaf(b), riscv::FieldStorePlanAttr());
     numericStorage[value] = *memory;
     return *memory;
+  }
+
+  // A rectangular projection may select several axes of the same saved value.
+  // Make its complete supply decision before value-program expansion rewrites
+  // the producer. All consumers share one immutable copy when reads cannot be
+  // delayed; the copy remains at the numerical producer, never inside a child
+  // traversal. Existing single-axis register projections retain their route.
+  LogicalResult projectSharedDomains() {
+    DenseMap<Value, SmallVector<riscv::ExtractOp>> consumers;
+    SmallVector<Value> sources;
+    module.walk([&](riscv::ExtractOp extract) {
+      auto input = extract.getInput().getType();
+      auto output = dyn_cast<riscv::ValueType>(extract.getResult().getType());
+      if (!output || !isa<IntegerType, FloatType>(input.getElementType()) ||
+          input.getElementType() != output.getElementType() ||
+          input.getAxisIds() != output.getAxisIds() ||
+          riscv_internal::sourceField(extract.getInput())) return;
+      unsigned domains = 0;
+      bool rectangular = true;
+      for (Attribute attr : extract.getSelectors()) {
+        StringRef selector = cast<StringAttr>(attr).getValue();
+        domains += selector == "domain";
+        rectangular &= selector == "domain" || selector == "all";
+      }
+      if (!rectangular || domains < 2) return;
+      if (!consumers.count(extract.getInput())) sources.push_back(extract.getInput());
+      consumers[extract.getInput()].push_back(extract);
+    });
+    for (Value source : sources) {
+      auto type = cast<riscv::ValueType>(source.getType());
+      // A same-shaped projection can still change its origin. Only physical
+      // representation aliases preserve the load's complete saved domain here.
+      auto load = riscv_internal::stripRepresentationConversions(source).getDefiningOp<riscv::LoadOp>();
+      auto loaded = load ? dyn_cast<riscv::ValueType>(load.getResult().getType()) : riscv::ValueType();
+      if (!loaded || load.getSnapshotStorage() || loaded.getShape() != type.getShape() ||
+          loaded.getAxisIds() != type.getAxisIds() || loaded.getElementType() != type.getElementType()) continue;
+      auto encoding = cast<kernel::EncodingType>(load.getRegion().getType().getEncoding());
+      if (encoding.getKind() != "dense" ||
+          llvm::any_of(type.getShape().asArrayRef(), [](int64_t n) { return n <= 0; })) continue;
+      SmallVector<riscv::PhysicalPointOp> origins;
+      bool closed = true;
+      for (int64_t axis : type.getAxisIds().asArrayRef()) {
+        auto origin = riscv_internal::originPoint(load.getRegion(), axis);
+        if (!origin) { closed = false; break; }
+        origins.push_back(origin);
+      }
+      if (!closed) continue;
+      bool reload = llvm::all_of(consumers.lookup(source), [&](riscv::ExtractOp extract) {
+        return !riscv::readCrossesWrite(load, extract);
+      });
+      Value memory = load.getRegion();
+      SmallVector<Value> active;
+      if (reload) {
+        if (auto stage = source.getDefiningOp<riscv::RegisterMaterializeOp>();
+            stage && stage.getRealization() != "physical-share") {
+          OpBuilder::InsertionGuard guard(b);
+          b.setInsertionPointAfter(stage);
+          auto borrowed = riscv::StagedViewOp::create(b, stage.getLoc(), load.getRegion().getType(),
+              load.getRegion(), "value-share", stage.getOwnerDomainId(),
+              stage.getBirthId(), stage.getLifetimeEndDomainId());
+          riscv_internal::copyOrigin(stage, borrowed);
+          memory = borrowed;
+        }
+      } else {
+        Operation *producer = source.getDefiningOp();
+        if (!producer) continue;
+        OpBuilder::InsertionGuard guard(b);
+        b.setInsertionPointAfter(producer);
+        auto bounds = riscv_internal::activeNumericExtents(b, source);
+        if (failed(bounds)) return producer->emitError("shared projection lost its saved active domain");
+        active = *bounds;
+        auto saved = sourceView(source, producer, consumers.lookup(source).front());
+        if (failed(saved)) return failure();
+        memory = *saved;
+      }
+      for (riscv::ExtractOp extract : consumers.lookup(source)) {
+        b.setInsertionPoint(extract);
+        auto output = cast<riscv::ValueType>(extract.getResult().getType());
+        SmallVector<Value> indices;
+        SmallVector<Attribute> selectors;
+        unsigned cursor = 0;
+        for (unsigned axis = 0; axis < type.getShape().size(); ++axis) {
+          StringRef selector = axis < extract.getSelectors().size()
+              ? cast<StringAttr>(extract.getSelectors()[axis]).getValue() : "all";
+          Value selected = selector == "domain" ? extract.getIndices()[cursor++] : Value();
+          if (reload) {
+            selectors.push_back(b.getStringAttr(selector));
+            if (selected) indices.push_back(selected);
+            continue;
+          }
+          auto point = selected ? selected.getDefiningOp<riscv::PhysicalPointOp>() : origins[axis];
+          if (!point) return extract.emitError("shared projection has no explicit physical point");
+          Value zero = arith::ConstantIndexOp::create(b, extract.getLoc(), 0);
+          Value offset = selected ? Value(arith::SubIOp::create(b, extract.getLoc(), point.getBase(), origins[axis].getBase())) : zero;
+          Value bounded = arith::MinUIOp::create(b, extract.getLoc(), offset, active[axis]);
+          Value remaining = arith::SubIOp::create(b, extract.getLoc(), active[axis], bounded);
+          Value limit = arith::MinUIOp::create(b, extract.getLoc(), point.getActive(), remaining);
+          Value nonempty = arith::CmpIOp::create(b, extract.getLoc(), arith::CmpIPredicate::ne, limit, zero);
+          offset = arith::SelectOp::create(b, extract.getLoc(), nonempty, offset, zero);
+          auto localPoint = riscv::PhysicalPointOp::create(b, extract.getLoc(), point.getResult().getType(),
+              point.getParent(), offset, limit, point.getPartition());
+          selectors.push_back(b.getStringAttr("domain"));
+          indices.push_back(localPoint);
+        }
+        auto base = cast<riscv::MemDescType>(memory.getType());
+        auto descriptor = riscv::MemDescType::get(b.getContext(), base.getEncoding(), output.getShape(),
+            output.getAxisIds(), base.getStrides(), base.getOrigins(), base.getAlignment(),
+            "slice", base.getAccess(), base.getAliasSet(), base.getLayoutIdentity(),
+            base.getStorageBits(), base.getElements(), base.getInterleaveRows());
+        auto region = riscv::SliceOp::create(b, extract.getLoc(), descriptor, memory, indices, b.getArrayAttr(selectors));
+        auto projected = riscv::LoadOp::create(b, extract.getLoc(), output, region, Value(),
+            riscv_internal::unassignedAccess(b), riscv_internal::unselectedLeaf(b));
+        projected->setAttr("weft.riscv.shared_domain_supply", b.getStringAttr(reload ? "reload" : "snapshot"));
+        riscv_internal::copyOrigin(extract, region);
+        riscv_internal::copyOrigin(extract, projected);
+        b.replaceOp(extract, projected.getResult());
+      }
+    }
+    return success();
   }
 
   Value iotaElement(riscv::IotaOp iota, Value coordinate, Operation *anchor) {
