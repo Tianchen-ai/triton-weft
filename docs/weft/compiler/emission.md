@@ -16,6 +16,8 @@ translator内部可以用临时binding map把SSA value对应到C expression、RV
 scalar unary 与 binary 的数值结果也以其声明 C dtype 建立一次 SSA 绑定。特别是 `exp/log`
 不能作为文本宏在重复 use 或内层循环中重复执行；system compiler 可以对这些普通局部值做
 等价优化，terminal 本身不把一条已求值的数值 operation 展开成多次调用。
+标量 F32 `exp` 的局部实现对正负零直接返回精确的 `1.0f`；其它输入继续使用原有
+范围缩减、特殊值处理和多项式，不扩大近零近似区间，也不改变调用方的数值支路。
 
 纯表达式可以内联，但 memory-read SSA result 必须在对应的读取点求值并形成稳定绑定。
 同一结果的重复 use 不能变成重复解引用，也不能将读取延迟到可能别名的 store 之后。
@@ -89,6 +91,10 @@ Weft已经决定logical-to-physical mapping、target-local instruction sequence�
 system C compiler继续负责最终register allocation、machine scheduling、peephole、constant
 folding与machine code。生成C中的局部pragma可以阻止system compiler破坏已选physical形态，
 但不能要求它重新发现SIMD、microkernel或pipeline。
+
+已选循环对齐使用 `[[clang::code_align(N)]]`，与禁止展开的 pragma 一起保留到 LLVM
+loop metadata。GNU statement attribute 的拼写在这项组合中会丢失对齐，不能只凭 C 中
+出现属性就宣称最终循环已经对齐；实际落点由系统编译器的循环变换与机器代码确认。
 
 Weft 的驻留分析覆盖其 numeric SSA、已选局部临时量与显式 storage；system compiler 仍可能
 因额外 hoist、寄存器组约束或调度产生 spill。IR 的 local bytes 为零不是最终机器码无栈访问的声明。

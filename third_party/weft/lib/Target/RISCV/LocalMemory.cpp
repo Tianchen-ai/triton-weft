@@ -118,8 +118,15 @@ FailureOr<Value> riscv_internal::allocateLocalValue(
       schema = "staged-value";
     }
   }
+  int64_t alignment = std::max<int64_t>(8, elementBytes);
+  // Match complete vector packets up to the standard RISC-V ABI's existing
+  // 16-byte stack boundary. This needs no dynamic stack realignment and avoids
+  // repeatedly reading a naturally aligned packet from a half-aligned slot.
+  if (type.getLayout().getCarrier() == "rvv" &&
+      type.getLayout().getVl() >= llvm::divideCeil(int64_t(16), elementBytes))
+    alignment = std::max<int64_t>(alignment, 16);
   auto storage = riscv::LocalType::get(b.getContext(), type.getElementType(), type.getShape(),
-      type.getAxisIds(), bytes, std::max<int64_t>(8, elementBytes), allocation,
+      type.getAxisIds(), bytes, alignment, allocation,
       purpose, owner, birth, lifetime, schema);
   Location loc = anchor->getLoc();
   Value size = bytes >= 0 ? Value(arith::ConstantIndexOp::create(b, loc, bytes))

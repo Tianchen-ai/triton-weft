@@ -62,6 +62,7 @@ mlir::LogicalResult weft::emitSelectedRISCVIntrinsicC(mlir::ModuleOp module,
          << "\n";
   output << R"C(static inline __attribute__((always_inline, unused)) float weft_exp_f32(float x) {
   if (x != x) return x;
+  if (x == 0.0f) return 1.0f;
   if (x >= 89.0f) return INFINITY;
   if (x <= -104.0f) return 0.0f;
   float z = __builtin_fmaf(x, 0x1.715476p+0f, 0x1.8p23f);

@@ -1605,6 +1605,10 @@ target budget，不给每个对象平均分配配额。嵌套循环每轮结束�
 summary 保存由这些 guards 保证的上界。静态存储保留量取词法作用域的同时存活峰值，
 包含对齐余量；私有 storage alias 不得从其分配作用域逃逸。缺少闭合上界时拒绝生成 C VLA。
 
+私有 Value 的一次已选 RVV packet 达到 16 bytes 时，初始 local allocation 至少沿用
+RISC-V ABI 已有的 16-byte 栈边界；不增加动态栈重对齐。其余更高对齐由下述 pass 选择，
+二者的字节与 padding 都由同一资源分析核算。
+
 ### `AlignRISCVLocalStorage`
 
 根据已经选择的连续 RVV 访存宽度，提高静态 `physical-share` 私有缓冲区的对齐。

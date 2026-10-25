@@ -608,7 +608,9 @@ mlir::LogicalResult Emitter::compileFor(mlir::scf::ForOp operation) {
   if (systemUnroll && systemUnroll.getValue() == "disable")
     line("#pragma GCC unroll 1");
   if (auto alignment = operation->getAttrOfType<mlir::IntegerAttr>("weft.riscv.code_alignment"))
-    line("__attribute__((code_align(" + std::to_string(alignment.getInt()) + "))) ");
+    // The GNU statement attribute loses its loop metadata when combined with
+    // the unroll pragma in Clang. The standard spelling preserves both hints.
+    line("[[clang::code_align(" + std::to_string(alignment.getInt()) + ")]]");
   line("for (" + indexType + " " + iterator + " = (" + indexType + ")(" +
        lower.scalar + "); " + iterator + comparison + "(" + indexType + ")(" +
        upper.scalar + "); " + iterator + " += " + step.scalar + ") {");
