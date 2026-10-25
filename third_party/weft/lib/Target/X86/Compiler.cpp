@@ -4857,8 +4857,11 @@ private:
 };
 } // namespace
 
-void weft::loadX86Dialects(MLIRContext &context) {
-  DialectRegistry registry;
+void weft::registerX86Dialects(DialectRegistry &registry) {
+  registry.insert<wk::WEFTKernelDialect, arith::ArithDialect, func::FuncDialect,
+                  scf::SCFDialect, cf::ControlFlowDialect, vector::VectorDialect,
+                  math::MathDialect, LLVM::LLVMDialect, memref::MemRefDialect,
+                  bufferization::BufferizationDialect, ub::UBDialect>();
   scf::registerBufferDeallocationOpInterfaceExternalModels(registry);
   cf::registerBufferDeallocationOpInterfaceExternalModels(registry);
   arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
@@ -4868,11 +4871,35 @@ void weft::loadX86Dialects(MLIRContext &context) {
     LLVM::MaskedStoreOp::attachInterface<TransferEffects<LLVM::MaskedStoreOp, false>>(*context);
     LLVM::masked_scatter::attachInterface<TransferEffects<LLVM::masked_scatter, false>>(*context);
   });
+}
+
+void weft::loadX86Dialects(MLIRContext &context) {
+  DialectRegistry registry;
+  registerX86Dialects(registry);
   context.appendDialectRegistry(registry);
   context.loadDialect<wk::WEFTKernelDialect, arith::ArithDialect, func::FuncDialect,
                       scf::SCFDialect, cf::ControlFlowDialect, vector::VectorDialect,
                       math::MathDialect, LLVM::LLVMDialect, memref::MemRefDialect, bufferization::BufferizationDialect>();
   registerLLVMDialectTranslation(context);
+}
+
+void weft::registerX86Passes() {
+  for (auto factory : {createX86MathPass, createX86HalfCarrierPass,
+       createX86VectorProjectionPass, createX86ProjectionLoopPass,
+       createX86IntegerReductionPass, createX86IntegerProductPass,
+       createX86SnapshotLoadPass, createX86LookupProjectionPass,
+       createX86IntegerPacketMergePass, createX86FullTilePass,
+       createX86VectorCarryPass, createX86ArrayPacketPass,
+       createX86ArrayForwardingPass, createX86ReductionSchedulePass,
+       createX86UniformValidityPass, createX86IndexedValuePass,
+       createX86IndexedPacketPass, createX86ContractionSchedulePass,
+       createX86ReductionTreePass, createX86LocalStoragePass,
+       createX86StreamingStorePass, createX86StreamPrefetchPass,
+       x86::createAMXPackingReusePass, x86::createAMXSnapshotTransferPass,
+       x86::createAMXConfigurationReusePass, x86::createAMXLoadSchedulePass})
+    registerPass(factory);
+  registerPass([] { return createX86SubbyteProjectionPass(); });
+  registerPass([] { return createX86IntegerProjectionPass(); });
 }
 
 FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,

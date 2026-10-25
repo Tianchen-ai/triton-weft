@@ -76,6 +76,7 @@ target_link_libraries(triton-tensor-layout PRIVATE
 )
 
 foreach(tool triton-opt triton-reduce triton-lsp triton-tensor-layout)
+  target_link_libraries(${tool} PRIVATE WeftX86Target)
   target_compile_features(${tool} PRIVATE cxx_std_20)
 endforeach()
 

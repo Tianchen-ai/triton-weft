@@ -1,5 +1,6 @@
 #include "Weft/Target/X86Compiler.h"
 #include "Resources.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -48,14 +49,40 @@ Value combine(IRRewriter &b, Operation *op, Value left, Value right) {
   state.addAttributes(op->getAttrs()); state.addOperands({left, right}); state.addTypes(left.getType());
   return b.create(state)->getResult(0);
 }
-scf::ForOp interleave(IRRewriter &b, scf::ForOp source, unsigned copies, int64_t step) {
+struct PartialSchedule {
+  scf::ForOp loop;
+  SmallVector<Operation *> setup;
+};
+PartialSchedule interleave(IRRewriter &b, scf::ForOp source, unsigned copies, int64_t step) {
   b.setInsertionPoint(source); Location loc = source.getLoc();
+  Operation *before = source->getPrevNode();
   Value span = arith::ConstantIndexOp::create(b, loc, step * copies);
-  Value count = arith::SubIOp::create(b, loc, source.getUpperBound(), source.getLowerBound());
-  Value end = arith::SubIOp::create(b, loc, source.getUpperBound(), arith::RemUIOp::create(b, loc, count, span));
+  Value zero = arith::ConstantIndexOp::create(b, loc, 0);
+  Value factor = arith::ConstantIndexOp::create(b, loc, copies);
+  // Count iterations, not complete coordinate spans. A final non-aligned
+  // iteration belongs to the reduction too. Clamp empty/reversed domains before
+  // unsigned division; subtraction can span the full signed index range.
+  Value upper = b.createOrFold<arith::MaxSIOp>(loc, source.getUpperBound(), source.getLowerBound());
+  Value distance = b.createOrFold<arith::SubIOp>(loc, upper, source.getLowerBound());
+  Value quotient = b.createOrFold<arith::DivUIOp>(loc, distance, source.getStep());
+  Value residue = b.createOrFold<arith::RemUIOp>(loc, distance, source.getStep());
+  Value extra = b.createOrFold<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, residue, zero);
+  Value extraIndex = b.createOrFold<arith::IndexCastUIOp>(loc, b.getIndexType(), extra);
+  Value count = b.createOrFold<arith::AddIOp>(loc, quotient, extraIndex);
+  Value tail = b.createOrFold<arith::RemUIOp>(loc, count, factor);
+  Value complete = b.createOrFold<arith::SubIOp>(loc, count, tail);
+  Value extent = b.createOrFold<arith::MulIOp>(loc, complete, source.getStep());
+  Value boundary = b.createOrFold<arith::AddIOp>(loc, source.getLowerBound(), extent);
+  Value exact = b.createOrFold<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, tail, zero);
+  // With no tail the original upper bound already closes the last group. Do
+  // not form a new observable endpoint beyond it, possibly outside index range.
+  Value end = b.createOrFold<arith::SelectOp>(loc, exact, upper, boundary);
   SmallVector<Value> initial;
   for (unsigned i = 0; i < copies; ++i) llvm::append_range(initial, source.getInitArgs());
   auto loop = scf::ForOp::create(b, loc, source.getLowerBound(), end, span, initial);
+  SmallVector<Operation *> setup;
+  for (Operation *op = before ? before->getNextNode() : &source->getBlock()->front();
+       op != loop.getOperation(); op = op->getNextNode()) setup.push_back(op);
   b.setInsertionPointToStart(loop.getBody());
   SmallVector<Value> yielded;
   for (unsigned i = 0; i < copies; ++i) {
@@ -68,7 +95,7 @@ scf::ForOp interleave(IRRewriter &b, scf::ForOp source, unsigned copies, int64_t
     for (Value value : source.getBody()->getTerminator()->getOperands()) yielded.push_back(mapping.lookupOrDefault(value));
   }
   scf::YieldOp::create(b, loc, yielded);
-  return loop;
+  return {loop, std::move(setup)};
 }
 class ScheduleReductions : public PassWrapper<ScheduleReductions, OperationPass<ModuleOp>> {
 public:
@@ -86,15 +113,17 @@ public:
     for (auto source : loops) {
       auto updates = combiners(source);
       if (updates.empty()) continue;
-      APInt increment, lower, upper;
-      if (!matchPattern(source.getStep(), m_ConstantInt(&increment)) || increment.getSExtValue() <= 0) continue;
+      APInt increment;
+      if (!source.getInductionVar().getType().isIndex() || source.getUnsignedCmp() ||
+          !matchPattern(source.getStep(), m_ConstantInt(&increment)) ||
+          increment.getBitWidth() > 64 || !increment.isStrictlyPositive()) continue;
       int64_t step = increment.getSExtValue();
       auto model = weft::x86::ResourceModel::get(source);
       auto original = weft::x86::analyzeLoop(source, model);
       if (original.unpricedOperations) continue;
-      bool staticDomain = matchPattern(source.getLowerBound(), m_ConstantInt(&lower)) &&
-          matchPattern(source.getUpperBound(), m_ConstantInt(&upper));
-      uint64_t trips = staticDomain ? uint64_t(std::max(int64_t(0), upper.getSExtValue() - lower.getSExtValue())) / step : 0;
+      auto tripCount = weft::analysis::staticTripCount(source);
+      bool staticDomain = tripCount.has_value();
+      uint64_t trips = tripCount.value_or(0);
       double mergeIssues = 0, mergeLatency = 0;
       bool mergePriced = true;
       for (auto [position, update] : llvm::enumerate(updates)) {
@@ -116,21 +145,22 @@ public:
       // Price the actual candidate, including its expanded address/conversion
       // work and SSA recurrence. Independent chains reduce dependency pressure
       // but still pay all supply work and the final combine within the primitive.
-      auto cost = [&](unsigned copies, const weft::x86::LoopResources &resources) {
+      auto cost = [&](unsigned copies, const weft::x86::LoopResources &resources, double setup = 0) {
         auto execution = weft::x86::loopExecutionCost(resources);
         if (!staticDomain) return execution.period / copies;
         uint64_t full = trips / copies, rest = trips % copies;
-        return execution.total(full) + weft::x86::loopExecutionCost(original).total(rest) + finishCost(copies);
+        return setup + execution.total(full) + weft::x86::loopExecutionCost(original).total(rest) + finishCost(copies);
       };
       unsigned selected = 1, visited = 1, rejected = 0;
       double best = cost(1, original);
       scf::ForOp chosen;
       weft::x86::LoopResources selectedResources = original;
       SmallVector<Attribute> candidates;
-      auto recordCandidate = [&](unsigned copies, const weft::x86::LoopResources &resources, StringRef decision) {
+      auto recordCandidate = [&](unsigned copies, const weft::x86::LoopResources &resources, StringRef decision, double setup = 0) {
         candidates.push_back(b.getDictionaryAttr({
           b.getNamedAttr("partial_copies", b.getI64IntegerAttr(copies)),
-          b.getNamedAttr("estimated_cost", b.getF64FloatAttr(cost(copies, resources))),
+          b.getNamedAttr("estimated_cost", b.getF64FloatAttr(cost(copies, resources, setup))),
+          b.getNamedAttr("setup_cost", b.getF64FloatAttr(setup)),
           b.getNamedAttr("final_combine_cost", b.getF64FloatAttr(finishCost(copies))),
           b.getNamedAttr("resources", weft::x86::resourceAttributes(b, resources)),
           b.getNamedAttr("decision", b.getStringAttr(decision))}));
@@ -141,15 +171,22 @@ public:
       unsigned limit = std::min(8u, model.vectorRegisters / unsigned(source.getNumResults()));
       for (unsigned copies = 2; copies <= limit; ++copies) {
         if (staticDomain && trips < copies) break;
+        if (uint64_t(step) > uint64_t(std::numeric_limits<int64_t>::max()) / copies) break;
         ++visited;
-        auto candidate = interleave(b, source, copies, step);
+        auto schedule = interleave(b, source, copies, step);
+        auto candidate = schedule.loop;
         auto resources = weft::x86::analyzeLoop(candidate, model);
+        double setup = 0;
+        for (Operation *operation : schedule.setup) {
+          if (auto estimate = weft::x86::instructionCost(operation, model)) setup += estimate->issues;
+          else ++resources.unpricedOperations;
+        }
         if (resources.unpricedOperations || !model.fits(resources.peak)) {
-          recordCandidate(copies, resources, resources.unpricedOperations ? "unpriced-operation" : "resource-limit");
+          recordCandidate(copies, resources, resources.unpricedOperations ? "unpriced-operation" : "resource-limit", setup);
           ++rejected; b.eraseOp(candidate); continue;
         }
-        recordCandidate(copies, resources, "legal");
-        double work = cost(copies, resources);
+        recordCandidate(copies, resources, "legal", setup);
+        double work = cost(copies, resources, setup);
         if (work < best) {
           if (chosen) b.eraseOp(chosen);
           chosen = candidate; best = work; selected = copies; selectedResources = resources;

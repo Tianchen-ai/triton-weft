@@ -2,6 +2,7 @@
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
 #include "Weft/Target/RISCVPipeline.h"
+#include "Weft/Target/X86Compiler.h"
 #include "amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "amd/include/TritonAMDGPUTransforms/Passes.h"
 #include "nvidia/include/Dialect/NVGPU/IR/Dialect.h"
@@ -54,6 +55,8 @@
 inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   weft::registerRISCVPasses();
   weft::registerRISCVPipelines();
+  weft::registerX86Passes();
+  weft::registerX86Dialects(registry);
   mlir::registerAllPasses();
   mlir::triton::registerTritonPasses();
   mlir::triton::gpu::registerTritonGPUPasses();

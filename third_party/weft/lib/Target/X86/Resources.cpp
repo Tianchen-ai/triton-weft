@@ -96,6 +96,14 @@ static std::optional<InstructionCost> operationCost(Operation *op, const Resourc
   if (isa<arith::DivFOp>(op)) return cost(8, 12);
   if (isa<math::SqrtOp>(op)) return cost(8, 12);
   if (isa<math::RsqrtOp>(op)) return cost(16, 24);
+  if (auto absolute = dyn_cast<math::AbsIOp>(op)) {
+    auto vector = dyn_cast<VectorType>(absolute.getType());
+    if (!vector) return cost(2, 2); // scalar negation and conditional selection
+    // AVX2 supplies byte/word/dword absolute value; qwords need sign, xor and
+    // subtraction. AVX-512 provides the native qword form as well.
+    return vector.getElementTypeBitWidth() == 64 && model.vectorBits < 512 ?
+        cost(3, 3) : cost(1, 1);
+  }
   if (isa<math::FloorOp, math::CeilOp, math::TruncOp, math::RoundEvenOp>(op))
     return cost(1, 3);
   if (isa<arith::MulIOp>(op)) return cost(1, 3);
