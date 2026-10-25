@@ -1,5 +1,6 @@
 #include "RISCVPhysicalSupport.h"
 #include "Weft/Target/RISCVPasses.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "mlir/Pass/Pass.h"
@@ -25,16 +26,25 @@ public:
     });
     getOperation().walk([&](scf::ForOp loop) {
       bool vectorBody = false;
+      bool retainedChild = false;
       loop.walk([&](Operation *operation) {
         auto leaf = operation->getAttrOfType<riscv::LeafAttr>("leaf");
         vectorBody |= leaf && (leaf.getEngine() == "rvv" || leaf.getEngine() == "ime");
+        if (operation != loop && isa<scf::ForOp>(operation)) {
+          auto trips = analysis::staticTripCount(operation);
+          auto unroll = operation->getAttrOfType<StringAttr>("weft.riscv.system_unroll");
+          retainedChild |= !trips || *trips > 4 || (unroll && unroll.getValue() == "disable");
+        }
       });
       // A finite child traversal can disappear in native code generation.
-      // Preserve the enclosing vector-work loop's placement as well, rather
-      // than aligning only a child header that no longer exists afterwards.
-      if (vectorBody)
+      // Align its enclosing vector-work loop, but do not pad every outer
+      // traversal around a surviving child. Those headers add no vector issue
+      // locality and can displace the child and its neighbouring hot blocks.
+      if (vectorBody && !retainedChild)
         loop->setAttr("weft.riscv.code_alignment",
                       IntegerAttr::get(IntegerType::get(&getContext(), 64), 32));
+      else
+        loop->removeAttr("weft.riscv.code_alignment");
     });
     getOperation().walk<WalkOrder::PostOrder>([&](riscv::HelperOp helper) {
       llvm::SetVector<Value> captures;

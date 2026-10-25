@@ -299,10 +299,16 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     // the shared snapshot owner instead of expanding these into local arrays.
     auto encoding = cast<kernel::EncodingType>(owner.getEncoding());
     auto declaration = findEncoding(field, baseEncodingFamily(field, encoding));
-    bool scalarWord = declaration && declaration.getByteOrder() == "little" &&
-        facts.bitOffset % 8 == 0 && (bits == 16 || bits == 32 || bits == 64) &&
+    bool naturalWord = declaration && declaration.getByteOrder() == "little" &&
+        facts.bitOffset % 8 == 0 && (bits == 16 || bits == 32 || bits == 64);
+    bool scalarWord = naturalWord &&
         (!value || value.getLayout().getCarrier() == "scalar");
-    bool numericUnaligned = facts.alignment < bits / 8 && !scalarWord &&
+    // A scalar field distributed across a declared interleave cohort already
+    // has unit-byte and indexed-byte RVV transfers. Their selected byte loads
+    // preserve the original alignment and avoid a scalar assembly buffer.
+    bool cohortWord = naturalWord && bits <= 32 && facts.scalarPerRecord && value &&
+        value.getLayout().getCarrier() == "rvv" && interleaveRows(field, encoding) > 0;
+    bool numericUnaligned = facts.alignment < bits / 8 && !scalarWord && !cohortWord &&
         (!value || value.getLayout().getCarrier() != "local");
     bool general = (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
         (owner.getShape().size() > 1 && facts.mapping == "joined");

@@ -53,6 +53,8 @@ record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry
 LMUL 时同时验证 SEW、LMUL 和完整 layout，不能只按 VLEN 能容纳的 bit 数判断合法性。
 自然整字字段的 scalar/replica 传输沿用已有 alignment-safe byte copy，不因 alignment
 小于字段位宽而提前建立逐字节临时数组。原 encoded read 的快照仍由共同存储分析闭合。
+同一 natural scalar field 沿已声明 interleave cohort 的 RVV 读取也复用已有 unit-byte 或
+indexed-byte transfer；它保持字节对齐，不把未对齐地址强制当作自然对齐的元素指针。
 
 `MaterializeRISCVEncodedValues` 在布局选择前处理有界 base-record 的
 load → reshape → field/store 子图。原 load 处生成私有记录字节和逐记录有效性，
@@ -250,6 +252,8 @@ signless Boolean predicate 转为数值时物化同坐标的 0/1 select。Encodi
 `Analysis/ReductionIdentity` 由 x86 与 RISC-V 共用。整数极值使用声明 signedness 的边界；
 浮点 max/min 使用 NaN identity，保证全部有效元素为 NaN 时仍返回 NaN。标量尾段的
 f32/f64 极值选择明确的 `fmax.s/d`、`fmin.s/d` leaf，保留 NaN 与 signed-zero 合同。
+terminal 以 Clang 23 的 `fmaximum_num` / `fminimum_num` builtin 拼写该已选操作，
+让原生编译器继续看见相同的 IEEE 数值语义并调度依赖；不用不透明 inline asm 隔断标量递推。
 
 ### `MaterializeRISCVAtomics`
 
@@ -268,9 +272,10 @@ f32/f64 极值选择明确的 `fmax.s/d`、`fmin.s/d` leaf，保留 NaN 与 sign
 策略，最多增加 30 bytes 对齐填充，不是 VLEN 或 cache-line 大小声明。它避免入口仅按
 压缩指令的两字节要求放置、使相同指令随链接器布局产生不稳定的取指表现。
 final verifier 要求显式的合法二次幂对齐；C emitter 只输出已选 `aligned` 属性。
-包含 RVV/IME 操作的有序循环及其外层遍历另行保存 `weft.riscv.code_alignment=32`，通过
-Clang 的 `code_align` 属性固定回边目标的最小对齐。函数入口对齐不能代替循环入口对齐；
-静态子循环可能在原生代码生成时完全展开，外层仍需保留自己的对齐决定。
+包含 RVV/IME 操作且没有保留子循环的有序循环，另行保存 `weft.riscv.code_alignment=32`，
+通过 Clang 的 `code_align` 属性固定回边目标的最小对齐。未知次数、超过四次或显式禁止展开的
+子循环视为保留；其外层遍历不重复添加 padding。静态小子循环可能在原生代码生成时完全展开，
+外层仍保留自己的对齐决定。四次是有限放置策略的边界，不是 ISA 事实或展开正确性的前提。
 该策略不假定更大边界总是更快，也不根据 kernel 名称选择代码偏移。
 
 布局选择同时核对一个 control edge 上全部 carry/result slots 的常驻寄存器占用，

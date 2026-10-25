@@ -2235,12 +2235,12 @@ mlir::LogicalResult Emitter::compileBinary(riscv::BinaryOp operation) {
       std::string expression;
       if (selectedFloatExtremum) {
         // The selected RISC-V scalar instruction implements minimumNumber /
-        // maximumNumber, including NaNs and the ordering of signed zeros.
-        std::string name = fresh("scalar_extremum");
-        line(*scalarResultType + " " + name + ";");
-        line("__asm__(\"" + kind.str() + " %0, %1, %2\" : \"=f\"(" + name + ") : \"f\"(" +
-             *lhsExpression + "), \"f\"(" + *rhsExpression + "));");
-        expression = name;
+        // maximumNumber, including NaNs and the ordering of signed zeros. The
+        // exact C builtin keeps these semantics visible to the native compiler
+        // instead of putting an opaque asm boundary in a scalar recurrence.
+        std::string builtin = kind.starts_with("fmax") ? "__builtin_fmaximum_num" : "__builtin_fminimum_num";
+        if (kind.ends_with(".s")) builtin += "f";
+        expression = builtin + "(" + *lhsExpression + ", " + *rhsExpression + ")";
       } else if (!spelling.empty())
         expression = "(" + *lhsExpression + " " + spelling.str() + " " +
                      *rhsExpression + ")";
