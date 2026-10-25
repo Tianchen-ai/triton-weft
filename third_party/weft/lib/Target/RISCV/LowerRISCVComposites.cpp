@@ -6,6 +6,7 @@
 #include "DenseValuePrograms.h"
 #include "LocalMemory.h"
 #include "NumericConversions.h"
+#include "NumericalValidity.h"
 #include "DenseContractions.h"
 #include "IME/FragmentMaterialization.h"
 
@@ -1813,6 +1814,18 @@ private:
             rewriter.getDenseI64ArrayAttr({}),
             rewriter.getDenseI64ArrayAttr({}), 0, 0, 0, 0, 0,
             rewriter.getDenseI64ArrayAttr({}), 0);
+        llvm::SmallVector<mlir::Value> activeExtents;
+        if (lhsType.getLayout().getValidity() == "tail" || rhsType.getLayout().getValidity() == "tail") {
+          auto left = riscv_internal::activeNumericExtents(rewriter, lhsValue);
+          auto right = riscv_internal::activeNumericExtents(rewriter, rhsValue);
+          if (mlir::failed(left) || mlir::failed(right)) {
+            operation->emitError("tail contraction requires its original active operand domains");
+            failed = true;
+            continue;
+          }
+          activeExtents = *left;
+          llvm::append_range(activeExtents, *right);
+        }
         auto widenedDot = riscv::RVVWidenDotOp::create(rewriter,
             operation->getLoc(), physicalResultType, lhsValue, rhsValue,
             rewriter.getDenseI64ArrayAttr(physicalReductionAxes),
@@ -1834,7 +1847,7 @@ private:
                 "rvv.vwmul-vwredsum",
                 lhsType.getLayout().getRegisterGroups() +
                     rhsType.getLayout().getRegisterGroups(),
-                0, temporaryGroups));
+                0, temporaryGroups), activeExtents);
         copyIdentity(operation, widenedDot);
         // A multi-stream contraction owns an implicit issue loop.  A
         // single-stream contraction can still be nested directly in an

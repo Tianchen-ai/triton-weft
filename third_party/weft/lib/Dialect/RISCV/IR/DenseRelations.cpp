@@ -222,7 +222,7 @@ bool weft::riscv::haveDisjointDenseProjectionsAt(Value lhs, Value rhs, Operation
   if (distinct && haveEqualDenseMappingsAt(a, b, at)) return true;
   auto matches = [&](Value x, Value y) { return (x == a && y == b) || (x == b && y == a); };
   return impliedAt(at, [&](Operation *op) {
-    if (auto disjoint = dyn_cast_or_null<DenseDisjointOp>(op))
+    if (auto disjoint = dyn_cast_or_null<StorageDisjointOp>(op))
       return matches(disjoint.getLhs(), disjoint.getRhs());
     if (auto alias = dyn_cast_or_null<DenseElementwiseAliasOp>(op))
       return distinct && matches(alias.getLhs(), alias.getRhs());
@@ -238,7 +238,7 @@ bool weft::riscv::densePointwiseIndependentAt(Value lhs, Value rhs, Operation *a
   if (haveEqualDenseMappingsAt(a, b, at)) return true;
   auto matches = [&](Value x, Value y) { return (x == a && y == b) || (x == b && y == a); };
   return impliedAt(at, [&](Operation *op) {
-    if (auto disjoint = dyn_cast_or_null<DenseDisjointOp>(op))
+    if (auto disjoint = dyn_cast_or_null<StorageDisjointOp>(op))
       return matches(disjoint.getLhs(), disjoint.getRhs());
     if (auto alias = dyn_cast_or_null<DenseElementwiseAliasOp>(op))
       return matches(alias.getLhs(), alias.getRhs());

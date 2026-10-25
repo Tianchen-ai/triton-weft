@@ -1,5 +1,6 @@
 #include "FieldReads.h"
 #include "LocalMemory.h"
+#include "NumericalValidity.h"
 #include "RISCVPhysicalSupport.h"
 #include "Weft/Analysis/StorageBytes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -24,8 +25,9 @@ riscv::LoadOp encodedReadEpoch(Value owner) {
 
 FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
                            Operation *epoch, Type result, int64_t &identity) {
-  auto owner = cast<riscv::MemDescType>(region.getType());
-  auto encoding = cast<kernel::EncodingType>(owner.getEncoding());
+  auto owner = dyn_cast<riscv::MemDescType>(region.getType());
+  auto encodedValue = dyn_cast<riscv::ValueType>(region.getType());
+  auto encoding = cast<kernel::EncodingType>(owner ? owner.getEncoding() : encodedValue.getElementType());
   auto declaration = riscv_internal::findEncoding(field, riscv_internal::baseEncodingFamily(field, encoding));
   if (!declaration) return field.emitError("field byte read has no Encoding declaration"), failure();
   unsigned ordinal = 0;
@@ -37,7 +39,9 @@ FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
   auto shape = cast<DenseI64ArrayAttr>(declaration.getFieldShapes()[ordinal]).asArrayRef();
   auto count = riscv_internal::staticProduct(shape);
   auto shaped = dyn_cast<riscv::ValueType>(result);
-  unsigned outerRank = owner.getShape().size() - 1;
+  auto ownerShape = riscv_internal::logicalShape(region.getType());
+  auto ownerAxes = riscv_internal::logicalAxes(region.getType());
+  unsigned outerRank = ownerShape.size() - 1;
   if (!count || *count <= 0 || relation.elementBits <= 0 || relation.elementBits > 64 ||
       (shaped && shaped.getShape().size() != outerRank + shape.size()) ||
       (!shaped && (outerRank || !shape.empty())))
@@ -54,6 +58,12 @@ FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
   }
   b.setInsertionPoint(epoch);
   auto loc = field.getLoc();
+  SmallVector<Value> activeExtents;
+  if (encodedValue) {
+    auto extents = riscv_internal::activeNumericExtents(b, region);
+    if (failed(extents)) return field.emitError("saved field projection requires its original active record coordinates"), failure();
+    activeExtents = *extents;
+  }
   auto u8 = IntegerType::get(b.getContext(), 8, IntegerType::Unsigned);
   auto machine = IntegerType::get(b.getContext(), relation.elementBits <= 32 ? 32 : 64, IntegerType::Unsigned);
   auto index = [&](int64_t n) -> Value { return arith::ConstantIndexOp::create(b, loc, n); };
@@ -80,7 +90,7 @@ FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
   SmallVector<Value> coordinates;
   auto visit = [&](auto &&visit, unsigned dimension) -> LogicalResult {
     if (dimension < outerRank) {
-      Value upper = riscv::ExtentOp::create(b, loc, b.getIndexType(), region, dimension);
+      Value upper = owner ? Value(riscv::ExtentOp::create(b, loc, b.getIndexType(), region, dimension)) : activeExtents[dimension];
       auto loop = scf::ForOp::create(b, loc, index(0), upper, index(1));
       riscv_internal::copyOrigin(field, loop);
       loop->setAttr("weft.riscv.direction", b.getStringAttr("ascending"));
@@ -94,14 +104,28 @@ FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
     }
     Value record = region;
     if (outerRank) {
-      auto type = riscv::MemDescType::get(b.getContext(), owner.getEncoding(),
-          b.getDenseI64ArrayAttr({owner.getElements()}), b.getDenseI64ArrayAttr({owner.getAxisIds().asArrayRef().back()}),
-          b.getDenseI64ArrayAttr({owner.getStrides().asArrayRef().back()}), b.getDenseI64ArrayAttr({owner.getOrigins().asArrayRef().back()}),
-          owner.getAlignment(), "slice", owner.getAccess(), owner.getAliasSet(), owner.getLayoutIdentity(),
-          owner.getStorageBits(), owner.getElements(), owner.getInterleaveRows());
       SmallVector<Attribute> selectors(outerRank, b.getStringAttr("index"));
       selectors.push_back(b.getStringAttr("all"));
-      record = riscv::SliceOp::create(b, loc, type, region, coordinates, b.getArrayAttr(selectors));
+      if (owner) {
+        auto type = riscv::MemDescType::get(b.getContext(), owner.getEncoding(),
+            b.getDenseI64ArrayAttr({owner.getElements()}), b.getDenseI64ArrayAttr({ownerAxes.back()}),
+            b.getDenseI64ArrayAttr({owner.getStrides().asArrayRef().back()}), b.getDenseI64ArrayAttr({owner.getOrigins().asArrayRef().back()}),
+            owner.getAlignment(), "slice", owner.getAccess(), owner.getAliasSet(), owner.getLayoutIdentity(),
+            owner.getStorageBits(), owner.getElements(), owner.getInterleaveRows());
+        record = riscv::SliceOp::create(b, loc, type, region, coordinates, b.getArrayAttr(selectors));
+      } else {
+        auto axis = b.getDenseI64ArrayAttr({ownerAxes.back()});
+        auto layout = encodedValue.getLayout();
+        auto last = [&](DenseI64ArrayAttr factors) { return b.getDenseI64ArrayAttr({factors.asArrayRef().back()}); };
+        auto projected = riscv::LayoutAttr::get(b.getContext(), layout.getCarrier(), axis,
+            last(layout.getTimeFactors()), last(layout.getLaneFactors()), last(layout.getReplicaFactors()),
+            last(layout.getFragmentFactors()), last(layout.getLocalFactors()), layout.getSew(),
+            layout.getLmulEighths(), layout.getVl(), layout.getRegisterGroups(), layout.getValidity());
+        auto type = riscv::ValueType::get(b.getContext(), encoding, b.getDenseI64ArrayAttr({static_cast<int64_t>(declaration.getElements())}),
+            axis, projected);
+        record = riscv::ExtractOp::create(b, loc, type, region, coordinates, b.getArrayAttr(selectors),
+            riscv_internal::unassignedAccess(b), riscv_internal::unselectedLeaf(b));
+      }
     }
     std::map<int64_t, Value> bytes;
     for (int64_t member = 0; member < *count; ++member) {
@@ -198,7 +222,33 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
       continue;
     }
     auto load = encodedReadEpoch(field.getOwner());
-    if (!load || load.getSnapshotStorage()) continue;
+    if (!load) {
+      auto owner = dyn_cast<riscv::ValueType>(field.getOwner().getType());
+      auto facts = fieldFacts(field);
+      int64_t bits = logicalBitWidth(value ? value.getElementType() : field.getResult().getType());
+      auto encoding = owner ? dyn_cast<kernel::EncodingType>(owner.getElementType()) : kernel::EncodingType();
+      // Native scalar reads and the selected interleaved/joined transfers
+      // already realize their layouts. Close the base-record vector bit
+      // projection here, without replacing those existing transfer programs.
+      bool general = value && value.getLayout().getCarrier() != "scalar" &&
+          facts.mapping == "natural" && bits % 8;
+      if (!encoding || encoding.getKind() != "base" || !general) continue;
+      auto declaration = findEncoding(field, baseEncodingFamily(field, encoding));
+      if (!declaration || owner.getShape().empty() || owner.getShape().asArrayRef().back() != declaration.getElements())
+        return field.emitError("saved field byte read requires one complete record along the encoded element axis");
+      auto read = readField(b, field, field.getOwner(), field, field.getResult().getType(), identity);
+      if (failed(read)) return failure();
+      b.setInsertionPoint(field);
+      Value result = *read;
+      if (result.getType() != field.getResult().getType()) {
+        auto actual = cast<riscv::ValueType>(result.getType());
+        result = riscv::ConvertLayoutOp::create(b, field.getLoc(), value, result,
+            layoutConversion(b, actual.getLayout(), value.getLayout()), riscv::AccessAttr(), unselectedLeaf(b));
+      }
+      b.replaceOp(field, result);
+      continue;
+    }
+    if (load.getSnapshotStorage()) continue;
     auto owner = load.getRegion().getType();
     auto facts = fieldFacts(field);
     int64_t bits = logicalBitWidth(value ? value.getElementType() : field.getResult().getType());

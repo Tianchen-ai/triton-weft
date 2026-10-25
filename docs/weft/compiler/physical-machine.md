@@ -266,9 +266,10 @@ local cluster 是从作者已有 Level/ordinary loop 中抽取的一组物理 pr
 这些结构只改变同一 source instances 的 issue time和temporary lifetime；不能创建新的算法 pass、跨 Level workspace、persistent buffer或另一种state recurrence。pipeline depth、buffer count、unroll和prefetch distance是有限物理参数，可由构建期实测选择。
 
 RISC-V 与 x86 的实现将 scheduler 与共用 expander 分开。depth=1 是顺序执行；depth=2/3/4
-先从一个带 carry 的 physical Level 的 use-def/effect 推导 pure/read producer 和 carry-dependent
-consumer，再为任意数量的跨 stage SSA value 与多个 source carries 生成真实 prologue/
-steady-state/epilogue，分别保存 1/2/3 个待消费迭代。闭合普通 `for/if` 保持为
+从带 carry 的 physical Level 的 use-def/effect 划分读取、依赖读取的计算和 carry 更新，
+在有限深度内写出每条操作的 stage/order。不可传递的坐标/shape 身份与其使用保持同阶段。
+expander 为多个 source carries 生成真实 prologue/steady-state/epilogue；每个跨阶段 SSA
+值只保存其生产至最后消费之间需要的版本，不统一复制 depth 份。闭合普通 `for/if` 保持为
 阶段内有序单元。静态 `physical-share` / `local-value-copy` 数组的 allocation、全部 alias 和读写用户可共同
 留在 consumer stage，按实际迭代克隆独立存储；没有 local descriptor 跨阶段传递。
 作者 birth、外部 write/unknown effect 没有重排合同，会明确拒绝。async transfer、wait、

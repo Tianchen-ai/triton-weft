@@ -76,6 +76,9 @@ public:
     auto value = dyn_cast<Value>(input);
     if (!value) return {};
     if (auto shape = value.getDefiningOp<LocalShapeOp>()) return index(shape.getExtent(), depth + 1);
+    if (auto active = value.getDefiningOp<PointActiveOp>())
+      if (auto point = active.getPoint().getDefiningOp<PhysicalPointOp>())
+        return index(point.getActive(), depth + 1);
     if (auto extent = value.getDefiningOp<ExtentOp>()) {
       auto resolved = get(extent.getBase(), extent.getAxis(), depth + 1);
       return resolved ? index(resolved, depth + 1) : input;
@@ -512,4 +515,9 @@ OpFoldResult ExtentOp::fold(FoldAdaptor) {
   // This preserves the descriptor's actual bound, including cropped views.
   // No address calculation, memory read or Level identity is moved.
   return denseDescriptorExtent(getBase(), getAxis());
+}
+
+OpFoldResult PointActiveOp::fold(FoldAdaptor) {
+  if (auto point = getPoint().getDefiningOp<PhysicalPointOp>()) return point.getActive();
+  return {};
 }

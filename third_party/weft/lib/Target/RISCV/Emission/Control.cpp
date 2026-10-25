@@ -120,8 +120,8 @@ mlir::LogicalResult Emitter::compileOperation(mlir::Operation &operation) {
     bindings[stride.getResult()] = scalar(strideArgumentName(argument.getArgNumber(), stride.getAxis()));
     return mlir::success();
   }
-  if (auto disjoint = mlir::dyn_cast<riscv::DenseDisjointOp>(operation))
-    return compileDenseDisjoint(disjoint);
+  if (auto disjoint = mlir::dyn_cast<riscv::StorageDisjointOp>(operation))
+    return compileStorageDisjoint(disjoint);
   if (auto alias = mlir::dyn_cast<riscv::DenseElementwiseAliasOp>(operation))
     return compileDenseElementwiseAlias(alias);
   if (auto injective = mlir::dyn_cast<riscv::DenseInjectiveOp>(operation))
@@ -486,6 +486,13 @@ mlir::LogicalResult Emitter::compileOperation(mlir::Operation &operation) {
     if (point.kind != Binding::Kind::Point)
       return fail(coordinate, "point base requires its explicit physical point binding");
     bindings[coordinate.getResult()] = scalar(point.point.base);
+    return mlir::success();
+  }
+  if (auto active = mlir::dyn_cast<riscv::PointActiveOp>(operation)) {
+    auto point = bindings.lookup(active.getPoint());
+    if (point.kind != Binding::Kind::Point)
+      return fail(active, "point active extent requires its explicit physical point binding");
+    bindings[active.getResult()] = scalar(point.point.active);
     return mlir::success();
   }
   if (auto byte = mlir::dyn_cast<riscv::FieldByteStoreOp>(operation))

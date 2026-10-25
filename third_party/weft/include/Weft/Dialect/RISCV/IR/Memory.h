@@ -14,6 +14,7 @@ class Block;
 
 namespace weft::riscv {
 class MemDescType;
+class LoadOp;
 
 // One RVV lane axis whose element stride is an explicit ABI/runtime operand.
 // A selected dynamic-stride leaf can test that same operand for unit stride;
@@ -61,6 +62,25 @@ bool mayAliasStorageAt(mlir::Value lhs, mlir::Value rhs, mlir::Operation *at);
 // Full pinned dense view, with explicit ABI extent/stride metadata. Projections
 // remain attached to this storage but cannot themselves assert a full range.
 mlir::Value fullDenseArgumentView(mlir::Value storage);
+// Complete pinned byte footprint, including non-interleaved base Encodings.
+mlir::Value fullArgumentView(mlir::Value storage);
+// A full-record, contiguous region can be copied without changing its mapping.
+bool isContiguousRecordRegion(mlir::Value region);
+// Writes in the read's remaining lexical lifetime. Unknown effects prevent a
+// dynamic disjointness proof; returning an empty list proves no interference.
+mlir::FailureOr<llvm::SmallVector<mlir::Value>> snapshotInterferingStorage(
+    mlir::Value storage, mlir::Operation *read);
+// Validate a conjunction of complete-range disjointness predicates against
+// every possible write. This is checked again after physical rewriting.
+bool provesSnapshotBorrow(mlir::Value condition, mlir::Value storage,
+                          mlir::Operation *read);
+struct ReadSnapshotCapacity {
+  mlir::Value bytes;
+  mlir::Value borrow;
+};
+// Decode and verify the explicit checked size/allocation program. A borrow
+// predicate is accepted only when it covers all interfering memory effects.
+std::optional<ReadSnapshotCapacity> readSnapshotCapacity(LoadOp load);
 // A pointwise issue can overwrite an input only when its range is disjoint or
 // its retained coordinates share an injective, dynamically equal full mapping.
 // Different fixed fields of a common record may still belong to one issue.

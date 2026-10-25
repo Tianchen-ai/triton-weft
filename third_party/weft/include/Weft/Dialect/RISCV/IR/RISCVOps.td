@@ -1057,7 +1057,7 @@ def WeftRISCV_StorageStoreOp
 
 def WeftRISCV_FieldByteLoadOp : WeftRISCV_LeafOp<"field_byte_load"> {
   let summary = "Read one byte from an explicitly projected encoded record";
-  let arguments = (ins Arg<WeftRISCV_MemDescType, "", [MemRead]>:$record,
+  let arguments = (ins Arg<AnyTypeOf<[WeftRISCV_MemDescType, WeftRISCV_ValueType]>, "", [MemRead]>:$record,
                        I64Attr:$byte_offset,
                        I64Attr:$span_offset, I64Attr:$span_bytes, I64Attr:$chunk_bytes,
                        WeftRISCV_LeafAttr:$leaf);
@@ -1123,7 +1123,7 @@ def WeftRISCV_StrideOp : WeftRISCV_TerminalOp<"stride", [Pure]> {
   let hasVerifier = 1;
 }
 
-def WeftRISCV_DenseDisjointOp : WeftRISCV_TerminalOp<"dense_disjoint", [Pure]> {
+def WeftRISCV_StorageDisjointOp : WeftRISCV_TerminalOp<"storage_disjoint", [Pure]> {
   let arguments = (ins WeftRISCV_MemDescType:$lhs, WeftRISCV_MemDescType:$rhs);
   let results = (outs I1:$result);
   let hasVerifier = 1;
@@ -1189,6 +1189,13 @@ def WeftRISCV_PointBaseOp : WeftRISCV_TerminalOp<"point_base", [Pure]> {
   let summary = "The explicit logical base coordinate of an existing physical point";
   let arguments = (ins WeftRISCV_PointType:$point);
   let results = (outs Index:$result);
+}
+
+def WeftRISCV_PointActiveOp : WeftRISCV_TerminalOp<"point_active", [Pure]> {
+  let summary = "The actual active extent of an existing physical point";
+  let arguments = (ins WeftRISCV_PointType:$point);
+  let results = (outs Index:$result);
+  let hasFolder = 1;
 }
 
 def WeftRISCV_ConstantOp : WeftRISCV_TerminalOp<"constant", [Pure]> {
@@ -1307,7 +1314,8 @@ def WeftRISCV_LoadOp : WeftRISCV_LeafOp<"load", [
   let arguments = (ins WeftRISCV_MemDescType:$region,
                        Optional<WeftRISCV_LocalType>:$snapshot_storage,
                        WeftRISCV_AccessAttr:$access,
-                       WeftRISCV_LeafAttr:$leaf);
+                       WeftRISCV_LeafAttr:$leaf,
+                       DefaultValuedAttr<BoolAttr, "false">:$snapshot_may_borrow);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
 }
@@ -1964,7 +1972,8 @@ def WeftRISCV_RVVWidenDotOp : WeftRISCV_Op<"rvv_widen_dot", [Pure]> {
                        OptionalAttr<WeftRISCV_SequentialPartialPlanAttr>:$sequential_partial_plan,
                        OptionalAttr<WeftRISCV_ScaledPartialPlanAttr>:$scaled_partial_plan,
                        OptionalAttr<WeftRISCV_LayeredPartialPlanAttr>:$layered_partial_plan,
-                       WeftRISCV_LeafAttr:$leaf);
+                       WeftRISCV_LeafAttr:$leaf,
+                       Variadic<Index>:$active_extents);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
 }

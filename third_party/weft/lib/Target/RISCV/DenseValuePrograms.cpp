@@ -126,7 +126,7 @@ private:
       SmallVector<Value> pending{branch.getCondition()};
       for (unsigned count = 0; !pending.empty() && count < 64; ++count) {
         Value value = pending.pop_back_val();
-        if (value.getDefiningOp<riscv::DenseDisjointOp>() ||
+        if (value.getDefiningOp<riscv::StorageDisjointOp>() ||
             value.getDefiningOp<riscv::DenseInjectiveOp>() ||
             value.getDefiningOp<riscv::DenseElementwiseAliasOp>()) return false;
         if (auto both = value.getDefiningOp<arith::AndIOp>()) pending.append({both.getLhs(), both.getRhs()});
@@ -181,7 +181,7 @@ private:
           return graph.root->emitError("same-storage streaming requires an injective coordinate relation"), failure();
         disjoint = riscv::DenseInjectiveOp::create(b, graph.root->getLoc(), b.getI1Type(), lhs);
       } else {
-        disjoint = riscv::DenseDisjointOp::create(b, graph.root->getLoc(), b.getI1Type(), lhs, rhs);
+        disjoint = riscv::StorageDisjointOp::create(b, graph.root->getLoc(), b.getI1Type(), lhs, rhs);
       }
       if (lhs != rhs && sameProjection.lookup({lhs, rhs})) {
         Value alias = riscv::DenseElementwiseAliasOp::create(b, graph.root->getLoc(), b.getI1Type(), lhs, rhs);

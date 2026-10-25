@@ -2015,8 +2015,13 @@ public:
       const bool explicitLengths = plan.getAccumulateInstruction() == "rvv.vwmacc.partial.vl";
       llvm::SmallVector<mlir::Value> issueLengths;
       if (explicitLengths) {
-        auto left = riscv_internal::activeNumericExtents(rewriter, dot.getLhs());
-        auto right = riscv_internal::activeNumericExtents(rewriter, dot.getRhs());
+        auto saved = dot.getActiveExtents();
+        auto left = saved.empty() ? riscv_internal::activeNumericExtents(rewriter, dot.getLhs()) :
+            mlir::FailureOr<llvm::SmallVector<mlir::Value>>(llvm::SmallVector<mlir::Value>(
+                saved.take_front(dot.getLhs().getType().getShape().size())));
+        auto right = saved.empty() ? riscv_internal::activeNumericExtents(rewriter, dot.getRhs()) :
+            mlir::FailureOr<llvm::SmallVector<mlir::Value>>(llvm::SmallVector<mlir::Value>(
+                saved.drop_front(dot.getLhs().getType().getShape().size())));
         auto lhsType = dot.getLhs().getType(), rhsType = dot.getRhs().getType();
         auto lhsCoordinates = riscv::RegisterCoordinates::get(lhsType.getLayout());
         auto rhsCoordinates = riscv::RegisterCoordinates::get(rhsType.getLayout());

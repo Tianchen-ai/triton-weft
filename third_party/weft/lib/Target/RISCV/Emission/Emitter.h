@@ -776,7 +776,7 @@ private:
   mlir::LogicalResult compileIf(mlir::scf::IfOp operation);
   mlir::LogicalResult compileWhile(mlir::scf::WhileOp operation);
   mlir::LogicalResult compileMemoryView(riscv::MemoryViewOp operation);
-  mlir::LogicalResult compileDenseDisjoint(riscv::DenseDisjointOp operation);
+  mlir::LogicalResult compileStorageDisjoint(riscv::StorageDisjointOp operation);
   mlir::LogicalResult compileDenseElementwiseAlias(riscv::DenseElementwiseAliasOp operation);
   mlir::LogicalResult compileDenseInjective(riscv::DenseInjectiveOp operation);
   mlir::FailureOr<std::string> denseInjectivity(mlir::Value view, mlir::Operation *anchor);

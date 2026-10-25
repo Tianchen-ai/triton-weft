@@ -14,12 +14,17 @@ struct PhysicalPipeline {
   mlir::scf::ForOp loop;
   llvm::SmallVector<mlir::Operation *> producers, consumers, ordered, invariants;
   llvm::SmallVector<mlir::Value> transported;
+  llvm::DenseMap<mlir::Operation *, unsigned> stages;
   bool transportInduction = false;
   bool descending = false;
   unsigned depth = 2;
 
   bool isProducer(mlir::Operation *op) const { return llvm::is_contained(producers, op); }
   bool isInvariant(mlir::Operation *op) const { return llvm::is_contained(invariants, op); }
+  unsigned stage(mlir::Operation *op) const {
+    auto found = stages.find(op);
+    return found == stages.end() ? (isProducer(op) ? 0 : depth - 1) : found->second;
+  }
 };
 
 struct PhysicalPipelineExpansion {
@@ -34,6 +39,14 @@ using PipelineLoopAttributes = llvm::function_ref<void(
     mlir::scf::ForOp, mlir::Operation *, bool)>;
 using PipelineDependencies = llvm::function_ref<mlir::FailureOr<
     llvm::SmallVector<mlir::Value>>(mlir::Operation *)>;
+
+// Subdivide the existing independent producer frontier along its read/use-def
+// chain. Ownership/shape dependencies that cannot travel remain in one stage.
+// The author's recurrence remains entirely in the last stage.
+mlir::LogicalResult distributePhysicalPipelineStages(
+    PhysicalPipeline &schedule, PipelineDependencies dependencies,
+    llvm::function_ref<bool(mlir::Operation *)> reads,
+    llvm::function_ref<bool(mlir::Value)> transportable);
 
 // Verify the total order and all SSA/control captures before expansion. Target
 // callbacks add typed coordinate dependencies without duplicating graph rules.

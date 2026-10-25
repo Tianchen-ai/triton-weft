@@ -1,6 +1,7 @@
 #include "Weft/Dialect/RISCV/IR/Memory.h"
 #include "Weft/Analysis/StorageLifetime.h"
 #include "Weft/Dialect/RISCV/IR/DenseRelations.h"
+#include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "Weft/Dialect/RISCV/IR/MemoryEffects.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
@@ -16,6 +17,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include <limits>
+#include <functional>
 
 using namespace mlir;
 using namespace weft::riscv;
@@ -98,6 +100,7 @@ Value borrowedStorage(Value value) {
   if (auto op = value.getDefiningOp<FieldOp>()) return op.getOwner();
   if (auto op = value.getDefiningOp<ExtractOp>()) return op.getInput();
   if (!addressable(value.getType())) return {};
+  if (auto op = value.getDefiningOp<RegisterMaterializeOp>()) return op.getInput();
   if (auto op = value.getDefiningOp<ReshapeOp>()) return op.getInput();
   if (auto op = value.getDefiningOp<UpdateOp>()) return op.getInput();
   if (auto op = value.getDefiningOp<LoadOp>()) {
@@ -141,29 +144,34 @@ bool originsMayAlias(const StorageOrigins &a, const StorageOrigins &b) {
   return false;
 }
 
-bool writesOrigins(Operation *operation, const StorageOrigins &origins) {
-  if (isCoordinateIdentity(operation) || storageBarrier(operation)) return false;
+bool visitStorageWrites(Operation *operation, llvm::function_ref<bool(Value)> visit) {
+  if (isCoordinateIdentity(operation) || storageBarrier(operation)) return true;
   if (auto effects = dyn_cast<MemoryEffectOpInterface>(operation)) {
     SmallVector<MemoryEffects::EffectInstance> instances;
     effects.getEffects(instances);
     for (const auto &effect : instances) {
       if (isa<MemoryEffects::Read, MemoryEffects::Allocate>(effect.getEffect()) ||
           privateResource(effect.getResource())) continue;
-      Value value = effect.getValue();
-      if (!value || originsMayAlias(origins, storageOrigins(value))) return true;
+      if (!visit(effect.getValue())) return false;
     }
   } else if (!operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>() &&
              !isMemoryEffectFree(operation)) {
-    return true;
+    if (!visit({})) return false;
   }
   if (operation->getNumRegions()) {
-    if (!operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>()) return true;
+    if (!operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>()) return visit({});
     for (Region &region : operation->getRegions())
       for (Block &block : region)
         for (Operation &nested : block)
-          if (writesOrigins(&nested, origins)) return true;
+          if (!visitStorageWrites(&nested, visit)) return false;
   }
-  return false;
+  return true;
+}
+
+bool writesOrigins(Operation *operation, const StorageOrigins &origins) {
+  return !visitStorageWrites(operation, [&](Value value) {
+    return value && !originsMayAlias(origins, storageOrigins(value));
+  });
 }
 
 bool onlyReads(Operation *operation, bool recursive) {
@@ -329,6 +337,9 @@ StorageOrigins weft::riscv::storageOrigins(Value root) {
       appendUnique(result.allocations, value);
       continue;
     }
+    if (auto load = value.getDefiningOp<LoadOp>();
+        load && load.getSnapshotStorage() && load.getSnapshotMayBorrow())
+      pending.push_back(load.getRegion());
     if (Value source = borrowedStorage(value)) {
       pending.push_back(source);
       continue;
@@ -473,13 +484,15 @@ bool weft::riscv::mayAliasStorage(Value lhs, Value rhs) {
   return originsMayAlias(storageOrigins(lhs), storageOrigins(rhs));
 }
 
-Value weft::riscv::fullDenseArgumentView(Value storage) {
+Value weft::riscv::fullArgumentView(Value storage) {
   auto origins = storageOrigins(storage);
   if (origins.unknown || !origins.allocations.empty() || origins.arguments.size() != 1) return {};
   Value argument = origins.arguments.front();
   auto type = cast<MemDescType>(argument.getType());
   auto encoding = dyn_cast<weft::kernel::EncodingType>(type.getEncoding());
-  if (!encoding || encoding.getKind() != "dense" || type.getStorageBits() < 8 ||
+  if (type.getAddressClass() != "pinned" || !encoding ||
+      (encoding.getKind() != "dense" && encoding.getKind() != "base") ||
+      type.getInterleaveRows() || type.getStorageBits() < 8 ||
       type.getStorageBits() % 8 || type.getShape().size() > 8) return {};
   auto kernel = dyn_cast<KernelOp>(cast<BlockArgument>(argument).getOwner()->getParentOp());
   if (!kernel) return {};
@@ -509,14 +522,172 @@ Value weft::riscv::fullDenseArgumentView(Value storage) {
   return full ? full.getResult() : Value();
 }
 
-LogicalResult DenseDisjointOp::verify() {
+Value weft::riscv::fullDenseArgumentView(Value storage) {
+  Value full = fullArgumentView(storage);
+  if (!full || cast<kernel::EncodingType>(cast<MemDescType>(full.getType()).getEncoding()).getKind() != "dense")
+    return {};
+  return full;
+}
+
+bool weft::riscv::isContiguousRecordRegion(Value region) {
+  auto type = dyn_cast<MemDescType>(region.getType());
+  if (!type || type.getShape().empty() || type.getElements() <= 0 ||
+      type.getStorageBits() <= 0 || type.getStorageBits() % 8 || type.getInterleaveRows() ||
+      cast<kernel::EncodingType>(type.getEncoding()).getKind() != "base") return false;
+  // The existing fixed one-dimensional record contract also covers local
+  // record views. A nominal tail alone does not prove complete records.
+  if (type.getShape().size() == 1 && type.getShape()[0] > 0 &&
+      type.getShape()[0] % type.getElements() == 0 && type.getStrides()[0] == 1)
+    return true;
+  Value base = region;
+  while (auto slice = base.getDefiningOp<SliceOp>()) {
+    if (slice.getResult().getType().getAxisIds() != slice.getBase().getType().getAxisIds()) return false;
+    // A leading row window and complete trailing axes remain contiguous.
+    for (auto [axis, selector] : llvm::enumerate(slice.getSelectors()))
+      if (cast<StringAttr>(selector).getValue() != "all" &&
+          (axis || cast<StringAttr>(selector).getValue() != "domain")) return false;
+    base = slice.getBase();
+  }
+  auto view = base.getDefiningOp<MemoryViewOp>();
+  if (!view || base != fullArgumentView(base) || type.getShape().size() < 2) return false;
+  auto kernel = view->getParentOfType<KernelOp>();
+  auto argument = cast<BlockArgument>(view.getBase());
+  auto name = kernel.getArgNames()[argument.getArgNumber()];
+  if (auto strided = kernel.getStridedArgs(); strided && llvm::is_contained(*strided, name)) return false;
+  // Prove the actual descriptor's strides, rather than trusting its source
+  // type. The ABI proves record divisibility; physical rewrites must retain
+  // this complete row-major mapping.
+  struct Product { llvm::APInt constant{128, 1}; SmallVector<Value> factors; };
+  unsigned remaining = 256;
+  std::function<bool(Value, Product &)> collect = [&](Value value, Product &product) {
+    if (!remaining) return false;
+    --remaining;
+    if (auto constant = getConstantIntValue(value)) {
+      if (*constant < 0) return false;
+      bool overflow = false;
+      product.constant = product.constant.umul_ov(llvm::APInt(128, *constant), overflow);
+      if (overflow) return false;
+    } else if (auto multiply = value.getDefiningOp<arith::MulIOp>()) {
+      return collect(multiply.getLhs(), product) && collect(multiply.getRhs(), product);
+    } else product.factors.push_back(value);
+    return true;
+  };
+  for (auto [axis, stride] : llvm::enumerate(view.getStrides())) {
+    Product actual, expected;
+    if (!collect(stride, actual)) return false;
+    for (Value extent : view.getExtents().drop_front(axis + 1))
+      if (!collect(extent, expected)) return false;
+    if (actual.constant != expected.constant || actual.factors.size() != expected.factors.size()) return false;
+    for (Value factor : actual.factors) {
+      auto match = llvm::find_if(expected.factors, [&](Value value) { return sameDenseIndex(factor, value); });
+      if (match == expected.factors.end()) return false;
+      expected.factors.erase(match);
+    }
+  }
+  return type.getAxisIds() == view.getResult().getType().getAxisIds();
+}
+
+FailureOr<SmallVector<Value>> weft::riscv::snapshotInterferingStorage(
+    Value storage, Operation *read) {
+  SmallVector<Value> writes;
+  auto origins = storageOrigins(storage);
+  auto collect = [&](Value memory) {
+    if (!memory) return false;
+    if (originsMayAlias(origins, storageOrigins(memory))) appendUnique(writes, memory);
+    return true;
+  };
+  for (Operation *next = read->getNextNode(); next; next = next->getNextNode())
+    if (!visitStorageWrites(next, collect)) return failure();
+  return writes;
+}
+
+bool weft::riscv::provesSnapshotBorrow(Value condition, Value storage, Operation *read) {
+  auto writes = snapshotInterferingStorage(storage, read);
+  Value source = fullArgumentView(storage);
+  if (failed(writes) || !source || !storageAliasesRemainInScope(read->getResult(0), read->getBlock())) return false;
+  SmallVector<std::pair<Value, Value>> pairs;
+  SmallVector<Value> pending{condition};
+  for (unsigned visited = 0; !pending.empty() && visited < 64; ++visited) {
+    Value value = pending.pop_back_val();
+    if (auto both = value.getDefiningOp<arith::AndIOp>())
+      pending.append({both.getLhs(), both.getRhs()});
+    else if (auto disjoint = value.getDefiningOp<StorageDisjointOp>())
+      pairs.emplace_back(disjoint.getLhs(), disjoint.getRhs());
+    else if (auto constant = getConstantIntValue(value); constant && !*constant)
+      return true;
+    else return false;
+  }
+  if (!pending.empty()) return false;
+  return llvm::all_of(*writes, [&](Value memory) {
+    Value target = fullArgumentView(memory);
+    return target && llvm::any_of(pairs, [&](auto pair) {
+      return (pair.first == source && pair.second == target) ||
+             (pair.second == source && pair.first == target);
+    });
+  });
+}
+
+std::optional<ReadSnapshotCapacity> weft::riscv::readSnapshotCapacity(LoadOp load) {
+  if (!load.getSnapshotStorage()) return std::nullopt;
+  auto allocation = load.getSnapshotStorage().getDefiningOp<LocalAllocOp>();
+  if (!allocation || !isContiguousRecordRegion(load.getRegion())) return std::nullopt;
+  Value capacity = allocation.getSizeBytes(), borrow;
+  if (auto maximum = capacity.getDefiningOp<arith::MaxUIOp>()) {
+    auto one = getConstantIntValue(maximum.getRhs());
+    if (!one || *one != 1) return std::nullopt;
+    capacity = maximum.getLhs();
+  }
+  if (load.getSnapshotMayBorrow()) {
+    auto select = capacity.getDefiningOp<arith::SelectOp>();
+    auto zero = select ? getConstantIntValue(select.getTrueValue()) : std::nullopt;
+    if (!select || !zero || *zero ||
+        !provesSnapshotBorrow(select.getCondition(), load.getRegion(), load)) return std::nullopt;
+    borrow = select.getCondition();
+    capacity = select.getFalseValue();
+  }
+  auto memory = load.getRegion().getType();
+  auto size = capacity.getDefiningOp<LocalSizeOp>();
+  if (!size) {
+    auto constant = getConstantIntValue(capacity);
+    auto bound = memory.getShape().size() == 1 ? denseDescriptorExtent(load.getRegion(), 0) : OpFoldResult();
+    auto fixed = dyn_cast_if_present<IntegerAttr>(bound.dyn_cast<Attribute>());
+    if (borrow || !constant || memory.getShape().size() != 1 ||
+        !fixed || fixed.getInt() != memory.getShape()[0] ||
+        memory.getShape()[0] <= 0 || memory.getShape()[0] % memory.getElements() ||
+        memory.getShape()[0] / memory.getElements() > std::numeric_limits<int64_t>::max() / (memory.getStorageBits() / 8) ||
+        *constant != memory.getShape()[0] / memory.getElements() * (memory.getStorageBits() / 8)) return std::nullopt;
+    return ReadSnapshotCapacity{capacity, borrow};
+  }
+  if (size.getElementBytes() != memory.getStorageBits() / 8 ||
+      size.getExtents().size() != memory.getShape().size()) return std::nullopt;
+  for (auto [axis, count] : llvm::enumerate(size.getExtents())) {
+    if (axis + 1 == memory.getShape().size()) {
+      auto division = count.getDefiningOp<arith::DivUIOp>();
+      auto divisor = division ? getConstantIntValue(division.getRhs()) : std::nullopt;
+      if (!division) {
+        auto bound = denseDescriptorExtent(load.getRegion(), axis);
+        auto integer = dyn_cast_if_present<IntegerAttr>(bound.dyn_cast<Attribute>());
+        auto actual = getConstantIntValue(count);
+        if (integer && actual && integer.getInt() >= 0 && integer.getInt() % memory.getElements() == 0 &&
+            *actual == integer.getInt() / memory.getElements()) continue;
+        return std::nullopt;
+      }
+      if (!divisor || *divisor != memory.getElements()) return std::nullopt;
+      count = division.getLhs();
+    }
+    if (!sameDenseExtent(count, load.getRegion(), axis)) return std::nullopt;
+  }
+  return ReadSnapshotCapacity{capacity, borrow};
+}
+
+LogicalResult StorageDisjointOp::verify() {
   for (Value value : {getLhs(), getRhs()}) {
     auto view = value.getDefiningOp<MemoryViewOp>();
     auto argument = view ? dyn_cast<BlockArgument>(view.getBase()) : BlockArgument();
     auto kernel = argument ? dyn_cast<KernelOp>(argument.getOwner()->getParentOp()) : KernelOp();
     if (!kernel || argument.getOwner() != &kernel.getBody().front() ||
-        view->getBlock() != argument.getOwner() || value != fullDenseArgumentView(value))
-      return emitOpError("requires complete pinned dense views with explicit ABI metadata");
+        view->getBlock() != argument.getOwner() || value != fullArgumentView(value))
+      return emitOpError("requires complete pinned storage views with explicit ABI metadata");
     if (kernel != (*this)->getParentOfType<KernelOp>())
       return emitOpError("dense ranges must belong to the containing kernel");
   }
@@ -554,7 +725,7 @@ bool weft::riscv::mayAliasStorageAt(Value lhs, Value rhs, Operation *at) {
       Value condition = pending.pop_back_val();
       if (auto both = condition.getDefiningOp<arith::AndIOp>()) {
         pending.append({both.getLhs(), both.getRhs()});
-      } else if (auto disjoint = condition.getDefiningOp<DenseDisjointOp>()) {
+      } else if (auto disjoint = condition.getDefiningOp<StorageDisjointOp>()) {
         auto left = disjoint.getLhs().getDefiningOp<MemoryViewOp>();
         auto right = disjoint.getRhs().getDefiningOp<MemoryViewOp>();
         if (left && right) proven.emplace_back(left.getBase(), right.getBase());

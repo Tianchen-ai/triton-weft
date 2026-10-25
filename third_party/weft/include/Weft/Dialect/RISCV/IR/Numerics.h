@@ -7,6 +7,11 @@
 
 namespace weft::riscv {
 class UnaryOp;
+class RVVWidenDotOp;
+
+// Rectangular validity belongs to axes. A partial free/output axis does not
+// require partial reduction lanes when both saved reduction domains are full.
+bool hasCompleteReductionDomain(RVVWidenDotOp operation);
 
 // Bounds cover every ordered value; NaNs are tracked independently. Facts are
 // recomputed from numeric SSA, never inferred from an operator name or sampled

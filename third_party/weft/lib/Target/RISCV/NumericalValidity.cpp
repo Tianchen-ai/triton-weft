@@ -33,12 +33,29 @@ public:
     if (auto found = known.find(value); found != known.end()) return found->second;
     auto type = dyn_cast<riscv::ValueType>(value.getType());
     Operation *op = value.getDefiningOp();
-    if (!remaining || !type || !op) return failure();
+    if (!remaining || !type) return failure();
     --remaining;
     SmallVector<Value> result;
-    if (auto load = dyn_cast<riscv::LoadOp>(op)) {
+    if (!isa<kernel::EncodingType>(type.getElementType()) && type.getLayout().getValidity() == "full" &&
+        llvm::all_of(type.getShape().asArrayRef(), [](int64_t size) { return size > 0; })) {
+      auto loc = value.getLoc();
+      for (int64_t size : type.getShape().asArrayRef()) result.push_back(arith::ConstantIndexOp::create(b, loc, size));
+    } else if (!op) return failure();
+    else if (auto load = dyn_cast<riscv::LoadOp>(op)) {
       for (unsigned axis = 0; axis < type.getShape().size(); ++axis)
         result.push_back(b.createOrFold<riscv::ExtentOp>(op->getLoc(), b.getIndexType(), load.getRegion(), axis));
+    } else if (auto extract = dyn_cast<riscv::ExtractOp>(op)) {
+      auto incoming = get(extract.getInput());
+      if (failed(incoming)) return failure();
+      unsigned cursor = 0;
+      for (auto [axis, selector] : llvm::enumerate(extract.getSelectors())) {
+        auto kind = cast<StringAttr>(selector).getValue();
+        if (kind == "all") { result.push_back((*incoming)[axis]); continue; }
+        Value coordinate = extract.getIndices()[cursor++];
+        if (kind == "index") continue;
+        if (kind != "domain" || !isa<riscv::PointType>(coordinate.getType())) return failure();
+        result.push_back(b.createOrFold<riscv::PointActiveOp>(op->getLoc(), b.getIndexType(), coordinate));
+      }
     } else if (auto field = dyn_cast<riscv::FieldOp>(op)) {
       auto ownerAxes = logicalAxes(field.getOwner().getType());
       SmallVector<Value> ownerBounds;

@@ -1,4 +1,5 @@
 #include "Support.h"
+#include "Weft/Dialect/RISCV/IR/Numerics.h"
 
 namespace weft::riscv_partial {
 
@@ -825,7 +826,7 @@ public:
                 builder.getDenseI64ArrayAttr(rhsLaneOffsets),
                 *sequentialMultiply,
                 !collectIssues && dot.getOver().size() == 1 &&
-                    (lhsIssue.getLayout().getValidity() == "tail" || rhsIssue.getLayout().getValidity() == "tail")
+                    !riscv::hasCompleteReductionDomain(dot)
                     ? "rvv.vwmacc.partial.vl" : "rvv.vwmacc.partial",
                 finalizeInstruction,
                 plannedResources));

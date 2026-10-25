@@ -361,6 +361,19 @@ dense stage 的 addressable supply 不可只凭投影形式或大小选成 reloa
 load 到每个 consumer 都处于同一 read epoch，包括重复子区域中 consumer 之后的写入。
 无法证明时保留数值快照，不能把存储 descriptor 当作原 stage 的内容。
 
+Encoded stage 同样遵守原读取快照。连续完整 record 区域可以具有多个轴和动态行长；
+`LocalSize`、allocation 和原 load 的 snapshot edge 明确保存实际字节数及所有权。
+对完整 ABI 内存区间的 `storage_disjoint` 检查可以证明当前调用没有干扰写入：此时
+同一个 physical load 借用原 descriptor；否则在原读取点复制完整 record 区域。
+这个选择不专门化调用地址、不改变参数的 alias 合同，也不生成另一份 kernel。
+borrow 条件必须覆盖该读取在原作用域内的全部可能写入，后置 verifier 重新检查。
+动态快照受现有聚合 local capacity 限制；无干扰路径不为整个逻辑 Value 分配或复制字节。
+返回数值 SSA 的读取/转换结束原存储依赖，后续纯算术不因输入地址被改写而再次快照。
+通用字段字节解码也消费从保存的 Encoding Value 提取出的 record，不绕回原 View 重读。
+展开前的 point 有效长度查询在 Level 展开后折叠到对应 `PhysicalPoint.active`，因此字段
+读取、尾部归约和流水 SSA 使用同一真实有效域。归约选择只检查被归约轴是否完整，
+不能因 free/output 轴有尾块就引入不必要的清零和 tail-undisturbed accumulator。
+
 同一个 widening contraction 的两个 operand 必须共享一套 reduction carrier。两侧
 storage proposal 一致时保留该 mapping；不一致但拥有相同 reduction axes 与 extents 时，
 按作者声明的 reduction-axis 顺序建立共同 carrier：最后一轴作为 primary lane，其余轴在其外
@@ -920,8 +933,9 @@ mask读取点、time/lane/replica、tail、下游原宽乘法均保持；取负�
 ### `ScheduleRISCVLevels` 与 `PipelineRISCVLevels`
 
 `ScheduleRISCVLevels` 是 scheduler。它读取已 lowering 的 physical `scf.for`、SSA use-def、
-loop carry 和 operation effect，把与下一迭代无关的 pure/read producer 放在 stage 0，
-把依赖 carry 并生成 yield 的 consumer 放在 stage `pipeline_depth - 1`，并在具体 operation 上写入
+loop carry 和 operation effect，先建立 pure/read producer 与依赖 carry 的消费边界。
+共用的有界调度按读取及其数值依赖划分中间 stage，把更新 carry 的 consumer 留在
+stage `pipeline_depth - 1`，并在具体 operation 上写入
 stage/order。已经数值化或具有直接 field supply 的 widening multiply/dot 与 fragment MMA
 也建立 consumer 边界，避免整段 contraction 都落入 producer、只重叠最终 scalar add。
 直接 field 在该边界前物化为 `field_read`，跨阶段传递真实 numeric value；带 shaped index 的
@@ -932,7 +946,7 @@ storage projection 不使用这条前移规则。无 memory clobber、copy accum
 
 默认以 contraction 建立消费边界。若跨阶段的 numeric values 本身已占满目标向量寄存器，
 scheduler 另枚举由真实循环 carry 依赖确定的边界：把独立算术留在 producer，将其较小结果
-传给 consumer。只有传递的向量驻留量严格下降才采用；两阶段仍须通过同一 effect、shape、
+传给 consumer。只有传递的向量驻留量严格下降才采用；所有阶段仍须通过同一 effect、shape、
 依赖与展开验证，最终资源 pass 仍可拒绝该候选。它不删除作者算术、隐式降低精度或取消
 所请求的流水，不把较小驻留量当作实际加速证据。
 
@@ -943,8 +957,8 @@ allocation、descriptor 和所有读写用户放入 consumer stage，并保留�
 存储峰值。该规则不接纳作者 state/stage birth、动态容量或跨 stage 的 local-storage ping-pong。
 
 `PipelineRISCVLevels` 与 x86 的 `PipelineLevels` 使用同一个 `expandPhysicalPipeline`。
-depth 1 顺序执行；depth 2/3/4 在同一 producer/consumer frontier 中分别保存 1/2/3 个
-待消费迭代。共同展开器使用 SCF 与 IRMapping 形成 guarded fill、steady loop 和 ordered drain；
+depth 1 顺序执行；depth 2/3/4 的操作进入所选 stage，并按各个值的生产阶段与最后消费阶段
+保存必要的版本。共同展开器使用 SCF 与 IRMapping 形成 guarded fill、steady loop 和 ordered drain；
 空循环不执行 producer，短循环只消费已经初始化的版本。所有 source carries 按原顺序更新，
 跨阶段值及坐标版本来自实际依赖。RISC-V 的局部 shape 身份也从同一 IRMapping 克隆。
 
@@ -952,12 +966,13 @@ x86 的 `ScheduleLevels` 写入 stage/order/invariant；expander 只读取并验
 LLVM intrinsic 的纯度来自其内建 effect、termination 和 synchronization 属性，不能由名称
 前缀判断。私有 allocation 的完整使用闭包保留在 consumer 内；分支可向本次迭代的后续
 操作交付 buffer，但不能将本次新建的地址传到本次迭代的回边。stack slot 分配在展开后运行，
-向量/谓词驻留重新分析。RISC-V 同样在展开后完成 local storage 与寄存器资源闭合。
+向量/谓词驻留重新分析。x86 谓词构造与其使用保持同阶段，避免多个廉价掩码版本占满
+AVX-512 的有限 k 寄存器。RISC-V 同样在展开后完成 local storage 与寄存器资源闭合。
 
 `backend_options["pipeline_depth"]` 在两目标上接受整数 1/2/3/4，默认 1，与 GPU `num_stages`
-无隐式映射。当前 scheduler 选择两个依赖 frontier，不声称任意多阶段 DAG、跨阶段 local
-descriptor ping-pong 或 async transfer 已实现。显式深度不能建立合法 producer/consumer
-关系时给出诊断。Physical IR 保留 `weft.pipeline.expanded_depth` 与版本数量；这些是编译
+无隐式映射。当前仍不接纳跨阶段 local descriptor ping-pong 或 async transfer。
+显式深度不能建立合法 producer/consumer
+关系时给出诊断。Physical IR 保留 `weft.pipeline.expanded_depth`、每阶段操作数与版本数量；这些是编译
 决定，实际性能仍由相同计时边界验证。
 
 ### `ShareRISCVLayeredWindows`

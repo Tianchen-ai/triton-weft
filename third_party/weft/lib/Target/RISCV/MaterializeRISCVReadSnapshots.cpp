@@ -1,9 +1,11 @@
 #include "Weft/Target/RISCVPasses.h"
 #include "Weft/Dialect/RISCV/IR/MemoryEffects.h"
+#include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 
 #include "RISCVPhysicalSupport.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -58,25 +60,49 @@ public:
       auto memory = load.getRegion().getType();
       auto value = mlir::dyn_cast<riscv::ValueType>(load.getResult().getType());
       auto encoding = mlir::cast<kernel::EncodingType>(memory.getEncoding());
-      const int64_t extent = value && value.getShape().size() == 1
-                                 ? value.getShape()[0]
-                                 : 0;
+      const int64_t extent = value && value.getShape().size() == 1 ? value.getShape()[0] : 0;
       const int64_t recordBytes = memory.getStorageBits() / 8;
       if (!kernel || kernel.getResourcesMaterialized() || !value ||
           value.getLayout().getCarrier() != "local" ||
           value.getLayout().getValidity() != "full" ||
-          encoding.getKind() != "base" || extent <= 0 ||
-          extent % memory.getElements() || memory.getStorageBits() % 8 ||
-          recordBytes <= 0 || memory.getInterleaveRows() != 0 ||
-          memory.getStrides().size() != 1 || memory.getStrides()[0] != 1 ||
-          extent / memory.getElements() >
-              std::numeric_limits<int64_t>::max() / recordBytes) {
-        load.emitError(
-            "interfering encoded read requires a static contiguous full-record snapshot");
+          encoding.getKind() != "base" ||
+          !riscv::isContiguousRecordRegion(load.getRegion())) {
+        load.emitError("interfering encoded read requires a contiguous full-record snapshot");
         failed = true;
         return;
       }
-      const int64_t bytes = extent / memory.getElements() * recordBytes;
+      mlir::Value borrow;
+      auto writes = riscv::snapshotInterferingStorage(load.getRegion(), load);
+      mlir::Value source = riscv::fullArgumentView(load.getRegion());
+      llvm::SmallVector<mlir::Value> destinations;
+      if (mlir::succeeded(writes) && source &&
+          riscv::storageAliasesRemainInScope(load.getResult(), load->getBlock())) {
+        for (auto write : *writes) {
+          auto full = riscv::fullArgumentView(write);
+          if (!full || full == source) { destinations.clear(); break; }
+          if (!llvm::is_contained(destinations, full)) destinations.push_back(full);
+        }
+      }
+      for (mlir::Value destination : destinations) {
+        mlir::Operation *last = source.getDefiningOp();
+        if (last->isBeforeInBlock(destination.getDefiningOp())) last = destination.getDefiningOp();
+        rewriter.setInsertionPointAfter(last);
+        mlir::Value disjoint = riscv::StorageDisjointOp::create(rewriter, load.getLoc(),
+            rewriter.getI1Type(), source, destination);
+        // The proofs are immutable ABI metadata and stay outside the author's
+        // traversal. The actual snapshot remains at its original read point.
+        rewriter.setInsertionPoint(load);
+        borrow = borrow ? mlir::Value(mlir::arith::AndIOp::create(rewriter, load.getLoc(), borrow, disjoint)) : disjoint;
+      }
+      int64_t bytes = -1;
+      auto bound = memory.getShape().size() == 1 ? riscv::denseDescriptorExtent(load.getRegion(), 0) : mlir::OpFoldResult();
+      auto fixed = mlir::dyn_cast_if_present<mlir::IntegerAttr>(bound.dyn_cast<mlir::Attribute>());
+      if (!borrow && fixed && fixed.getInt() == extent && extent > 0 && extent % memory.getElements() == 0) {
+        if (extent / memory.getElements() > std::numeric_limits<int64_t>::max() / recordBytes) {
+          load.emitError("encoded read snapshot size overflows"); failed = true; return;
+        }
+        bytes = extent / memory.getElements() * recordBytes;
+      }
       if (bytes > kernel.getTarget().getMaxPrivateStackBytes()) {
         load.emitError("encoded read snapshot exceeds target local storage");
         failed = true;
@@ -84,8 +110,26 @@ public:
       }
       const int64_t owner = ownerDomain(load);
       rewriter.setInsertionPoint(load);
-      auto byteCount = mlir::arith::ConstantIndexOp::create(rewriter,
-          load.getLoc(), bytes);
+      mlir::Value byteCount;
+      if (bytes > 0) {
+        byteCount = mlir::arith::ConstantIndexOp::create(rewriter, load.getLoc(), bytes);
+      } else {
+        llvm::SmallVector<mlir::Value> counts;
+        for (unsigned axis = 0; axis < memory.getShape().size(); ++axis)
+          counts.push_back(rewriter.createOrFold<riscv::ExtentOp>(load.getLoc(), rewriter.getIndexType(), load.getRegion(), axis));
+        auto elements = mlir::arith::ConstantIndexOp::create(rewriter, load.getLoc(), memory.getElements());
+        counts.back() = mlir::arith::DivUIOp::create(rewriter, load.getLoc(), counts.back(), elements);
+        byteCount = riscv::LocalSizeOp::create(rewriter, load.getLoc(), rewriter.getIndexType(), counts, recordBytes,
+            riscv_internal::leaf(rewriter, "scalar", "local-size", "local.size.checked", "local.size.checked", 0, 0));
+        if (borrow) {
+          auto zero = mlir::arith::ConstantIndexOp::create(rewriter, load.getLoc(), 0);
+          byteCount = mlir::arith::SelectOp::create(rewriter, load.getLoc(), borrow, zero, byteCount);
+        }
+        // A zero-byte logical object needs no transfer. Keep the C allocation
+        // defined while retaining its true transfer size in explicit SSA.
+        byteCount = mlir::arith::MaxUIOp::create(rewriter, load.getLoc(), byteCount,
+            mlir::arith::ConstantIndexOp::create(rewriter, load.getLoc(), 1));
+      }
       auto storageType = riscv::LocalType::get(
           &getContext(), rewriter.getIntegerType(8),
           riscv_internal::integers(rewriter, {}),
@@ -96,8 +140,9 @@ public:
           load.getLoc(), storageType, byteCount);
       riscv_internal::copyOrigin(load, storage);
       load.getSnapshotStorageMutable().assign(storage.getResult());
+      load.setSnapshotMayBorrow(static_cast<bool>(borrow));
       load.setLeafAttr(
-          riscv_internal::readSnapshotLeaf(rewriter, kernel.getTarget(), bytes));
+          riscv_internal::readSnapshotLeaf(rewriter, kernel.getTarget(), bytes > 0 ? bytes : kernel.getTarget().getVlenBits() / 8));
     });
     if (failed)
       signalPassFailure();
@@ -118,11 +163,13 @@ bool weft::riscv_internal::needsReadSnapshot(riscv::LoadOp load) {
     for (mlir::Operation *user : value.getUsers()) {
       if (!visited.insert(user).second)
         continue;
-      if (riscv::storageWrittenBetween(load.getRegion(), load, user))
+      if (riscv::storageWrittenBetween(load.getRegion(), load, user)) {
         return true;
+      }
       if (mlir::isMemoryEffectFree(user) &&
           !mlir::isa<riscv::EncodedLocalBindOp>(user))
-        pending.append(user->result_begin(), user->result_end());
+        for (mlir::Value result : user->getResults())
+          if (!riscv::storageOrigins(result).isNumeric()) pending.push_back(result);
     }
   }
   return false;

@@ -3277,15 +3277,21 @@ mlir::LogicalResult StorageStoreOp::verify() {
 
 mlir::LogicalResult FieldByteLoadOp::verify() {
   auto type = getRecord().getType();
-  auto encoding = mlir::dyn_cast<kernel::EncodingType>(type.getEncoding());
+  auto memory = mlir::dyn_cast<MemDescType>(type);
+  auto value = mlir::dyn_cast<ValueType>(type);
+  auto encoding = mlir::dyn_cast<kernel::EncodingType>(memory ? memory.getEncoding() : value.getElementType());
+  auto declaration = encoding ? findEncodingDeclaration(*this, baseEncodingFamily(*this, encoding)) : EncodingDeclOp();
+  auto shape = memory ? memory.getShape() : value.getShape();
+  int64_t elements = memory ? memory.getElements() : declaration ? declaration.getElements() : 0;
+  int64_t bits = memory ? memory.getStorageBits() : declaration ? declaration.getStorageBits() : 0;
   auto integer = mlir::dyn_cast<mlir::IntegerType>(getResult().getType());
   if (!integer || integer.getWidth() != 8 || !integer.isUnsigned() ||
-      !encoding || encoding.getKind() == "dense" || !canRead(type.getAccess()) ||
-      type.getShape().size() != 1 || type.getElements() <= 0 || type.getShape()[0] != type.getElements() ||
-      type.getStorageBits() <= 0 || type.getStorageBits() % 8)
+      !encoding || encoding.getKind() == "dense" || (memory && !canRead(memory.getAccess())) ||
+      (value && value.getLayout().getCarrier() != "local") ||
+      shape.size() != 1 || elements <= 0 || shape[0] != elements || bits <= 0 || bits % 8)
     return emitOpError("field byte load requires one complete readable encoded record and a u8 result");
-  int64_t bytes = type.getStorageBits() / 8;
-  if (type.getInterleaveRows() > 0 && bytes > std::numeric_limits<int64_t>::max() / type.getInterleaveRows())
+  int64_t bytes = bits / 8;
+  if (memory && memory.getInterleaveRows() > 0 && bytes > std::numeric_limits<int64_t>::max() / memory.getInterleaveRows())
     return emitOpError("field byte load cohort byte span overflows its address representation");
   if (getSpanOffset() < 0 || getSpanBytes() <= 0 ||
       getSpanOffset() > bytes || getSpanBytes() > bytes - getSpanOffset() ||
@@ -3874,20 +3880,10 @@ mlir::LogicalResult LoadOp::verify() {
     auto memory = getRegion().getType();
     auto value = mlir::dyn_cast<ValueType>(getResult().getType());
     auto storage = mlir::cast<LocalType>(allocation.getType());
-    const int64_t extent = value && value.getShape().size() == 1
-                               ? value.getShape()[0]
-                               : 0;
-    const int64_t recordBytes = memory.getStorageBits() / 8;
+    auto capacity = readSnapshotCapacity(*this);
     if (encoding.getKind() != "base" || !value ||
         value.getLayout().getCarrier() != "local" ||
-        value.getLayout().getValidity() != "full" || extent <= 0 ||
-        extent % memory.getElements() || memory.getStorageBits() % 8 ||
-        recordBytes <= 0 || memory.getInterleaveRows() != 0 ||
-        memory.getStrides().size() != 1 ||
-        memory.getStrides()[0] != 1 ||
-        extent / memory.getElements() >
-            std::numeric_limits<int64_t>::max() / recordBytes ||
-        storage.getSizeBytes() != extent / memory.getElements() * recordBytes ||
+        value.getLayout().getValidity() != "full" || !capacity ||
         !storage.getElementType().isInteger(8) || !storage.getShape().empty() ||
         !storage.getAxisIds().empty() || storage.getPurpose() != "pack" ||
         storage.getSchema() != "read-snapshot" ||
@@ -3895,8 +3891,8 @@ mlir::LogicalResult LoadOp::verify() {
         !allocation.getDefiningOp<LocalAllocOp>() || !allocation.hasOneUse() ||
         !exactReadSnapshotLeaf(*this, getLeaf()))
       return emitOpError(
-          "encoded read snapshot requires an allocated complete contiguous record range");
-  } else if (getLeaf().getInstruction().ends_with("read-snapshot")) {
+          "encoded read snapshot requires a checked complete contiguous record range and a valid borrow proof");
+  } else if (getSnapshotMayBorrow() || getLeaf().getInstruction().ends_with("read-snapshot")) {
     return emitOpError("record snapshot leaf requires explicit local storage");
   }
   return verifyLeafOperation(*this);
@@ -6973,6 +6969,17 @@ mlir::LogicalResult RVVGroupedMacStepOp::verify() {
 mlir::LogicalResult RVVWidenDotOp::verify() {
   ValueType lhs = getLhs().getType();
   ValueType rhs = getRhs().getType();
+  if (!getActiveExtents().empty() &&
+      getActiveExtents().size() != lhs.getShape().size() + rhs.getShape().size())
+    return emitOpError("saved widening-dot extents must cover the lhs and rhs logical axes");
+  if (!getActiveExtents().empty()) {
+    llvm::SmallVector<int64_t> shape(lhs.getShape().asArrayRef());
+    llvm::append_range(shape, rhs.getShape().asArrayRef());
+    for (auto [bound, capacity] : llvm::zip(getActiveExtents(), shape))
+      if (auto constant = denseConstantIndex(bound);
+          constant && (*constant < 0 || (capacity > 0 && *constant > capacity)))
+        return emitOpError("saved widening-dot extent exceeds its logical capacity");
+  }
   auto lhsElement = mlir::dyn_cast<mlir::IntegerType>(lhs.getElementType());
   auto rhsElement = mlir::dyn_cast<mlir::IntegerType>(rhs.getElementType());
   auto shapedResult = mlir::dyn_cast<ValueType>(getResult().getType());
@@ -7113,6 +7120,10 @@ mlir::LogicalResult RVVWidenDotOp::verify() {
   auto partialLayoutPlan = getPartialLayoutPlanAttr();
   auto nestedPartialPlan = getNestedPartialPlanAttr();
   auto sequentialPartialPlan = getSequentialPartialPlanAttr();
+  if (sequentialPartialPlan && sequentialPartialPlan.getRealization() != "fused_partial" &&
+      sequentialPartialPlan.getAccumulateInstruction() == "rvv.vwmacc.partial" &&
+      !hasCompleteReductionDomain(*this))
+    return emitOpError("unmasked partial reduction requires complete active reduction axes");
   auto scaledPartialPlan = getScaledPartialPlanAttr();
   auto layeredPartialPlan = getLayeredPartialPlanAttr();
   auto combinePartialPlan =

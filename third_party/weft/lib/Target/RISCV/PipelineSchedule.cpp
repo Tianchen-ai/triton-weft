@@ -278,7 +278,7 @@ void collectTransport(PipelineSchedule &schedule) {
     for (Value result : producer->getResults()) {
       bool crosses = llvm::any_of(result.getUses(), [&](OpOperand &use) {
         auto owner = ancestorInBlock(use.getOwner(), body);
-        return owner == yield || consumers.contains(owner);
+        return owner == yield || (owner && schedule.stage(owner) > schedule.stage(producer));
       });
       if (crosses) schedule.transported.push_back(result);
     }
@@ -328,8 +328,7 @@ LogicalResult PipelineSchedule::verify() const {
 void PipelineSchedule::write() const {
   Builder builder(loop->getContext());
   for (auto [position, operation] : llvm::enumerate(ordered)) {
-    auto depth = loop->getAttrOfType<riscv::ScheduleAttr>("weft.riscv.schedule").getPipelineDepth();
-    operation->setAttr(pipelineStage, builder.getI64IntegerAttr(isProducer(operation) ? 0 : depth - 1));
+    operation->setAttr(pipelineStage, builder.getI64IntegerAttr(stage(operation)));
     operation->setAttr(pipelineOrder, builder.getI64IntegerAttr(position));
     if (isInvariant(operation)) operation->setAttr(pipelineInvariant, builder.getUnitAttr());
     else operation->removeAttr(pipelineInvariant);
@@ -346,10 +345,11 @@ FailureOr<PipelineSchedule> PipelineSchedule::read(scf::ForOp loop) {
   for (Operation &operation : loop.getBody()->without_terminator()) {
     auto stage = operation.getAttrOfType<IntegerAttr>(pipelineStage);
     auto order = operation.getAttrOfType<IntegerAttr>(pipelineOrder);
-    if (!stage || (stage.getInt() != 0 && stage.getInt() != depth - 1) || !order ||
+    if (!stage || stage.getInt() < 0 || stage.getInt() >= depth || !order ||
         order.getInt() < 0 || !positions.try_emplace(order.getInt(), &operation).second)
       return operation.emitError("pipeline requires a unique total order and an exact stage for every operation"), failure();
-    (stage.getInt() ? result.consumers : result.producers).push_back(&operation);
+    result.stages[&operation] = stage.getInt();
+    (stage.getInt() == depth - 1 ? result.consumers : result.producers).push_back(&operation);
   }
   for (size_t position = 0; position < positions.size(); ++position) {
     auto found = positions.find(position);
@@ -360,7 +360,7 @@ FailureOr<PipelineSchedule> PipelineSchedule::read(scf::ForOp loop) {
   // total order, not the source block order left over from scheduling.
   result.producers.clear(); result.consumers.clear();
   for (Operation *operation : result.ordered)
-    (operation->getAttrOfType<IntegerAttr>(pipelineStage).getInt() ? result.consumers : result.producers).push_back(operation);
+    (result.stage(operation) == depth - 1 ? result.consumers : result.producers).push_back(operation);
   for (Operation *operation : result.ordered)
     if (operation->hasAttr(pipelineInvariant)) {
       if (!isa<UnitAttr>(operation->getAttr(pipelineInvariant)))
@@ -488,14 +488,28 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
     }
     if (invariant) { invariantSet.insert(operation); result.invariants.push_back(operation); }
   }
+  llvm::append_range(result.ordered, result.producers);
+  llvm::append_range(result.ordered, result.consumers);
+  if (failed(distributePhysicalPipelineStages(result, stageDependencies,
+      [](Operation *op) {
+        bool reads = false;
+        op->walk([&](Operation *nested) {
+          if (auto effects = dyn_cast<MemoryEffectOpInterface>(nested)) {
+            SmallVector<MemoryEffects::EffectInstance> instances;
+            effects.getEffects(instances);
+            reads |= llvm::any_of(instances, [](auto effect) { return isa<MemoryEffects::Read>(effect.getEffect()); });
+          }
+        });
+        return reads;
+      }, [](Value value) {
+        return !value.getDefiningOp<riscv::LocalShapeOp>() && carryType(value.getType());
+      }))) return failure();
   collectTransport(result);
   if (result.transported.empty() && result.invariants.empty()) return std::optional<PipelineSchedule>{};
   for (Value value : result.transported)
     if (!carryType(value.getType()))
       return rejectRISCVCandidate(value.getDefiningOp(), RISCVFailureCategory::Unsupported,
           "pipeline frontier cannot carry a descriptor, local object or dynamic numeric shape"), failure();
-  llvm::append_range(result.ordered, result.producers);
-  llvm::append_range(result.ordered, result.consumers);
   if (failed(result.verify())) return failure();
   return std::optional<PipelineSchedule>(std::move(result));
 }

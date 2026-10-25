@@ -690,7 +690,7 @@ mlir::LogicalResult Emitter::compileMemoryView(riscv::MemoryViewOp operation) {
   return mlir::success();
 }
 
-mlir::LogicalResult Emitter::compileDenseDisjoint(riscv::DenseDisjointOp operation) {
+mlir::LogicalResult Emitter::compileStorageDisjoint(riscv::StorageDisjointOp operation) {
   struct Range { std::string address, bytes, valid, empty; };
   auto range = [&](mlir::Value value) -> mlir::FailureOr<Range> {
     auto source = bindings.lookup(value);
@@ -702,7 +702,7 @@ mlir::LogicalResult Emitter::compileDenseDisjoint(riscv::DenseDisjointOp operati
     }
     Range result{fresh("range_address"), fresh("range_bytes"), fresh("range_valid"), fresh("range_empty")};
     line("const uintptr_t " + result.address + " = (uintptr_t)" + source.memory.name + ";");
-    line("size_t " + result.bytes + " = " + std::to_string(type.getStorageBits() / 8) + ";");
+    line("size_t " + result.bytes + " = 0;");
     line("bool " + result.valid + " = true;");
     std::string empty = "false";
     for (const auto &extent : source.memory.extents) empty += " || (" + extent + ") == 0";
@@ -713,25 +713,23 @@ mlir::LogicalResult Emitter::compileDenseDisjoint(riscv::DenseDisjointOp operati
     line("if (!" + result.empty + ") {");
     ++indent;
     for (size_t axis = 0; axis < source.memory.extents.size(); ++axis) {
-      std::string count = fresh("range_count"), stride = fresh("range_stride"), term = fresh("range_term");
+      std::string count = fresh("range_count"), stride = fresh("range_stride");
       line("const size_t " + count + " = (" + source.memory.extents[axis] + ") - 1;");
       line("const size_t " + stride + " = " + source.memory.strides[axis] + ";");
-      line("if (" + stride + " > SIZE_MAX / " + std::to_string(type.getStorageBits() / 8) + ") " + result.valid + " = false;");
-      line("else {");
-      ++indent;
-      line("const size_t " + term + " = " + stride + " * " + std::to_string(type.getStorageBits() / 8) + ";");
-      line("if (" + term + " != 0 && " + count + " > (SIZE_MAX - " + result.bytes + ") / " + term + ") " + result.valid + " = false;");
-      line("else " + result.bytes + " += " + count + " * " + term + ";");
-      --indent;
-      line("}");
+      line("if (" + stride + " != 0 && " + count + " > (SIZE_MAX - " + result.bytes + ") / " + stride + ") " + result.valid + " = false;");
+      line("else " + result.bytes + " += " + count + " * " + stride + ";");
     }
+    const std::string recordBytes = std::to_string(type.getStorageBits() / 8);
+    line(result.bytes + " /= " + std::to_string(type.getElements()) + ";");
+    line("if (" + result.bytes + " >= SIZE_MAX / " + recordBytes + ") " + result.valid + " = false;");
+    line("else " + result.bytes + " = (" + result.bytes + " + 1) * " + recordBytes + ";");
     --indent;
     line("}");
     return result;
   };
   auto lhs = range(operation.getLhs()), rhs = range(operation.getRhs());
   if (mlir::failed(lhs) || mlir::failed(rhs)) return mlir::failure();
-  std::string result = fresh("dense_disjoint");
+  std::string result = fresh("storage_disjoint");
   line("const bool " + result + " = " + lhs->empty + " || " + rhs->empty + " || (" + lhs->valid + " && " + rhs->valid + " && (" +
        lhs->address + " <= " + rhs->address + " ? " + rhs->address + " - " + lhs->address + " >= " + lhs->bytes + " : " +
        lhs->address + " - " + rhs->address + " >= " + rhs->bytes + "));");
@@ -840,8 +838,11 @@ mlir::LogicalResult Emitter::compileStorageLoad(
 mlir::LogicalResult Emitter::compileFieldByteLoad(riscv::FieldByteLoadOp operation) {
   if (operation.getLeaf().getInstruction() != "scalar.field-byte-load")
     return fail(operation, "field byte load requires its selected byte leaf");
-  auto record = recordForSlice(operation.getRecord());
+  auto record = mlir::isa<riscv::ValueType>(operation.getRecord().getType())
+      ? mlir::FailureOr<Binding>(bindings.lookup(operation.getRecord())) : recordForSlice(operation.getRecord());
   if (mlir::failed(record)) return mlir::failure();
+  if (record->kind != Binding::Kind::Record)
+    return fail(operation, "field byte read requires a saved record binding");
   std::string address = record->recordPointer;
   int64_t byte = operation.getByteOffset(), chunk = operation.getChunkBytes();
   if (record->interleaveRows > 0) {
@@ -1120,6 +1121,25 @@ mlir::LogicalResult Emitter::compileReshape(riscv::ReshapeOp reshape) {
       reshape.getInput().getType().getShape() != reshape.getResult().getType().getShape()) {
     auto before = reshape.getInput().getType();
     auto after = reshape.getResult().getType();
+    bool removesUnitAxes = !after.getShape().empty() &&
+        llvm::equal(reshape.getOrder(), before.getAxisIds().asArrayRef()) &&
+        after.getAxisIds().asArrayRef().back() == input.recordAxis;
+    unsigned retained = 0;
+    for (auto [axis, extent] : llvm::zip(before.getAxisIds().asArrayRef(), before.getShape().asArrayRef())) {
+      if (retained < after.getAxisIds().size() && after.getAxisIds()[retained] == axis) {
+        removesUnitAxes &= after.getShape()[retained++] == extent;
+      } else removesUnitAxes &= extent == 1;
+    }
+    removesUnitAxes &= retained == after.getAxisIds().size();
+    if (removesUnitAxes) {
+      // The selected reshape erases only coordinates fixed at zero. Retain
+      // the saved record address; no byte permutation or fresh read occurs.
+      auto dropped = [&](const auto &entry) { return !llvm::is_contained(after.getAxisIds().asArrayRef(), entry.first); };
+      llvm::erase_if(input.recordByteStrides, dropped);
+      llvm::erase_if(input.recordOrigins, dropped);
+      bindings[reshape.getResult()] = std::move(input);
+      return mlir::success();
+    }
     if (before.getShape().size() != 1 || after.getShape().size() != 2 ||
         after.getShape().asArrayRef().back() != input.recordElements || input.interleaveRows > 0 ||
         !llvm::equal(reshape.getOrder(), before.getAxisIds().asArrayRef()))
@@ -1446,11 +1466,36 @@ mlir::LogicalResult Emitter::compileAdmit(riscv::LoadOp admit) {
     auto storageType = mlir::cast<riscv::LocalType>(allocation.getType());
     if (storage.kind != Binding::Kind::LocalArray)
       return fail(admit, "record snapshot has no selected local storage binding");
-    if (mlir::failed(emitReadSnapshot(admit, admit.getLeaf(), storage.scalar,
-                                     result->recordPointer,
-                                     storageType.getSizeBytes())))
-      return mlir::failure();
-    result->recordPointer = storage.scalar;
+    auto capacity = riscv::readSnapshotCapacity(admit);
+    if (!capacity) return fail(admit, "record snapshot has no verified size/borrow program");
+    if (storageType.getSizeBytes() > 0) {
+      if (mlir::failed(emitReadSnapshot(admit, admit.getLeaf(), storage.scalar,
+                                      result->recordPointer, storageType.getSizeBytes()))) return mlir::failure();
+      result->recordPointer = storage.scalar;
+    } else {
+      auto size = bindings.lookup(capacity->bytes);
+      auto borrow = capacity->borrow ? bindings.lookup(capacity->borrow) : Binding();
+      if (size.kind != Binding::Kind::Scalar || (capacity->borrow && borrow.kind != Binding::Kind::Scalar))
+        return fail(admit, "dynamic record snapshot size/borrow must be explicit scalar SSA");
+      std::string pointer = fresh("snapshot_source");
+      line("const uint8_t *" + pointer + " = " + result->recordPointer + ";");
+      if (capacity->borrow) { line("if (!(" + borrow.scalar + ")) {"); ++indent; }
+      auto parameters = admit.getLeaf().getParameters();
+      if (admit.getLeaf().getInstruction() == "scalar.read-snapshot") {
+        line("memcpy(" + storage.scalar + ", " + pointer + ", " + size.scalar + ");");
+      } else {
+        const std::string group = "m" + std::to_string(parameters[0] / 8);
+        std::string offset = fresh("snapshot_offset"), count = fresh("snapshot_vl"), payload = fresh("snapshot_bytes");
+        line("for (size_t " + offset + " = 0; " + offset + " < " + size.scalar + ";) {"); ++indent;
+        line("size_t " + count + " = __riscv_vsetvl_e8" + group + "(" + size.scalar + " - " + offset + ");");
+        line("vuint8" + group + "_t " + payload + " = __riscv_vle8_v_u8" + group + "(" + pointer + " + " + offset + ", " + count + ");");
+        line("__riscv_vse8_v_u8" + group + "(" + storage.scalar + " + " + offset + ", " + payload + ", " + count + ");");
+        line(offset + " += " + count + ";"); --indent; line("}");
+      }
+      line(pointer + " = " + storage.scalar + ";");
+      if (capacity->borrow) { --indent; line("}"); }
+      result->recordPointer = pointer;
+    }
   }
   bindings[admit.getResult()] = std::move(*result);
   return mlir::success();

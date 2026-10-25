@@ -1,5 +1,6 @@
 #include "Weft/Dialect/RISCV/IR/Numerics.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
+#include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/DenseMap.h"
@@ -9,6 +10,27 @@
 
 using namespace mlir;
 using namespace weft::riscv;
+
+bool weft::riscv::hasCompleteReductionDomain(RVVWidenDotOp operation) {
+  auto extents = operation.getActiveExtents();
+  unsigned offset = 0;
+  for (Value operand : {Value(operation.getLhs()), Value(operation.getRhs())}) {
+    auto type = cast<ValueType>(operand.getType());
+    if (type.getLayout().getValidity() != "full") {
+      if (extents.size() < offset + type.getShape().size()) return false;
+      for (int64_t axis : operation.getOver()) {
+        auto found = llvm::find(type.getAxisIds().asArrayRef(), axis);
+        if (found == type.getAxisIds().asArrayRef().end()) return false;
+        unsigned position = found - type.getAxisIds().asArrayRef().begin();
+        int64_t expected = type.getShape()[position];
+        if (expected <= 0 || denseIndexBoundsAt(extents[offset + position], operation).lower < uint64_t(expected))
+          return false;
+      }
+    }
+    offset += type.getShape().size();
+  }
+  return true;
+}
 
 namespace {
 Type elementOf(Value value) {

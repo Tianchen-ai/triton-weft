@@ -142,12 +142,33 @@ FailureOr<weft::PhysicalPipeline> schedule(scf::ForOp loop, unsigned depth,
   for (Operation *op : result.consumers)
     for (Value value : externalOperands(op)) result.transportInduction |= value == loop.getInductionVar();
   for (Value value : yield->getOperands()) result.transportInduction |= value == loop.getInductionVar();
+  llvm::append_range(result.ordered, result.producers);
+  llvm::append_range(result.ordered, result.consumers);
+  if (failed(weft::distributePhysicalPipelineStages(result,
+      [](Operation *op) -> FailureOr<SmallVector<Value>> { return externalOperands(op); },
+      [](Operation *op) {
+        bool reads = false;
+        op->walk([&](Operation *nested) {
+          if (auto effects = dyn_cast<MemoryEffectOpInterface>(nested)) {
+            SmallVector<MemoryEffects::EffectInstance> instances;
+            effects.getEffects(instances);
+            reads |= llvm::any_of(instances, [](auto effect) { return isa<MemoryEffects::Read>(effect.getEffect()); });
+          }
+        });
+        return reads;
+      }, [](Value value) {
+        // Keep mask construction with its use. Retaining several versions of
+        // these cheap predicates spends the small AVX-512 k-register bank on
+        // bookkeeping instead of the numerical supply being pipelined.
+        auto vector = dyn_cast<VectorType>(value.getType());
+        return numeric(value.getType()) && !(vector && vector.getElementType().isInteger(1));
+      }))) return failure();
   for (Operation *op : result.producers) {
     if (result.isInvariant(op)) continue;
     for (Value value : op->getResults()) {
       bool crosses = llvm::any_of(value.getUses(), [&](OpOperand &use) {
         auto owner = inBody(use.getOwner(), loop.getBody());
-        return owner == yield || consumers.contains(owner);
+        return owner == yield || (owner && result.stage(owner) > result.stage(op));
       });
       if (!crosses) continue;
       if (!numeric(value.getType()))
@@ -157,8 +178,6 @@ FailureOr<weft::PhysicalPipeline> schedule(scf::ForOp loop, unsigned depth,
   }
   if (result.transported.empty())
     return loop.emitError("x86 pipeline has no iteration-varying numerical supply"), failure();
-  llvm::append_range(result.ordered, result.producers);
-  llvm::append_range(result.ordered, result.consumers);
   return result;
 }
 
@@ -179,16 +198,17 @@ FailureOr<weft::PhysicalPipeline> readSchedule(scf::ForOp loop) {
   for (Operation &op : loop.getBody()->without_terminator()) {
     auto stage = op.getAttrOfType<IntegerAttr>(scheduleStage);
     auto order = op.getAttrOfType<IntegerAttr>(scheduleOrder);
-    if (!stage || (stage.getInt() != 0 && stage.getInt() != result.depth - 1) ||
+    if (!stage || stage.getInt() < 0 || stage.getInt() >= result.depth ||
         !order || order.getInt() < 0 || !positions.try_emplace(order.getInt(), &op).second)
       return op.emitError("x86 pipeline requires a unique order and exact stage for every operation"), failure();
+    result.stages[&op] = stage.getInt();
   }
   for (unsigned position = 0; position < positions.size(); ++position) {
     auto found = positions.find(position);
     if (found == positions.end()) return loop.emitError("x86 pipeline order is not a dense permutation"), failure();
     Operation *op = found->second;
     result.ordered.push_back(op);
-    (op->getAttrOfType<IntegerAttr>(scheduleStage).getInt() ? result.consumers : result.producers).push_back(op);
+    (result.stage(op) == result.depth - 1 ? result.consumers : result.producers).push_back(op);
     if (op->hasAttr(scheduleInvariant)) result.invariants.push_back(op);
   }
   for (Operation *op : result.consumers)
@@ -200,7 +220,7 @@ FailureOr<weft::PhysicalPipeline> readSchedule(scf::ForOp loop) {
     for (Value value : op->getResults())
       if (llvm::any_of(value.getUses(), [&](OpOperand &use) {
             auto owner = inBody(use.getOwner(), loop.getBody());
-            return owner == yield || llvm::is_contained(result.consumers, owner);
+            return owner == yield || (owner && result.stage(owner) > result.stage(op));
           })) result.transported.push_back(value);
   }
   if (failed(weft::verifyPhysicalPipeline(result, [](Operation *op) -> FailureOr<SmallVector<Value>> {
@@ -235,7 +255,7 @@ public:
       if (failed(selected)) { signalPassFailure(); return; }
       loop->setAttr(scheduleDepth, b.getI64IntegerAttr(depth));
       for (auto [position, op] : llvm::enumerate(selected->ordered)) {
-        op->setAttr(scheduleStage, b.getI64IntegerAttr(selected->isProducer(op) ? 0 : depth - 1));
+        op->setAttr(scheduleStage, b.getI64IntegerAttr(selected->stage(op)));
         op->setAttr(scheduleOrder, b.getI64IntegerAttr(position));
         if (selected->isInvariant(op)) op->setAttr(scheduleInvariant, b.getUnitAttr());
       }
@@ -293,6 +313,7 @@ public:
       records.push_back(b.getDictionaryAttr({
           b.getNamedAttr("depth", b.getI64IntegerAttr(depth)),
           b.getNamedAttr("saved_values", expanded->steady->getAttr("weft.pipeline.version_values")),
+          b.getNamedAttr("stage_operations", expanded->steady->getAttr("weft.pipeline.stage_operations")),
           b.getNamedAttr("vector_peak", b.getI64IntegerAttr(peak.vectors)),
           b.getNamedAttr("predicate_peak", b.getI64IntegerAttr(peak.predicates))}));
       function->setAttr("weft.x86.pipeline_schedule", b.getArrayAttr(records));
