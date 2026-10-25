@@ -982,11 +982,15 @@ private:
         return emit(dimension + 1, offset);
       }
       Value entry = arith::AddIOp::create(b, op.getLoc(), base, linear);
+      SmallVector<Value> active(op.getActiveExtents());
+      for (int64_t position : positions)
+        active[position] = riscv_internal::activeNumericSubrange(
+            b, op.getLoc(), active[position], coordinates[position], 1);
       auto loaded = riscv::RVVUnitEntryWindowLoadOp::create(b, op.getLoc(), piece, op.getSource(), entry,
           op.getSourceAxis(), op.getEntryAxesAttr(), singletonEntries, op.getPayloadAxis(),
           op.getPayloadExtent(), op.getEntryStride(), op.getAccess(),
           riscv_internal::leaf(b, "rvv", "unit-entry-window-load", "rvv.unit-entry-window-load",
-                              "rvv.unit-entry-window-load", 0, piece.getLayout().getRegisterGroups()));
+                              "rvv.unit-entry-window-load", 0, piece.getLayout().getRegisterGroups()), active);
       riscv_internal::copyOrigin(op, loaded);
       return store(loaded, *output, type, coordinates, piece, op);
     };

@@ -47,14 +47,75 @@ public:
     } else if (auto extract = dyn_cast<riscv::ExtractOp>(op)) {
       auto incoming = get(extract.getInput());
       if (failed(incoming)) return failure();
+      auto input = cast<riscv::ValueType>(extract.getInput().getType());
+      DenseMap<int64_t, Value> bounds;
+      auto retain = [&](int64_t axis, Value bound) {
+        auto [entry, inserted] = bounds.try_emplace(axis, bound);
+        if (!inserted)
+          entry->second = b.createOrFold<arith::MinUIOp>(op->getLoc(), entry->second, bound);
+      };
       unsigned cursor = 0;
       for (auto [axis, selector] : llvm::enumerate(extract.getSelectors())) {
         auto kind = cast<StringAttr>(selector).getValue();
-        if (kind == "all") { result.push_back((*incoming)[axis]); continue; }
+        if (kind == "all") { retain(input.getAxisIds()[axis], (*incoming)[axis]); continue; }
         Value coordinate = extract.getIndices()[cursor++];
         if (kind == "index") continue;
+        if (kind == "gather") {
+          auto indexType = dyn_cast<riscv::ValueType>(coordinate.getType());
+          auto range = riscv_internal::integerRange(coordinate);
+          APInt extent;
+          // Arbitrary gather holes cannot be represented by rectangular bounds.
+          // Preserve the index domain only when every index is in the saved
+          // source domain, not merely in its nominal storage capacity.
+          if (!indexType || !range || range->minimum.isNegative() ||
+              !matchPattern((*incoming)[axis], m_ConstantInt(&extent)) ||
+              extent.isNegative() ||
+              llvm::APSInt::compareValues(range->maximum, llvm::APSInt(extent, true)) >= 0)
+            return failure();
+          auto indices = get(coordinate);
+          if (failed(indices)) return failure();
+          for (auto [id, bound] : llvm::zip(indexType.getAxisIds().asArrayRef(), *indices))
+            retain(id, bound);
+          continue;
+        }
         if (kind != "domain" || !isa<riscv::PointType>(coordinate.getType())) return failure();
-        result.push_back(b.createOrFold<riscv::PointActiveOp>(op->getLoc(), b.getIndexType(), coordinate));
+        retain(input.getAxisIds()[axis],
+               b.createOrFold<riscv::PointActiveOp>(op->getLoc(), b.getIndexType(), coordinate));
+      }
+      for (int64_t axis : type.getAxisIds().asArrayRef()) {
+        Value bound = bounds.lookup(axis);
+        if (!bound) return failure();
+        result.push_back(bound);
+      }
+    } else if (auto window = dyn_cast<riscv::RVVUnitEntryWindowLoadOp>(op)) {
+      if (window.getActiveExtents().size() != type.getShape().size()) return failure();
+      result.assign(window.getActiveExtents().begin(), window.getActiveExtents().end());
+    } else if (auto window = dyn_cast<riscv::RVVBitmaskWindowLoadOp>(op)) {
+      auto input = window.getField().getType();
+      auto incoming = get(window.getField());
+      if (failed(incoming) || window.getWindowAxes().size() != 1 ||
+          window.getWindowAxes().front() != window.getSourceAxis())
+        return failure();
+      auto sourceAxes = input.getAxisIds().asArrayRef();
+      auto sourceAxis = llvm::find(sourceAxes, window.getSourceAxis());
+      if (sourceAxis == sourceAxes.end()) return failure();
+      int64_t capacity = input.getShape()[sourceAxis - sourceAxes.begin()];
+      if (capacity <= 0) return failure();
+      Value base = window.getByteBase();
+      if (!base.getType().isIndex())
+        base = riscv::CastOp::create(b, op->getLoc(), b.getIndexType(), base, unselectedLeaf(b));
+      Value maxBytes = arith::ConstantIndexOp::create(b, op->getLoc(), capacity / 8 + (capacity % 8 != 0));
+      base = b.createOrFold<arith::MinUIOp>(op->getLoc(), base, maxBytes);
+      Value byteBits = arith::ConstantIndexOp::create(b, op->getLoc(), 8);
+      Value offset = b.createOrFold<arith::MulIOp>(op->getLoc(), base, byteBits);
+      for (auto [position, axis] : llvm::enumerate(type.getAxisIds().asArrayRef())) {
+        auto ids = input.getAxisIds().asArrayRef();
+        auto found = llvm::find(ids, axis);
+        if (found == ids.end()) return failure();
+        Value bound = (*incoming)[found - ids.begin()];
+        if (axis == window.getSourceAxis())
+          bound = activeNumericSubrange(b, op->getLoc(), bound, offset, type.getShape()[position]);
+        result.push_back(bound);
       }
     } else if (auto field = dyn_cast<riscv::FieldOp>(op)) {
       auto ownerAxes = logicalAxes(field.getOwner().getType());
@@ -109,7 +170,8 @@ public:
       if (failed(extents)) return failure();
       result = *extents;
     } else if (isa<riscv::CastOp, riscv::WidenOp, riscv::NarrowOp, riscv::BitcastOp,
-                   riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp>(op)) {
+                   riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp,
+                   riscv::RVVAxisBroadcastOp>(op)) {
       SmallVector<std::pair<riscv::ValueType, SmallVector<Value>>> sources;
       for (Value operand : op->getOperands()) {
         auto shaped = dyn_cast<riscv::ValueType>(operand.getType());
@@ -125,9 +187,18 @@ public:
           auto found = llvm::find(ids, axis);
           if (found == ids.end()) continue;
           size_t index = found - ids.begin();
-          if (input.getShape()[index] == 1 && type.getShape()[position] != 1) continue;
-          bound = bound ? b.createOrFold<arith::MinUIOp>(op->getLoc(), bound, extents[index]) : extents[index];
+          Value incoming = extents[index];
+          if (input.getShape()[index] == 1 && type.getShape()[position] != 1) {
+            if (type.getShape()[position] <= 0) return failure();
+            Value zero = arith::ConstantIndexOp::create(b, op->getLoc(), 0);
+            Value maximum = arith::ConstantIndexOp::create(b, op->getLoc(), type.getShape()[position]);
+            Value active = b.createOrFold<arith::CmpIOp>(op->getLoc(), arith::CmpIPredicate::ne, incoming, zero);
+            incoming = b.createOrFold<arith::SelectOp>(op->getLoc(), active, maximum, zero);
+          }
+          bound = bound ? b.createOrFold<arith::MinUIOp>(op->getLoc(), bound, incoming) : incoming;
         }
+        if (!bound && isa<riscv::RVVAxisBroadcastOp>(op) && type.getShape()[position] > 0)
+          bound = arith::ConstantIndexOp::create(b, op->getLoc(), type.getShape()[position]);
         if (!bound) return failure();
         result.push_back(bound);
       }
@@ -592,6 +663,14 @@ public:
 
 FailureOr<SmallVector<Value>> weft::riscv_internal::activeNumericExtents(IRRewriter &b, Value value) {
   return ActiveExtents(b).get(value);
+}
+
+Value weft::riscv_internal::activeNumericSubrange(IRRewriter &b, Location loc,
+    Value bound, Value offset, int64_t capacity) {
+  Value start = b.createOrFold<arith::MinUIOp>(loc, offset, bound);
+  Value remaining = b.createOrFold<arith::SubIOp>(loc, bound, start);
+  Value maximum = arith::ConstantIndexOp::create(b, loc, capacity);
+  return b.createOrFold<arith::MinUIOp>(loc, remaining, maximum);
 }
 
 LogicalResult weft::riscv_internal::propagateNumericValidity(IRRewriter &b,

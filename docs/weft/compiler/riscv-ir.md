@@ -218,6 +218,11 @@ leaf。entry axes必须是source中不存在的新逻辑轴；payload axis可以
 别名、非unit系数或不闭合的layout必须保留为typed indexed edge，terminal emitter不能自行把
 indexed access改写成unit load。
 
+连续窗口保存每个结果轴的 `active_extents` SSA，来自被替换 gather 的有效域。
+整数范围证明必须覆盖原数值快照的活动范围，才能将 gather 的 index 域解释为矩形；
+任意索引孔洞不能用 nominal shape 替代。广播保留已有轴的活动范围，新轴只复制有效元素。
+窗口分片对这些范围做有界投影，后续 contraction 直接消费它们，不从已删除的索引链重建。
+
 对一个已经闭合、只有一个raw byte window的grouped/layered load，physical parameter可以把
 exact leaf选为`scalar-prime + vector-load`：先对该window中最后一个active byte执行一次有序的
 scalar byte read，再执行原来已经选定的vector load。这个选择直接写在load op的`LeafAttr`中；

@@ -9,6 +9,7 @@
 #include "ContractionSupply.h"
 #include "FieldStores.h"
 #include "FieldReads.h"
+#include "NumericalValidity.h"
 
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
@@ -4358,6 +4359,12 @@ public:
               directWindow->entryExtents,
               result.getAxisIds().asArrayRef().back(),
               result.getShape().asArrayRef().back())) {
+        auto active = riscv_internal::activeNumericExtents(rewriter, extract.getResult());
+        if (mlir::failed(active)) {
+          extract.emitError("unit entry window requires a proven rectangular active domain");
+          failed = true;
+          continue;
+        }
         auto window = riscv::RVVUnitEntryWindowLoadOp::create(rewriter,
             extract.getLoc(), result, extract.getInput(), directWindow->base,
             source.getAxisIds()[gatherDimension],
@@ -4370,7 +4377,7 @@ public:
             riscv_internal::leaf(
                 builder, "rvv", "unit-entry-window-load",
                 "rvv.unit-entry-window-load", "rvv.unit-entry-window-load", 0,
-                result.getLayout().getRegisterGroups()));
+                result.getLayout().getRegisterGroups()), *active);
         riscv_internal::copyOrigin(extract, window);
         mlir::Value fullIndices = gatherIndex;
         extract.getResult().replaceAllUsesWith(window.getResult());
@@ -4411,6 +4418,12 @@ public:
               result, retainedAxisCount, unitWindow->entryAxes,
               unitWindow->entryExtents, plan->payloadAxis,
               plan->payloadExtent)) {
+        auto active = riscv_internal::activeNumericExtents(rewriter, extract.getResult());
+        if (mlir::failed(active)) {
+          extract.emitError("unit entry window requires a proven rectangular active domain");
+          failed = true;
+          continue;
+        }
         auto window = riscv::RVVUnitEntryWindowLoadOp::create(rewriter,
             extract.getLoc(), result, extract.getInput(), unitWindow->base,
             source.getAxisIds()[gatherDimension],
@@ -4421,7 +4434,7 @@ public:
             riscv_internal::leaf(
                 builder, "rvv", "unit-entry-window-load",
                 "rvv.unit-entry-window-load", "rvv.unit-entry-window-load", 0,
-                result.getLayout().getRegisterGroups()));
+                result.getLayout().getRegisterGroups()), *active);
         riscv_internal::copyOrigin(extract, window);
         mlir::Value fullIndices = gatherIndex;
         extract.getResult().replaceAllUsesWith(window.getResult());

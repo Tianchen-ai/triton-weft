@@ -5068,6 +5068,14 @@ mlir::LogicalResult RVVIndexedEntryLoadOp::verify() {
 mlir::LogicalResult RVVUnitEntryWindowLoadOp::verify() {
   ValueType source = getSource().getType();
   ValueType result = getResult().getType();
+  if (getActiveExtents().size() != result.getShape().size())
+    return emitOpError("unit entry window requires the saved active extent of every result axis");
+  for (auto [bound, extent] : llvm::zip(getActiveExtents(), result.getShape().asArrayRef())) {
+    llvm::APInt constant;
+    if (mlir::matchPattern(bound, mlir::m_ConstantInt(&constant)) &&
+        (constant.isNegative() || (extent > 0 && constant.getLimitedValue() > static_cast<uint64_t>(extent))))
+      return emitOpError("unit entry window active extent is outside its logical capacity");
+  }
   auto field = getSource().getDefiningOp<FieldOp>();
   auto baseValue = mlir::dyn_cast<ValueType>(getEntryBase().getType());
   mlir::Type baseElement = baseValue ? baseValue.getElementType()

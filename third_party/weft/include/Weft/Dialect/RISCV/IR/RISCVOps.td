@@ -1578,7 +1578,8 @@ def WeftRISCV_RVVUnitEntryWindowLoadOp
                        I64Attr:$payload_extent,
                        I64Attr:$entry_stride,
                        WeftRISCV_AccessAttr:$access,
-                       WeftRISCV_LeafAttr:$leaf);
+                       WeftRISCV_LeafAttr:$leaf,
+                       Variadic<Index>:$active_extents);
   let results = (outs WeftRISCV_ValueType:$result);
   let hasVerifier = 1;
 }

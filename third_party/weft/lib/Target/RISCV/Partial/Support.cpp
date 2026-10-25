@@ -1,6 +1,7 @@
 #include "Support.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "../LocalMemory.h"
+#include "../NumericalValidity.h"
 
 namespace weft::riscv_partial {
 
@@ -911,6 +912,13 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
     } else {
       return mlir::failure();
     }
+    llvm::SmallVector<mlir::Value> active(load.getActiveExtents());
+    auto resultAxes = resultType.getAxisIds().asArrayRef();
+    auto position = llvm::find(resultAxes, axis) - resultAxes.begin();
+    auto width = mlir::arith::ConstantIndexOp::create(rewriter, load.getLoc(), windowExtent);
+    auto offset = rewriter.createOrFold<mlir::arith::MulIOp>(load.getLoc(), windowIndex, width);
+    active[position] = riscv_internal::activeNumericSubrange(
+        rewriter, load.getLoc(), active[position], offset, windowExtent);
     auto cloned = riscv::RVVUnitEntryWindowLoadOp::create(rewriter,
         load.getLoc(), resultType, load.getSource(), windowBase,
         load.getSourceAxis(), rewriter.getDenseI64ArrayAttr(axes),
@@ -919,7 +927,7 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
         riscv_internal::leaf(
             rewriter, "rvv", "unit-entry-window-load",
             "rvv.unit-entry-window-load", "rvv.unit-entry-window-load", 0,
-            resultType.getLayout().getRegisterGroups()));
+            resultType.getLayout().getRegisterGroups()), active);
     return remember(cloned.getResult());
   }
 
