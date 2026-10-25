@@ -3893,7 +3893,7 @@ mlir::LogicalResult LoadOp::verify() {
         !exactReadSnapshotLeaf(*this, getLeaf()))
       return emitOpError(
           "encoded read snapshot requires a checked complete contiguous record range and a valid borrow proof");
-  } else if (getSnapshotMayBorrow() || getLeaf().getInstruction().ends_with("read-snapshot")) {
+  } else if (getSnapshotBorrow() || getLeaf().getInstruction().ends_with("read-snapshot")) {
     return emitOpError("record snapshot leaf requires explicit local storage");
   }
   return verifyLeafOperation(*this);

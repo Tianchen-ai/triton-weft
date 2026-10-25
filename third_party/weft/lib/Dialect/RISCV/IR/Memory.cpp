@@ -339,7 +339,7 @@ StorageOrigins weft::riscv::storageOrigins(Value root) {
       continue;
     }
     if (auto load = value.getDefiningOp<LoadOp>();
-        load && load.getSnapshotStorage() && load.getSnapshotMayBorrow())
+        load && load.getSnapshotStorage() && load.getSnapshotBorrow())
       pending.push_back(load.getRegion());
     if (Value source = borrowedStorage(value)) {
       pending.push_back(source);
@@ -632,18 +632,17 @@ std::optional<ReadSnapshotCapacity> weft::riscv::readSnapshotCapacity(LoadOp loa
   if (!load.getSnapshotStorage()) return std::nullopt;
   auto allocation = load.getSnapshotStorage().getDefiningOp<LocalAllocOp>();
   if (!allocation || !isContiguousRecordRegion(load.getRegion())) return std::nullopt;
-  Value capacity = allocation.getSizeBytes(), borrow;
+  Value capacity = allocation.getSizeBytes(), borrow = load.getSnapshotBorrow();
+  if (borrow && !provesSnapshotBorrow(borrow, load.getRegion(), load)) return std::nullopt;
   if (auto maximum = capacity.getDefiningOp<arith::MaxUIOp>()) {
     auto one = getConstantIntValue(maximum.getRhs());
     if (!one || *one != 1) return std::nullopt;
     capacity = maximum.getLhs();
   }
-  if (load.getSnapshotMayBorrow()) {
+  if (borrow && allocation.getResult().getType().getSizeBytes() < 0) {
     auto select = capacity.getDefiningOp<arith::SelectOp>();
     auto zero = select ? getConstantIntValue(select.getTrueValue()) : std::nullopt;
-    if (!select || !zero || *zero ||
-        !provesSnapshotBorrow(select.getCondition(), load.getRegion(), load)) return std::nullopt;
-    borrow = select.getCondition();
+    if (!select || !zero || *zero || select.getCondition() != borrow) return std::nullopt;
     capacity = select.getFalseValue();
   }
   auto memory = load.getRegion().getType();
@@ -652,7 +651,7 @@ std::optional<ReadSnapshotCapacity> weft::riscv::readSnapshotCapacity(LoadOp loa
     auto constant = getConstantIntValue(capacity);
     auto bound = memory.getShape().size() == 1 ? denseDescriptorExtent(load.getRegion(), 0) : OpFoldResult();
     auto fixed = dyn_cast_if_present<IntegerAttr>(bound.dyn_cast<Attribute>());
-    if (borrow || !constant || memory.getShape().size() != 1 ||
+    if (!constant || memory.getShape().size() != 1 ||
         !fixed || fixed.getInt() != memory.getShape()[0] ||
         memory.getShape()[0] <= 0 || memory.getShape()[0] % memory.getElements() ||
         memory.getShape()[0] / memory.getElements() > std::numeric_limits<int64_t>::max() / (memory.getStorageBits() / 8) ||

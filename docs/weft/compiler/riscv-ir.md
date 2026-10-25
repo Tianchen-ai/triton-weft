@@ -277,6 +277,9 @@ encoded `load` 可携带显式 `snapshot_storage` operand，指向 schema 为 `r
 与 extract 继续投影同一个 Value，但不再重新读取可能已被覆盖的 pinned bytes。allocation、
 byte size、alignment、owner/lifetime 和复制的 read/write effects 都必须在 IR 中闭合；
 没有配套存储的 snapshot leaf 或跨干扰写入的无快照 encoded load 均非法。
+可选的 `snapshot_borrow` SSA 谓词必须证明完整输入存储与所有干扰写入不重叠，并且
+读取结果的存储别名没有逃逸该作用域。谓词为真时借用原 bytes，否则在原读取点复制；
+固定容量仍使用固定 allocation，动态容量由同一谓词控制。来源分析保留两种可能来源。
 静态连续 dense table 的 `dense_snapshot` 是显式 Read/Write transfer：消费原 descriptor
 和精确大小的私有 byte allocation，生成同一 logical table 的只读 local descriptor。
 其 leaf 只复制已确定的字节数，不选择 layout 或遍历结构。encoded staging 的私有副本

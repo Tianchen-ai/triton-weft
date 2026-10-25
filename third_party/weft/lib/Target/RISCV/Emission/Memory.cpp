@@ -1468,14 +1468,26 @@ mlir::LogicalResult Emitter::compileAdmit(riscv::LoadOp admit) {
       return fail(admit, "record snapshot has no selected local storage binding");
     auto capacity = riscv::readSnapshotCapacity(admit);
     if (!capacity) return fail(admit, "record snapshot has no verified size/borrow program");
+    auto borrow = capacity->borrow ? bindings.lookup(capacity->borrow) : Binding();
+    if (capacity->borrow && borrow.kind != Binding::Kind::Scalar)
+      return fail(admit, "record snapshot borrow must be explicit scalar SSA");
     if (storageType.getSizeBytes() > 0) {
+      std::string pointer;
+      if (capacity->borrow) {
+        pointer = fresh("snapshot_source");
+        line("const uint8_t *" + pointer + " = " + result->recordPointer + ";");
+        line("if (!(" + borrow.scalar + ")) {"); ++indent;
+      }
       if (mlir::failed(emitReadSnapshot(admit, admit.getLeaf(), storage.scalar,
                                       result->recordPointer, storageType.getSizeBytes()))) return mlir::failure();
-      result->recordPointer = storage.scalar;
+      if (capacity->borrow) {
+        line(pointer + " = " + storage.scalar + ";");
+        --indent; line("}");
+      }
+      result->recordPointer = capacity->borrow ? pointer : storage.scalar;
     } else {
       auto size = bindings.lookup(capacity->bytes);
-      auto borrow = capacity->borrow ? bindings.lookup(capacity->borrow) : Binding();
-      if (size.kind != Binding::Kind::Scalar || (capacity->borrow && borrow.kind != Binding::Kind::Scalar))
+      if (size.kind != Binding::Kind::Scalar)
         return fail(admit, "dynamic record snapshot size/borrow must be explicit scalar SSA");
       std::string pointer = fresh("snapshot_source");
       line("const uint8_t *" + pointer + " = " + result->recordPointer + ";");

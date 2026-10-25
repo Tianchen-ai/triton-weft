@@ -1199,6 +1199,8 @@ private:
       }
       addAccess(attrs);
       addLeaf(attrs);
+      attrs.push_back(builder.getNamedAttr("operandSegmentSizes",
+                                          builder.getDenseI32ArrayAttr({1, 0, 0})));
       targetName = riscv::LoadOp::getOperationName();
     } else if (auto commit = mlir::dyn_cast<kernel::CommitOp>(source)) {
       // A whole author View is still an explicit memory region. Normalize its

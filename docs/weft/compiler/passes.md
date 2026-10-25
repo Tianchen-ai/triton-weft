@@ -1483,9 +1483,17 @@ shape、axes 和 Level 归属保持不变。私有 local writes 不与 pinned Vi
 已知只执行一次的 physical loop 保留其原供应位置；外提不能减少动态执行次数，反而
 会延长解码后数值的驻留。该选择不删除作者 Level 或改写其 birth/handoff。
 
-快照要求静态、一维、unit-stride、完整且非 interleaved 的 record 区间；未满足的干扰读取
-必须拒绝。容量和 lifetime 由 `LocalType` 承载，资源 pass 核算分配；没有干扰的读取不增加
-本地复制。final verifier 拒绝仍跨干扰写入但没有快照的 encoded load。
+快照要求连续、完整且非 interleaved 的 record 区间；未满足的干扰读取必须拒绝。
+容量和 lifetime 由 `LocalType` 承载，资源 pass 核算分配；动态容量通过显式 size 和容量检查闭合。
+没有干扰的读取不增加本地复制。final verifier 拒绝仍跨干扰写入但没有快照的 encoded load。
+完整 pinned storage 的不重叠证明可以作为 `load.snapshot_borrow` SSA operand；verifier
+同时检查实际干扰写入和读取结果的作用域，来源分析保留原存储与私有快照两种可能来源。
+该证明只控制是否复制，不改变作者读取点、Value 生命周期或 ABI。预算内固定容量继续用
+固定分配，不能为了可借用而改成逐 record 的 VLA；动态分配才按同一个谓词选择所需容量。
+固定快照若直接供给向量读取，保留私有存储提供的无别名供给关系：C 工具链无法从条件
+指针恢复完整的范围证明，借用会额外限制向量读取与写入之间的调度。此项原生成本尚不能
+闭合时保留已有复制实现；仅有显式标量投影的固定快照才启用借用。分析沿共同存储别名边
+检查实际 Read effect 和物理结果表示，不按 Encoding、算子或机器名称决定。
 copy leaf 在 target 合法的 m1/m2/m4 中按精确 transfer 次数与 scratch 占用选择，并记录
 全部所需参数。它完成显式 exact-window transfer，不把热路径交给带未知向量 clobber
 的库函数调用。

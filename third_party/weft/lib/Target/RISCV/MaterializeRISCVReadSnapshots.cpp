@@ -27,6 +27,35 @@ int64_t ownerDomain(mlir::Operation *operation) {
   return 0;
 }
 
+// A fixed private record also establishes an alias-independent supply for its
+// vector consumers. The C toolchain cannot carry a conditional disjointness
+// proof through a selected pointer: borrowing can serialize those vector loads
+// with output stores and prevent issue scheduling. Retain that existing local
+// supply until its native ordering cost can be represented. Scalar projections
+// already freeze their values in explicit SSA and do not need this carrier.
+bool hasVectorStorageConsumer(mlir::Value value) {
+  llvm::SmallVector<mlir::Value> pending{value};
+  llvm::SmallPtrSet<void *, 32> visited;
+  while (!pending.empty()) {
+    mlir::Value current = pending.pop_back_val();
+    if (!visited.insert(current.getAsOpaquePointer()).second) continue;
+    if (visited.size() > 256) return true;
+    for (mlir::OpOperand &use : current.getUses()) {
+      auto effects = mlir::dyn_cast<mlir::MemoryEffectOpInterface>(use.getOwner());
+      if (effects) {
+        if (effects.getEffectOnValue<mlir::MemoryEffects::Read>(current) &&
+            llvm::any_of(use.getOwner()->getResultTypes(), [](mlir::Type type) {
+              auto value = mlir::dyn_cast<riscv::ValueType>(type);
+              return mlir::isa<riscv::FragmentType>(type) ||
+                     (value && value.getLayout().getCarrier() == "rvv");
+            })) return true;
+      }
+      riscv::appendStorageAliases(use, pending);
+    }
+  }
+  return false;
+}
+
 class MaterializeRISCVReadSnapshotsPass
     : public mlir::PassWrapper<MaterializeRISCVReadSnapshotsPass,
                                mlir::OperationPass<mlir::ModuleOp>> {
@@ -80,15 +109,15 @@ public:
         }
         bytes = extent / memory.getElements() * recordBytes;
       }
-      // Retain the bounded static snapshot when it already fits. A borrow
-      // check must not replace this known local transfer with a variable-size
-      // allocation, capacity check and conditional pointer on every record.
+      // A borrow proof controls the transfer, independently of storage size.
+      // Fixed snapshots remain fixed allocations even when borrowing is legal.
       const bool fixedSnapshot = bytes > 0 && bytes <= kernel.getTarget().getMaxPrivateStackBytes();
       mlir::Value borrow;
       auto writes = riscv::snapshotInterferingStorage(load.getRegion(), load);
       mlir::Value source = riscv::fullArgumentView(load.getRegion());
       llvm::SmallVector<mlir::Value> destinations;
-      if (!fixedSnapshot && mlir::succeeded(writes) && source &&
+      if ((!fixedSnapshot || !hasVectorStorageConsumer(load.getResult())) &&
+          mlir::succeeded(writes) && source &&
           riscv::storageAliasesRemainInScope(load.getResult(), load->getBlock())) {
         for (auto write : *writes) {
           auto full = riscv::fullArgumentView(write);
@@ -107,7 +136,7 @@ public:
         rewriter.setInsertionPoint(load);
         borrow = borrow ? mlir::Value(mlir::arith::AndIOp::create(rewriter, load.getLoc(), borrow, disjoint)) : disjoint;
       }
-      if (borrow) bytes = -1;
+      if (borrow && !fixedSnapshot) bytes = -1;
       if (bytes > kernel.getTarget().getMaxPrivateStackBytes()) {
         load.emitError("encoded read snapshot exceeds target local storage");
         failed = true;
@@ -145,7 +174,7 @@ public:
           load.getLoc(), storageType, byteCount);
       riscv_internal::copyOrigin(load, storage);
       load.getSnapshotStorageMutable().assign(storage.getResult());
-      load.setSnapshotMayBorrow(static_cast<bool>(borrow));
+      load.getSnapshotBorrowMutable().assign(borrow ? mlir::ValueRange{borrow} : mlir::ValueRange{});
       load.setLeafAttr(
           riscv_internal::readSnapshotLeaf(rewriter, kernel.getTarget(), bytes > 0 ? bytes : kernel.getTarget().getVlenBits() / 8));
     });

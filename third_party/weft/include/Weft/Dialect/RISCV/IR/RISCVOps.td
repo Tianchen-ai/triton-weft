@@ -1310,13 +1310,18 @@ def WeftRISCV_ReshapeOp : WeftRISCV_TerminalOp<"reshape", [Pure]> {
 }
 
 def WeftRISCV_LoadOp : WeftRISCV_LeafOp<"load", [
-    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+    AttrSizedOperandSegments, DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins WeftRISCV_MemDescType:$region,
                        Optional<WeftRISCV_LocalType>:$snapshot_storage,
+                       Optional<I1>:$snapshot_borrow,
                        WeftRISCV_AccessAttr:$access,
-                       WeftRISCV_LeafAttr:$leaf,
-                       DefaultValuedAttr<BoolAttr, "false">:$snapshot_may_borrow);
+                       WeftRISCV_LeafAttr:$leaf);
   let results = (outs AnyType:$result);
+  let builders = [OpBuilder<(ins "::mlir::Type":$result,
+      "::mlir::Value":$region, "::mlir::Value":$snapshot_storage,
+      "::weft::riscv::AccessAttr":$access, "::weft::riscv::LeafAttr":$leaf), [{
+    build($_builder, $_state, result, region, snapshot_storage, ::mlir::Value{}, access, leaf);
+  }]>];
   let hasVerifier = 1;
 }
 
