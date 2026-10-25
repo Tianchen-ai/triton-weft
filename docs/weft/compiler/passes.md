@@ -143,6 +143,8 @@ generic unroll 之前读取未复制的 contraction/reduction use-def，冻结 c
 出现的 grouped/layered issue relation 再交给同一个幂等 sharing owner，物化为共享
 raw-window load 与显式 layer decode。exact leaf
 完成后，resource pass 才能把 leaf temporary 与 SSA live interval 一起计入峰值。
+`UnrollRISCVLevels` 形成的剩余循环和尾循环记录禁止系统再次展开；native 工具链仍负责
+机器调度与寄存器分配，但不能把已经按所选因子验证的 issue 窗口再乘大。
 
 整块 stage 的多轴投影在 ordered loop 闭合后、contraction 物化前确定供给，和后续
 Value materializer 复用同一实现。可证明没有干扰写入时，staged descriptor 保留原 birth，
@@ -220,6 +222,11 @@ free-axis 对齐和完整分组范围，再展开为闭合 primitive 内的 type
 不被伪装成 encoded field，也不要求作者为不同物理载体改写 pair-sum 算法。
 
 分组有效性是各原始有效项的逻辑 OR，不能把物理补零后的完整寄存器当作全部有效。
+整数 contraction 的无效输入在同一物理数值域内显式补零；原 contraction、累加类型、
+缩并轴和 engine 约束保持不变，不展开成可能在窄输入位宽回绕的乘法。
+结果有效域来自双方谓词在共同逻辑轴上的交集，再对缩并轴取 OR，保留所有自由轴；
+全无效的输出不因补零而成为有效数值。浮点的零乘无穷大不具有这个中性项合同，
+没有独立实现的显式谓词浮点 contraction 继续明确拒绝。
 独立 grouped program 显式携带该谓词，并在每个乘积进入累加前补 identity；
 `NumericalValidity` 沿提取、转换、pointwise、普通 `for/while/if`、Level 和 helper 返回传递对应的
 物理 SSA 谓词，最终作用于 memory effect。谓词随实际执行的控制路径传递，不重新读取
@@ -244,6 +251,8 @@ shaped store 物化为有界坐标遍历和受谓词控制的真实写入，不�
 实现：后续 Value program 新产生的 RVV 转换也必须显式形成合法 narrowing 链。
 signless Boolean predicate 转为数值时物化同坐标的 0/1 select。Encoding `ui1` 的普通
 数值表示已是规范的 unsigned byte 0/1，沿用 zero extension，避免 byte→mask→数值的往返。
+已规范符号扩展到 byte carrier 的有限有符号整数扩大到 i8 时保留原 carrier；转成 u8
+只改变机器类型解释，不发明不存在的 4-bit RVV 扩宽指令。逻辑宽度与机器 SEW 分开判断。
 真正的 packed predicate register 由专门 op 与 ingress/egress 明确表达，不能按 byte
 向量 reinterpret。新值进入正常 leaf、生命周期与资源分析，terminal 不补造转换程序。
 后续 bitplane、signed-mask reduction 和 masked-negate 选择共用该 0/1 关系，接受转换

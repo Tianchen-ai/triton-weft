@@ -131,8 +131,14 @@ private:
           name == "weft.riscv.direction" || (!keepLevel && name == "weft.riscv.level")) continue;
       target->setAttr(name, attribute.getValue());
     }
-    if (mlir::isa<mlir::scf::ForOp>(target))
+    if (mlir::isa<mlir::scf::ForOp>(target)) {
       target->setAttr("weft.riscv.direction", b.getStringAttr(counted ? "ascending" : space.descending ? "descending" : "ascending"));
+      // This body already contains the selected number of physical issues.
+      // A second native unroll would multiply their live operands after Weft's
+      // resource closure. Keep machine scheduling and allocation available,
+      // while preserving the explicit bounded issue window.
+      target->setAttr("weft.riscv.system_unroll", b.getStringAttr("disable"));
+    }
   }
 
   llvm::SmallVector<mlir::Value> iteration(mlir::Value coordinate,
