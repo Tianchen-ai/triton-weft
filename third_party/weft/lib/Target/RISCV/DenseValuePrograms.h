@@ -8,6 +8,7 @@ namespace weft::riscv_internal {
 // Strip-mine a closed numerical producer graph at its existing store/reduce
 // boundary. The resulting loops and storage are ordinary Physical IR.
 mlir::LogicalResult materializeDenseValuePrograms(mlir::ModuleOp module);
+mlir::LogicalResult materializeSharedDomainProjections(mlir::ModuleOp module);
 mlir::LogicalResult materializeDenseValueProgram(mlir::Operation *root);
 }
 

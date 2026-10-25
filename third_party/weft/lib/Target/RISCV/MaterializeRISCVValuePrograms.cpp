@@ -37,6 +37,11 @@ class ValuePrograms {
 public:
   ValuePrograms(ModuleOp module) : module(module), b(module.getContext()) {}
 
+  LogicalResult projectSharedValues() {
+    nextIdentity = riscv_internal::lastLocalIdentity(module);
+    return projectSharedDomains();
+  }
+
   LogicalResult projectLocalSlices() {
     SmallVector<riscv::RVVIssueSliceOp> slices;
     module.walk([&](riscv::RVVIssueSliceOp slice) { slices.push_back(slice); });
@@ -89,6 +94,10 @@ public:
     collectPointwisePrograms(operations);
     for (Operation *op : operations) {
       if (delayed.contains(op)) continue;
+      if (auto load = dyn_cast<riscv::LoadOp>(op); load && load.getResult().use_empty()) {
+        b.eraseOp(load);
+        continue;
+      }
       if (isa<riscv::PointerLoadOp, riscv::PointerStoreOp>(op)) {
         Value domain = op->getNumResults() ? op->getResult(0) : op->getOperand(3);
         if (isa<riscv::ValueType>(domain.getType()) &&
@@ -687,6 +696,7 @@ private:
   LogicalResult projectSharedDomains() {
     DenseMap<Value, SmallVector<riscv::ExtractOp>> consumers;
     SmallVector<Value> sources;
+    SmallVector<std::pair<Operation *, Value>> completed;
     module.walk([&](riscv::ExtractOp extract) {
       auto input = extract.getInput().getType();
       auto output = dyn_cast<riscv::ValueType>(extract.getResult().getType());
@@ -748,7 +758,25 @@ private:
         auto bounds = riscv_internal::activeNumericExtents(b, source);
         if (failed(bounds)) return producer->emitError("shared projection lost its saved active domain");
         active = *bounds;
-        auto saved = sourceView(source, producer, consumers.lookup(source).front());
+        FailureOr<Value> saved = failure();
+        auto groups = riscv_internal::residentRegisterGroups(source);
+        auto target = producer->getParentOfType<riscv::KernelOp>().getTarget();
+        if ((!groups || *groups > target.getVectorRegisters()) &&
+            load->getBlock() == producer->getBlock() &&
+            !riscv::readCrossesWrite(load, producer)) {
+          // Complete an oversized saved Value with bounded memory issues before
+          // projecting it. Its source read is in the same unchanged read epoch;
+          // allocation retains the author's stage owner and birth. Replacing the
+          // numeric producer is deferred until every projection has captured its
+          // original active coordinates.
+          b.setInsertionPoint(producer);
+          auto copied = copyView(load.getRegion(), type, producer);
+          if (failed(copied)) return failure();
+          saved = view(*copied, producer);
+          completed.emplace_back(producer, *copied);
+        } else {
+          saved = sourceView(source, producer, consumers.lookup(source).front());
+        }
         if (failed(saved)) return failure();
         memory = *saved;
       }
@@ -794,6 +822,25 @@ private:
         riscv_internal::copyOrigin(extract, projected);
         b.replaceOp(extract, projected.getResult());
       }
+      if (reload && source.use_empty()) {
+        // The staged descriptor above retains the author birth. The old numeric
+        // marker and its now-unused read must not become an unobserved full copy
+        // when the whole-value materializer subsequently visits the program.
+        if (auto stage = source.getDefiningOp<riscv::RegisterMaterializeOp>()) {
+          source = stage.getInput();
+          b.eraseOp(stage);
+        }
+        while (auto conversion = source.getDefiningOp<riscv::ConvertLayoutOp>()) {
+          if (!conversion.getResult().use_empty() || conversion.getConversion().getEffect() != "pure") break;
+          source = conversion.getInput();
+          b.eraseOp(conversion);
+        }
+        if (source == load.getResult() && source.use_empty()) b.eraseOp(load);
+      }
+    }
+    for (auto [producer, storage] : completed) {
+      b.setInsertionPoint(producer);
+      replace(producer, storage);
     }
     return success();
   }
@@ -1146,6 +1193,10 @@ public:
 
 std::unique_ptr<Pass> weft::createMaterializeRISCVValueProgramsPass() {
   return std::make_unique<MaterializeRISCVValueProgramsPass>();
+}
+
+LogicalResult weft::riscv_internal::materializeSharedDomainProjections(ModuleOp module) {
+  return ValuePrograms(module).projectSharedValues();
 }
 
 std::unique_ptr<Pass> weft::createMaterializeRISCVLocalProjectionsPass() {

@@ -108,6 +108,8 @@ public:
     lowerLoops(rewriter, failed);
     lowerLocalGroupExtracts(rewriter, failed);
     closeOrderedLoops(failed);
+    if (failed || mlir::failed(riscv_internal::materializeSharedDomainProjections(module)))
+      return mlir::failure();
     lowerContracts(rewriter, failed, /*repeatedFragmentsOnly=*/true);
     eraseDeadComposites(rewriter);
     lowerPartitionedWidenReduceStores(rewriter, failed);

@@ -47,6 +47,13 @@ record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry
 证明选择 byte-load/reinterpret，完整记录的别名快照仍由统一 read-snapshot pass
 在原 load 时刻闭合。实际数值 field 与直接读取字段 View 的完整 load 仍保存其完整读取值。
 
+已选择矩阵 contraction 的字段供给先保留 Encoding 几何，交给同一 fragment materializer
+验证并建立精确字段传输。若该消费者需要普通数值 packing，后续 memory pass 再完成字段的
+字节快照；不能在消费者决定前把已可用的 packed 字段展开成完整 RVV 数组。字段写入枚举
+LMUL 时同时验证 SEW、LMUL 和完整 layout，不能只按 VLEN 能容纳的 bit 数判断合法性。
+自然整字字段的 scalar/replica 传输沿用已有 alignment-safe byte copy，不因 alignment
+小于字段位宽而提前建立逐字节临时数组。原 encoded read 的快照仍由共同存储分析闭合。
+
 `MaterializeRISCVEncodedValues` 在布局选择前处理有界 base-record 的
 load → reshape → field/store 子图。原 load 处生成私有记录字节和逐记录有效性，
 reshape 的输入轴次序生成显式逆坐标运算；整记录 store 只传输有效记录，字段数值
@@ -133,6 +140,14 @@ generic unroll 之前读取未复制的 contraction/reduction use-def，冻结 c
 出现的 grouped/layered issue relation 再交给同一个幂等 sharing owner，物化为共享
 raw-window load 与显式 layer decode。exact leaf
 完成后，resource pass 才能把 leaf temporary 与 SSA live interval 一起计入峰值。
+
+整块 stage 的多轴投影在 ordered loop 闭合后、contraction 物化前确定供给，和后续
+Value materializer 复用同一实现。可证明没有干扰写入时，staged descriptor 保留原 birth，
+失去消费者的 numeric marker/read 随之退出，避免再次生成无人读取的完整拷贝。
+必须保存的 oversized Value 使用已有 bounded copy program，在同一读取 epoch 和作者
+作用域内形成私有快照；静态 local storage 仍受目标预算约束。完整 pointwise Value 的
+资源判断复用候选 issue 的成本查询，计入完整输入／输出活跃集，避免后续 FMA broadcast
+把先前仅靠 last-use reuse 合法的表示推到寄存器上限之外。
 
 最终 layout 改写前先清理失去消费者的纯 index/conversion 链，避免死路径阻止基于真实
 use 数量的 rematerialization；资源闭合后的清理不能替代这个位置的清理。

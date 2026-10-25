@@ -6,6 +6,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include <map>
 
 using namespace mlir;
@@ -21,6 +22,35 @@ riscv::LoadOp encodedReadEpoch(Value owner) {
     else if (auto stage = owner.getDefiningOp<riscv::RegisterMaterializeOp>()) owner = stage.getInput();
     else return owner.getDefiningOp<riscv::LoadOp>();
   }
+}
+
+bool hasOnlyFragmentSupplyUses(Value field) {
+  SmallVector<Value> pending{field};
+  llvm::DenseSet<Value> visited;
+  bool observed = false;
+  while (!pending.empty()) {
+    Value value = pending.pop_back_val();
+    if (!visited.insert(value).second) continue;
+    for (Operation *user : value.getUsers()) {
+      if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(user);
+          conversion && conversion.getConversion().getEffect() == "pure") {
+        pending.push_back(conversion.getResult());
+      } else if (auto projection = dyn_cast<riscv::ExtractOp>(user)) {
+        pending.push_back(projection.getResult());
+      } else if (isa<riscv::IMEFragmentStorageLoadOp,
+                     riscv::IMEFragmentChunkSplitLoadOp,
+                     riscv::IMEFragmentWindowLoadOp>(user)) {
+        observed = true;
+      } else if (auto implementation = user->getAttrOfType<riscv::ImplementationAttr>("implementation");
+                 isa<riscv::ContractOp, riscv::OuterContractOp>(user) && implementation &&
+                 implementation.getEngine() == "ime") {
+        observed = true;
+      } else {
+        return false;
+      }
+    }
+  }
+  return observed;
 }
 
 FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
@@ -191,6 +221,11 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
   llvm::DenseMap<std::pair<Value, StringAttr>, Value> saved;
   int64_t identity = lastLocalIdentity(module);
   for (auto field : fields) {
+    // Preserve Encoding geometry until the selected fragment materializer has
+    // had the opportunity to form its exact field transfer. If it needs a
+    // numerical pack instead, that pack remains a numeric consumer and the
+    // subsequent memory pass completes the ordinary byte snapshot here.
+    if (hasOnlyFragmentSupplyUses(field.getResult())) continue;
     auto value = dyn_cast<riscv::ValueType>(field.getResult().getType());
     if (isa<riscv::MemDescType>(field.getResult().getType())) {
       auto owner = dyn_cast<riscv::MemDescType>(field.getOwner().getType());
@@ -259,7 +294,15 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     // windows and alignment. An actual numeric field still needs its complete
     // byte assembly. Interfering writes on a deferred projection go through
     // the common encoded-read snapshot owner.
-    bool numericUnaligned = facts.alignment < bits / 8 &&
+    // Scalar and scalar-replica field transfers already read natural words
+    // through alignment-safe byte copies. Keep the encoded storage edge for
+    // the shared snapshot owner instead of expanding these into local arrays.
+    auto encoding = cast<kernel::EncodingType>(owner.getEncoding());
+    auto declaration = findEncoding(field, baseEncodingFamily(field, encoding));
+    bool scalarWord = declaration && declaration.getByteOrder() == "little" &&
+        facts.bitOffset % 8 == 0 && (bits == 16 || bits == 32 || bits == 64) &&
+        (!value || value.getLayout().getCarrier() == "scalar");
+    bool numericUnaligned = facts.alignment < bits / 8 && !scalarWord &&
         (!value || value.getLayout().getCarrier() != "local");
     bool general = (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
         (owner.getShape().size() > 1 && facts.mapping == "joined");

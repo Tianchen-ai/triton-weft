@@ -281,10 +281,20 @@ mlir::LogicalResult riscv_internal::planFieldStore(
       return materializeFieldBytes(rewriter, operation);
     }
     const int64_t sew = value.getLayout().getSew();
+    auto carrier = [&](int64_t candidate) {
+      return riscv::LayoutAttr::get(
+          rewriter.getContext(), "rvv", value.getAxisIds(),
+          rewriter.getDenseI64ArrayAttr({count / lanes}),
+          rewriter.getDenseI64ArrayAttr({lanes}),
+          rewriter.getDenseI64ArrayAttr({1}), rewriter.getDenseI64ArrayAttr({1}),
+          rewriter.getDenseI64ArrayAttr({1}), sew, candidate, lanes,
+          (candidate + 7) / 8, value.getLayout().getValidity());
+    };
     int64_t lmul = 0;
     while (lanes > 0 && !lmul) {
       for (int64_t candidate : target.getLegalLMULEighths().asArrayRef())
         if (candidate * target.getVlenBits() >= lanes * sew * 8 &&
+            count % lanes == 0 && riscv::supportsRVVLayout(target, carrier(candidate)) &&
             (!lmul || candidate < lmul))
           lmul = candidate;
       if (!lmul)
@@ -293,13 +303,7 @@ mlir::LogicalResult riscv_internal::planFieldStore(
     if (!lanes || count % lanes || (kind == "layered" && facts.layer % lanes))
       return operation.emitError("field store lane partition has no legal RVV carrier");
     const int64_t groups = (lmul + 7) / 8;
-    auto layout = riscv::LayoutAttr::get(
-        rewriter.getContext(), "rvv", value.getAxisIds(),
-        rewriter.getDenseI64ArrayAttr({count / lanes}),
-        rewriter.getDenseI64ArrayAttr({lanes}),
-        rewriter.getDenseI64ArrayAttr({1}), rewriter.getDenseI64ArrayAttr({1}),
-        rewriter.getDenseI64ArrayAttr({1}), sew, lmul, lanes, groups,
-        value.getLayout().getValidity());
+    auto layout = carrier(lmul);
     if (!riscv::supportsRVVLayout(target, layout))
       return operation.emitError("field store selected an unsupported RVV layout");
     auto selected = riscv::ValueType::get(rewriter.getContext(), value.getElementType(),
