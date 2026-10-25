@@ -2099,6 +2099,8 @@ riscv_internal::integerRange(mlir::Value value, unsigned depth) {
         result.known = IntegerRange{llvm::APSInt::getUnsigned(iota.getStart()), llvm::APSInt::getUnsigned(iota.getEnd() - 1)};
       }
     } else if (auto op = input.getDefiningOp<riscv::RVVAxisBroadcastOp>()) preserve(op.getInput());
+    else if (auto op = input.getDefiningOp<riscv::RVVSplatOp>()) preserve(op.getScalar());
+    else if (auto op = input.getDefiningOp<riscv::RVVMaskedNegateOp>()) preserve(op.getData(), Kind::NegateOr);
     else if (auto op = input.getDefiningOp<riscv::WidenOp>()) preserve(op.getInput(), Kind::Cast);
     else if (auto op = input.getDefiningOp<riscv::CastOp>()) preserve(op.getInput(), Kind::Cast);
     else if (auto op = input.getDefiningOp<riscv::NarrowOp>()) preserve(op.getInput(), op.getSaturate() ? Kind::Saturate : Kind::Cast);

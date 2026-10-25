@@ -297,7 +297,7 @@ LogicalResult readonlyUnit(Operation *operation, const PipelineStorage &storage,
 // These operations bind coordinates and views. Moving their construction to
 // the consuming stage does not replay a numeric read or a source birth.
 bool replayableDescriptor(Operation *operation) {
-  return isa<riscv::FieldOp, riscv::SliceOp, riscv::SubviewOp,
+  return isa<riscv::FieldOp, riscv::FieldViewOp, riscv::SliceOp, riscv::SubviewOp,
              riscv::ReaxisOp, riscv::LinearViewOp, riscv::ExtentOp,
              riscv::PhysicalPointOp, riscv::RecordCohortOp>(operation);
 }

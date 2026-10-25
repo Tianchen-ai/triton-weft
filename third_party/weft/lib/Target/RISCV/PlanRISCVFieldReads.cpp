@@ -254,7 +254,14 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     // to MaterializeRISCVReadSnapshots. Preserve the field edge so its normal
     // vector/fragment consumer reads that same saved record. Only layouts whose
     // byte projection is not covered by an existing transfer need expansion.
-    bool general = (facts.mapping == "natural" && (bits % 8 || facts.alignment < bits / 8)) ||
+    // A local whole-byte field is a storage projection, not a numeric read.
+    // Its consumers select explicit indexed-entry byte loads with their real
+    // windows and alignment. An actual numeric field still needs its complete
+    // byte assembly. Interfering writes on a deferred projection go through
+    // the common encoded-read snapshot owner.
+    bool numericUnaligned = facts.alignment < bits / 8 &&
+        (!value || value.getLayout().getCarrier() != "local");
+    bool general = (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
         (owner.getShape().size() > 1 && facts.mapping == "joined");
     if (!general) continue;
     if (owner.getShape().empty() || owner.getShape().asArrayRef().back() != owner.getElements())

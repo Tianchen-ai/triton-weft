@@ -158,6 +158,11 @@ public:
       if (expression.kind == Kind::Preserve || expression.kind == Kind::Cast) return fit(a);
       if (expression.kind == Kind::ZeroOr)
         return fit(IntegerRange{low(Bound::get(0), a.minimum), high(Bound::get(0), a.maximum)});
+      if (expression.kind == Kind::NegateOr)
+        // The predicate may select either sign. Extend before negation;
+        // signed-min wrap cannot supply an out-of-type mathematical bound.
+        return fit(IntegerRange{low(a.minimum, subtract(Bound::get(0), a.maximum)),
+                                high(a.maximum, subtract(Bound::get(0), a.minimum))});
       if (expression.kind == Kind::Saturate)
         return IntegerRange{low(high(a.minimum, full->minimum), full->maximum),
                             low(high(a.maximum, full->minimum), full->maximum)};

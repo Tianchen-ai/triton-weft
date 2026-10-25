@@ -34,7 +34,7 @@ bool saturatingProductSumIsExact(IntegerRange lhs, IntegerRange rhs,
 // Targets describe their own operations; the shared interpreter owns interval,
 // conversion and overflow reasoning. It does not select instructions or layouts.
 enum class IntegerExpressionKind {
-  Unknown, Known, Preserve, ZeroOr, Cast, Saturate, Union, Add, Sub, Mul, And, Or,
+  Unknown, Known, Preserve, ZeroOr, NegateOr, Cast, Saturate, Union, Add, Sub, Mul, And, Or,
   ShiftLeft, ShiftRight, Divide, ProductSum, Sum
 };
 

@@ -24,9 +24,11 @@ LogicalResult riscv_internal::materializeNumericConversions(ModuleOp module, IRR
     if (!integer) continue;
     b.setInsertionPoint(op);
     Type element = result.getElementType();
-    if (integer.getWidth() == 1 && !element.isInteger(1)) {
-      // RVV predicates are packed masks, not integer byte vectors. Numeric
-      // boolean conversion is a typed 0/1 selection, never a bit reinterpret.
+    if (integer.getWidth() == 1 && !integer.isUnsigned() && !element.isInteger(1)) {
+      // A signless predicate conversion must explicitly select numeric 0/1.
+      // Encoding ui1 values already use a normalized unsigned byte carrier;
+      // retain their ordinary zero extension, without a byte->mask->value
+      // round trip. Selected packed masks have explicit ingress/egress ops.
       auto constant = [&](int value) -> Value {
         Attribute attr = isa<FloatType>(element) ? Attribute(b.getFloatAttr(element, value))
                                                  : Attribute(b.getIntegerAttr(element, value));

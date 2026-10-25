@@ -11,6 +11,9 @@ RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改�
 机器类型，包括 i64/u64；乘积、累加和 magnitude 查询先扩展分析位宽，避免分析自身回绕。
 普通 MLIR 操作复用 `InferIntRangeInterface` 的 signed/unsigned 与模运算合同，目标适配层
 只解释其局部操作。未知 producer 保留完整类型范围，不提供不存在的窄区间证明。
+物理 splat 保留标量范围；masked negate 交由共同分析求原值与取负值的并集。
+分析在扩展位宽内计算取负，若结果可能跨过机器类型边界则退回完整类型域，
+不能用对 signed-min 无效的绝对值证明允许更多窄累加。
 
 `Analysis/PhysicalDependence` 与 x86 共用 SCF 的精确静态迭代数，包括空域、非单位步长和
 有符号/无符号比较。RISC-V 的循环不变量读取据此证明循环确实执行；未知边界不获得默认次数。
@@ -33,6 +36,11 @@ natural、grouped/layered、joined 几何事实；byte/bit order 和 persistent 
 这一通用路径目前要求 owner 的 encoded element axis 覆盖一个完整 record；任意前缀
 记录轴由实际 descriptor extent 遍历。这不覆盖任意整记录 reshape 传输或字段窗口；
 这些访问仍须具有自己的完整物理程序，不能留给 emitter 临时解释。
+
+已加载记录的 whole-byte natural 字段在 local storage projection 状态下保留 storage edge；
+record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry pass 根据实际消费者窗口和共享 alignment
+证明选择 byte-load/reinterpret，完整记录的别名快照仍由统一 read-snapshot pass
+在原 load 时刻闭合。实际数值 field 与直接读取字段 View 的完整 load 仍保存其完整读取值。
 
 `MaterializeRISCVEncodedValues` 在布局选择前处理有界 base-record 的
 load → reshape → field/store 子图。原 load 处生成私有记录字节和逐记录有效性，
@@ -211,7 +219,9 @@ shaped store 物化为有界坐标遍历和受谓词控制的真实写入，不�
 
 闭合物理数值转换的机器宽度步骤。composite lowering 与晚期 leaf selection 共用同一
 实现：后续 Value program 新产生的 RVV 转换也必须显式形成合法 narrowing 链。
-Boolean predicate 是 packed mask，转为数值时物化同坐标的 0/1 select，不能按 byte
+signless Boolean predicate 转为数值时物化同坐标的 0/1 select。Encoding `ui1` 的普通
+数值表示已是规范的 unsigned byte 0/1，沿用 zero extension，避免 byte→mask→数值的往返。
+真正的 packed predicate register 由专门 op 与 ingress/egress 明确表达，不能按 byte
 向量 reinterpret。新值进入正常 leaf、生命周期与资源分析，terminal 不补造转换程序。
 后续 bitplane、signed-mask reduction 和 masked-negate 选择共用该 0/1 关系，接受转换
 物化后的 `select(predicate, 1, 0)`，不要求前一 pass 保留已经退出的 cast 形式。
@@ -993,6 +1003,8 @@ scheduler 另枚举由真实循环 carry 依赖确定的边界：把独立算术
 前一阶段填充、后一阶段读取；scheduler 保留 payload 的原始内存顺序，写出首次至最后访问的
 阶段区间。expander 按该区间分配版本，而不是给所有 buffer 复制固定 depth 份。
 descriptor 在使用阶段从当前迭代的 slot 重建，不进入数值 carry，也不重新执行源级 birth。
+普通 `FieldView` 与 slice 一样只是字段地址和 origin 的纯描述符，可在消费阶段以对应
+坐标重建；这项规则不允许重放 field payload load、allocation 或 state/stage birth。
 RISC-V 的 `local_slot` 明确记录 backing、index、byte stride 和版本容量；verifier 检查索引范围、
 对齐、大小及原 owner/lifetime，alias 与资源分析沿 slot 回到真实 allocation。x86 使用相同
 阶段区间与 expander，物化 memref backing/view。非平坦、嵌套或无法在预算内版本化的私有数组
