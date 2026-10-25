@@ -64,6 +64,10 @@ public:
   llvm::StringRef currentStage() const { return stage; }
   llvm::StringRef currentPass() const { return pass; }
   bool failed() const { return hasError; }
+  bool isCandidateRejection() const {
+    return hasError && (category == RISCVFailureCategory::ResourceLimit ||
+                        category == RISCVFailureCategory::Unsupported);
+  }
   llvm::json::Object compilationJSON() const;
   llvm::json::Object failureJSON() const;
 

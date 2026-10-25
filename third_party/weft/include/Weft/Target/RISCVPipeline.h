@@ -53,6 +53,12 @@ struct RISCVRemainingBinding {
 void buildRISCVResumePipeline(mlir::OpPassManager &manager,
                              RISCVRemainingBinding binding);
 
+/// Evaluate a shared-supply choice with the exact remaining production passes.
+/// The selection pass is excluded, so finite candidate evaluation cannot recurse.
+/// These are the only bindings not already represented in the physical module.
+void buildRISCVSharedSupplyContinuation(mlir::OpPassManager &manager,
+                                       int64_t lmulEighths, bool scalarLoadPrime);
+
 /// Checkpoints own their remaining binding; resumption cannot replace it.
 llvm::StringRef checkpointName(RISCVCheckpoint checkpoint);
 llvm::StringRef checkpointEntry(RISCVCheckpoint checkpoint);

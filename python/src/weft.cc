@@ -35,6 +35,7 @@ py::object json(llvm::json::Value value) {
 }
 
 py::object scheduleAttribute(Attribute attribute) {
+  if (auto value = dyn_cast<BoolAttr>(attribute)) return py::bool_(value.getValue());
   if (auto value = dyn_cast<IntegerAttr>(attribute)) return py::int_(value.getInt());
   if (auto value = dyn_cast<FloatAttr>(attribute)) return py::float_(value.getValueAsDouble());
   if (auto value = dyn_cast<StringAttr>(attribute)) return py::str(value.getValue().str());
@@ -48,7 +49,7 @@ py::object scheduleAttribute(Attribute attribute) {
     for (auto field : fields) result[py::str(field.getName().str())] = scheduleAttribute(field.getValue());
     return result;
   }
-  throw std::invalid_argument("unsupported attribute in x86 schedule metadata");
+  throw std::invalid_argument("unsupported attribute in physical schedule metadata");
 }
 
 [[noreturn]] void compilationFailure(const weft::RISCVCompilationReport &report) {
@@ -322,7 +323,19 @@ void init_weft(py::module_ &&m) {
     auto lowered = weft::lowerRISCVModule(module, options(binding), &report);
     if (failed(lowered))
       compilationFailure(report);
-    return py::make_tuple(lowered->release(), json(report.compilationJSON()));
+    auto compilation = py::cast<py::dict>(json(report.compilationJSON()));
+    py::list supplies;
+    (*lowered)->walk([&](weft::riscv::KernelOp kernel) {
+      if (auto choices = kernel->getAttrOfType<ArrayAttr>("weft.riscv.residency_choices")) {
+        for (Attribute choice : choices) {
+          auto entry = py::cast<py::dict>(scheduleAttribute(choice));
+          entry["kernel"] = kernel.getSymName().str();
+          supplies.append(entry);
+        }
+      }
+    });
+    compilation["supply_choices"] = supplies;
+    return py::make_tuple(lowered->release(), compilation);
   });
   m.def("emit", [](ModuleOp module) {
     weft::RISCVCompilationReport report;

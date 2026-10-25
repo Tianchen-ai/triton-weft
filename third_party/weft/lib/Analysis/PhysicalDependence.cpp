@@ -51,21 +51,32 @@ weft::analysis::executionMultiplicity(Operation *operation, Operation *scope) {
 }
 
 std::optional<weft::analysis::ExecutionMultiplicity>
-weft::analysis::executionMultiplicityInBlock(Operation *operation, Block *scope) {
+weft::analysis::executionMultiplicityInBlock(Operation *operation, Block *scope,
+                                             bool preserveConditionalDomain) {
   if (!scope || !scope->findAncestorOpInBlock(*operation)) return {};
   ExecutionMultiplicity result;
+  SmallVector<Operation *> loops;
   for (Operation *current = operation; current; current = current->getParentOp()) {
     if (current->getBlock() == scope) {
+      for (Operation *loop : loops) {
+        auto count = staticTripCount(loop);
+        if (count && !*count) return ExecutionMultiplicity{0, {}, {}};
+        if (count && result.conditions.empty()) {
+          if (result.fixed > std::numeric_limits<uint64_t>::max() / *count) return {};
+          result.fixed *= *count;
+        } else result.dynamicLoops.push_back(loop);
+      }
       std::reverse(result.dynamicLoops.begin(), result.dynamicLoops.end());
+      std::reverse(result.conditions.begin(), result.conditions.end());
       return result;
     }
     Operation *parent = current->getParentOp();
-    if (!parent || !isa<scf::ForOp>(parent)) return {};
-    if (auto count = staticTripCount(parent)) {
-      if (!*count) { result.fixed = 0; result.dynamicLoops.clear(); return result; }
-      if (result.fixed > std::numeric_limits<uint64_t>::max() / *count) return {};
-      result.fixed *= *count;
-    } else result.dynamicLoops.push_back(parent);
+    if (!parent) return {};
+    if (isa<scf::ForOp>(parent)) loops.push_back(parent);
+    else if (auto branch = dyn_cast<scf::IfOp>(parent); branch && preserveConditionalDomain) {
+      result.conditions.emplace_back(branch.getCondition(),
+          current->getParentRegion() == &branch.getThenRegion());
+    } else return {};
   }
   return {};
 }

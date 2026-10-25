@@ -40,6 +40,10 @@ std::optional<uint64_t> staticTripCount(mlir::Operation *operation);
 struct ExecutionMultiplicity {
   uint64_t fixed = 1;
   llvm::SmallVector<mlir::Operation *> dynamicLoops;
+  // When requested, retain the actual branch domains instead of assigning a
+  // probability. All surrounding loops then stay symbolic, including static
+  // loops: the predicate may depend on their induction values.
+  llvm::SmallVector<std::pair<mlir::Value, bool>> conditions;
 };
 // Frequency relative to one execution of the block containing scope. Unknown
 // loop counts remain independent symbols; conditional/opaque regions are not
@@ -47,9 +51,11 @@ struct ExecutionMultiplicity {
 std::optional<ExecutionMultiplicity> executionMultiplicity(
     mlir::Operation *operation, mlir::Operation *scope);
 // Frequency per execution of one enclosing block after target control lowering.
-// Unknown counts remain SSA symbols. Intervening non-SCF-loop regions make the
-// query unknown, rather than receiving a fictitious branch probability.
+// Unknown counts remain SSA symbols. By default intervening non-loop regions
+// make the query unknown. preserveConditionalDomain also records SCF if domains
+// symbolically; its callers must include those domains when comparing costs.
 std::optional<ExecutionMultiplicity> executionMultiplicityInBlock(
-    mlir::Operation *operation, mlir::Block *scope);
+    mlir::Operation *operation, mlir::Block *scope,
+    bool preserveConditionalDomain = false);
 } // namespace weft::analysis
 #endif

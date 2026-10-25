@@ -654,27 +654,34 @@ representation alias；同形状的数值 projection 也不能被当作原 load 
 所有用途必须有可实现的 Extract 读取，并证明原 load 到每个 consumer 没有别名写入；
 作者 snapshot、birth、owner、lifetime 和数值类型保持不变。
 
-每个候选复制当前 module，运行正式的 `PrepareRISCVComposites`，由同一
-`materializeRISCVSharedSupply` 生成 register 或 staged-view/read 图，并将 owning Level
-一同展开；不能验证只改写 stage 而保留旧 Level birth 计数的中间态。验证后重新计算整个
-kernel 的 SSA 寄存器峰值。
+每个候选复制当前 module，通过同一 registry 运行 shared-supply 之后的完整正式管线：
+`PrepareRISCVComposites`、局部 packing/指令选择、流水、snapshot、显式 spill/reload、资源
+收口和 final verifier。LMUL 与 scalar-load-prime 使用正式编译的剩余绑定，其他参数从当前
+Physical IR 读取。候选不会递归进入 supply selector，也没有简化的候选专用 lowering。
+owning Level 与 stage 一同展开，不能验证半展开的 birth 计数。
 未改变的独立活跃值、原 read 的其它用途都留在候选中，不用减去一个名义 buffer 的方式
 推定资源收益。早期必须 addressable 的表示仍由原合法性规划决定，这一 pass 不把其改回
 未实现的 register 路线。
 
-读取比较要求完整、静态窗口的字节数与实际 carrier transfer 数，unit、strided、indexed
+读取和写入比较要求完整、静态窗口的字节数与实际 carrier transfer 数，unit、strided、indexed
 等访存类别分别比较，不用较少字节替代新增 gather 的成本；静态循环次数使用共享
 分析精确展开，动态次数以真实 bounds/step 表达式为符号，不能用克隆后的 loop 序号代替。
-准备后的完整候选还记录地址计算、数值 carrier、控制与转换；未定价的 operation 保留
-类型、参数、常量与频次，不能按零消除。每个候选只评估一次。只有每个符号项的读取字节
-和 transfer 均不增加、至少一项下降，已计价的结构工作不增加，未定价项没有新增，
-而且实际寄存器峰值不增加并可驻留，才选择重读。未知 active domain、
-条件执行或驻留信息不会获得虚构成本。该选择针对当前闭合的 dense-read 子图，不宣称
-覆盖 encoded packing、未知访问延迟或所有 layout 组合。后续 leaf/resource passes 仍
-负责最终临时寄存器、spill 与合法性收口。
+最终候选还记录 allocation、地址计算、数值 carrier、控制与转换；未定价的 operation 保留
+类型、参数、常量与频次，不能按零消除。SCF if 保留真实条件与分支极性；其外围循环也作为
+域符号保留，避免把依赖 induction 的条件按固定概率展开。未知 active domain 和不可描述的
+频次不能得到虚构成本。每个候选只评估一次；同一 kernel 后续选择复用当前方案的已有评估，
+每个新替代方案仅执行一次完整后缀。
 
-`weft.riscv.residency_choices` 保存候选的读取多项式、完整结构工作、未定价项、峰值与决定，
-其工作量是指令类别估计，不是 CPU 周期预测。它不是后续
+只有各符号项的读写字节和 transfer 均不增加、至少一项下降，已计价结构工作不增加、
+未定价项没有新增，且最终寄存器峰值与局部存储不增加，才依据成本选择重读。若原方案
+被明确标记为资源不足或不支持，而替代方案通过最终验证，则选择可执行方案；普通 verifier
+和实现错误仍然使编译失败，不作为可忽略的候选拒绝。分支、局部存储及其它消费者全部
+保留在评估范围。当前成本是结构工作模型，不把未知 encoded/fragment transfer 当零成本，
+也不声称预测具体 CPU 周期。
+
+`weft.riscv.residency_choices` 保存候选的读写多项式、完整结构工作、未定价项、最终
+峰值、局部字节、spill/reload site、剩余绑定和评估次数，并从 Triton compilation metadata
+的 `supply_choices` 提供给调用方。它不是后续
 分析输入，所有分析在改写后重新建立。参考 Triton
 `ReorderInstructions.cpp:104-123` 将会增加寄存器压力的转换推近 consumer，以及
 `:164-170` 在移动读取前检查写入边界；这里增加了完整候选、复用频次与 SSA 驻留比较，

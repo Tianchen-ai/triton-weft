@@ -5,6 +5,8 @@
 #include "Weft/Dialect/RISCV/IR/Memory.h"
 #include "RISCVPhysicalSupport.h"
 #include "Weft/Target/RISCVPasses.h"
+#include "Weft/Target/RISCVPipeline.h"
+#include "Weft/Target/RISCVCompilation.h"
 #include "Weft/Analysis/PhysicalDependence.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "Weft/Dialect/RISCV/IR/DenseBounds.h"
@@ -315,7 +317,7 @@ mlir::LogicalResult weft::planRISCVResidency(mlir::ModuleOp module) {
 namespace {
 using namespace mlir;
 
-struct ReadWork { uint64_t bytes = 0, transfers = 0; };
+struct ReadWork { uint64_t bytes = 0, writes = 0, transfers = 0; };
 using FrequencyKey = SmallVector<std::string>;
 using ReadKey = std::pair<FrequencyKey, std::string>;
 using ReadPolynomial = std::map<ReadKey, ReadWork>;
@@ -328,7 +330,12 @@ struct ProgramWork {
 struct SupplyEstimate {
   ReadPolynomial work;
   ProgramWork program;
-  int64_t registerPeak;
+  int64_t registerPeak = 0;
+  int64_t localBytes = 0;
+  int64_t spills = 0;
+  int64_t reloads = 0;
+  bool legal = false;
+  bool costComplete = false;
 };
 
 // A frequency symbol names the actual SCF bounds, not the loop's position in
@@ -341,8 +348,17 @@ std::optional<std::string> indexIdentity(Value value, unsigned &budget) {
   llvm::raw_string_ostream out(text);
   out << value.getType() << ':';
   if (auto argument = dyn_cast<BlockArgument>(value)) {
-    if (!isa<riscv::KernelOp>(argument.getOwner()->getParentOp())) return std::nullopt;
-    out << "argument" << argument.getArgNumber();
+    Operation *owner = argument.getOwner()->getParentOp();
+    if (isa<riscv::KernelOp>(owner)) out << "argument" << argument.getArgNumber();
+    else if (auto loop = dyn_cast<scf::ForOp>(owner); loop && value == loop.getInductionVar()) {
+      out << (loop.getUnsignedCmp() ? "unsigned-iv(" : "signed-iv(");
+      for (Value bound : {loop.getLowerBound(), loop.getUpperBound(), loop.getStep()}) {
+        auto identity = indexIdentity(bound, budget);
+        if (!identity) return std::nullopt;
+        out << *identity << ';';
+      }
+      out << ')';
+    } else return std::nullopt;
     return text;
   }
   Operation *operation = value.getDefiningOp();
@@ -373,6 +389,12 @@ std::optional<FrequencyKey> frequencyKey(const analysis::ExecutionMultiplicity &
     key.push_back((loop.getUnsignedCmp() ? "unsigned(" : "signed(") +
         *lower + ";" + *upper + ";" + *step + ")");
   }
+  for (auto [condition, polarity] : frequency.conditions) {
+    unsigned budget = 128;
+    auto identity = indexIdentity(condition, budget);
+    if (!identity) return std::nullopt;
+    key.push_back((polarity ? "then(" : "else(") + *identity + ')');
+  }
   llvm::sort(key);
   return key;
 }
@@ -391,6 +413,10 @@ std::optional<uint64_t> instructionWork(Operation *operation) {
       isa<arith::ConstantOp, riscv::ConstantOp, riscv::SymbolOp, riscv::MemoryViewOp,
           riscv::LocalViewOp, riscv::LocalBindOp, riscv::StagedViewOp>(operation)) return 0;
   if (isa<riscv::ExtentOp, riscv::ReaxisOp>(operation)) return 0;
+  if (isa<riscv::RootDomainOp, riscv::LocalReuseOp>(operation)) return 0;
+  if (isa<riscv::LocalAllocOp>(operation)) return 1;
+  if (isa<riscv::LocalSlotOp>(operation)) return 2;
+  if (auto size = dyn_cast<riscv::LocalSizeOp>(operation)) return size.getExtents().size();
   // Slice offsets are ordinary scalar address arithmetic. Index/domain values
   // are already explicit SSA; charge each nontrivial axis translation here.
   if (auto slice = dyn_cast<riscv::SliceOp>(operation)) return 2 * slice.getIndices().size();
@@ -403,7 +429,9 @@ std::optional<uint64_t> instructionWork(Operation *operation) {
   }
   bool simple = isa<riscv::LoadOp, riscv::StoreOp, riscv::BinaryOp, riscv::CompareOp,
                     riscv::SelectOp, riscv::CastOp, riscv::BitcastOp,
-                    riscv::WidenOp, riscv::NarrowOp, riscv::RegisterMaterializeOp>(operation);
+                    riscv::WidenOp, riscv::NarrowOp, riscv::RegisterMaterializeOp,
+                    riscv::SpillOp, riscv::ReloadOp, riscv::ReloadSliceOp,
+                    riscv::LocalLoadOp, riscv::LocalStoreOp>(operation);
   if (!simple) return std::nullopt;
   // Each selected numeric carrier is at least one issue; wider LMULs carry
   // proportionally more physical work. Compound/decode/packing operations are
@@ -453,7 +481,7 @@ std::optional<ProgramWork> programWork(Block *scope, std::string &rejection) {
   bool complete = true;
   scope->walk([&](Operation *operation) {
     if (!complete) return;
-    auto frequency = analysis::executionMultiplicityInBlock(operation, scope);
+    auto frequency = analysis::executionMultiplicityInBlock(operation, scope, true);
     if (!frequency) {
       rejection = "physical work has conditional or opaque execution frequency";
       complete = false;
@@ -477,6 +505,8 @@ std::optional<ProgramWork> programWork(Block *scope, std::string &rejection) {
         if (!symbol) complete = false;
         else complete &= add(result.instructions[*symbol], 2, frequency->fixed);
       }
+    } else if (isa<scf::IfOp>(operation)) {
+      complete = add(result.instructions[key], 1, frequency->fixed);
     } else if (auto work = instructionWork(operation)) {
       complete = add(result.instructions[key], *work, frequency->fixed);
     } else {
@@ -511,7 +541,9 @@ std::optional<ReadPolynomial> readWork(Block *scope, std::string &rejection) {
     }
   };
   scope->walk([&](Operation *operation) {
-    if (isa<riscv::LoadOp>(operation) || riscv::isCoordinateIdentity(operation) ||
+    if (isa<riscv::LoadOp, riscv::StoreOp, riscv::SpillOp, riscv::ReloadOp,
+            riscv::ReloadSliceOp, riscv::LocalLoadOp, riscv::LocalStoreOp>(operation) ||
+        riscv::isCoordinateIdentity(operation) ||
         operation->hasTrait<OpTrait::IsTerminator>() || isMemoryEffectFree(operation)) return;
     auto memory = dyn_cast<MemoryEffectOpInterface>(operation);
     if (!memory) {
@@ -521,45 +553,79 @@ std::optional<ReadPolynomial> readWork(Block *scope, std::string &rejection) {
     }
     SmallVector<MemoryEffects::EffectInstance> effects;
     memory.getEffects(effects);
-    // Specialized panel/fragment/atomic reads must acquire their own cost
-    // relation. They cannot disappear from a generic-load comparison as zero.
-    if (llvm::any_of(effects, [](const auto &effect) { return isa<MemoryEffects::Read>(effect.getEffect()); }))
-      reject(operation, "read has no transfer cost relation");
+    if (isa<riscv::LocalReuseOp>(operation)) return; // Ownership transfer, no payload.
+    // Specialized panel/fragment/atomic transfers need their own relation.
+    // Both reads and writes count: moving preparation to private storage is not
+    // free merely because its traffic no longer addresses an input descriptor.
+    if (llvm::any_of(effects, [](const auto &effect) {
+          return isa<MemoryEffects::Read, MemoryEffects::Write>(effect.getEffect());
+        })) reject(operation, "payload transfer has no complete cost relation");
   });
-  scope->walk([&](riscv::LoadOp load) {
-    if (load.getResult().use_empty()) return;
-    auto type = dyn_cast<riscv::ValueType>(load.getResult().getType());
-    if (!type || !type.getElementType().isIntOrFloat() ||
-        type.getLayout().getValidity() != "full") {
-      reject(load, "read has no complete numeric active domain"); return;
+  scope->walk([&](Operation *operation) {
+    Type payload;
+    StringRef form;
+    bool write = false;
+    if (auto load = dyn_cast<riscv::LoadOp>(operation)) {
+      if (load.getResult().use_empty()) return;
+      if (load.getSnapshotStorage()) {
+        reject(operation, "saved load requires its copy and borrow cost relation"); return;
+      }
+      payload = load.getResult().getType();
+      form = load.getAccess().getForm();
+    } else if (auto store = dyn_cast<riscv::StoreOp>(operation)) {
+      if (store.getFieldStorePlan()) {
+        reject(operation, "field store requires its complete read-modify-write cost relation"); return;
+      }
+      payload = store.getValue().getType(); form = store.getAccess().getForm(); write = true;
+    } else if (auto spill = dyn_cast<riscv::SpillOp>(operation)) {
+      payload = spill.getInput().getType(); form = "private-spill"; write = true;
+    } else if (auto reload = dyn_cast<riscv::ReloadOp>(operation)) {
+      payload = reload.getResult().getType(); form = "private-spill";
+    } else if (auto reload = dyn_cast<riscv::ReloadSliceOp>(operation)) {
+      payload = reload.getResult().getType(); form = "private-spill";
+    } else if (auto load = dyn_cast<riscv::LocalLoadOp>(operation)) {
+      payload = load.getResult().getType(); form = "private-indexed";
+    } else if (auto store = dyn_cast<riscv::LocalStoreOp>(operation)) {
+      payload = store.getValue().getType(); form = "private-indexed"; write = true;
+    } else return;
+    Type element = payload;
+    std::optional<int64_t> elements = 1, carriers = 1;
+    if (auto type = dyn_cast<riscv::ValueType>(payload)) {
+      element = type.getElementType();
+      if (type.getLayout().getValidity() != "full") {
+        reject(operation, "transfer has no complete numeric active domain"); return;
+      }
+      elements = riscv_internal::staticProduct(type.getShape().asArrayRef());
+      carriers = riscv::rvvCarrierCount(type.getLayout());
     }
-    auto elements = riscv_internal::staticProduct(type.getShape().asArrayRef());
-    auto carriers = riscv::rvvCarrierCount(type.getLayout());
-    auto frequency = analysis::executionMultiplicityInBlock(load, scope);
+    if (!element.isIntOrFloat()) {
+      reject(operation, "transfer has no numeric storage width"); return;
+    }
+    auto frequency = analysis::executionMultiplicityInBlock(operation, scope, true);
     if (!elements || !carriers || !frequency || *elements < 0 || *carriers < 0) {
-      reject(load, "read has no bounded carrier or execution frequency"); return;
+      reject(operation, "transfer has no bounded carrier or execution frequency"); return;
     }
     auto key = frequencyKey(*frequency);
-    if (!key) { reject(load, "read has an unrepresentable symbolic frequency"); return; }
-    auto access = load.getAccess();
-    if (!access || access.getForm() == "unassigned") {
-      reject(load, "read has no selected memory form"); return;
+    if (!key) { reject(operation, "transfer has an unrepresentable symbolic frequency"); return; }
+    if (form.empty() || form == "unassigned") {
+      reject(operation, "transfer has no selected memory form"); return;
     }
     // A strided/indexed issue cannot borrow the cost of a contiguous load.
     // Compare each access class independently until a target model can price
     // their relative costs; fewer bytes alone cannot justify a new gather.
-    auto &term = result[{*key, access.getForm().str()}];
-    const unsigned width = (type.getElementType().getIntOrFloatBitWidth() + 7) / 8;
+    auto &term = result[{*key, form.str()}];
+    const unsigned width = (element.getIntOrFloatBitWidth() + 7) / 8;
     const uint64_t limit = std::numeric_limits<int64_t>::max();
     if (uint64_t(*elements) > limit / width) {
-      reject(load, "read byte count exceeds the cost representation"); return;
+      reject(operation, "transfer byte count exceeds the cost representation"); return;
     }
     uint64_t bytesPerRead = uint64_t(*elements) * width;
-    if ((bytesPerRead && frequency->fixed > (limit - term.bytes) / bytesPerRead) ||
+    auto &bytes = write ? term.writes : term.bytes;
+    if ((bytesPerRead && frequency->fixed > (limit - bytes) / bytesPerRead) ||
         (*carriers && frequency->fixed > (limit - term.transfers) / uint64_t(*carriers))) {
-      reject(load, "dynamic transfer coefficient exceeds the cost representation"); return;
+      reject(operation, "dynamic transfer coefficient exceeds the cost representation"); return;
     }
-    term.bytes += bytesPerRead * frequency->fixed;
+    bytes += bytesPerRead * frequency->fixed;
     term.transfers += uint64_t(*carriers) * frequency->fixed;
   });
   return complete ? std::optional<ReadPolynomial>(result) : std::nullopt;
@@ -570,60 +636,58 @@ bool reducesTransfers(const ReadPolynomial &candidate, const ReadPolynomial &bas
   for (const auto &[key, after] : candidate) {
     auto found = baseline.find(key);
     ReadWork before = found == baseline.end() ? ReadWork{} : found->second;
-    if (after.bytes > before.bytes || after.transfers > before.transfers) return false;
-    less |= after.bytes < before.bytes || after.transfers < before.transfers;
+    if (after.bytes > before.bytes || after.writes > before.writes || after.transfers > before.transfers) return false;
+    less |= after.bytes < before.bytes || after.writes < before.writes || after.transfers < before.transfers;
   }
   for (const auto &[key, before] : baseline)
-    if (!candidate.count(key)) less |= before.bytes != 0 || before.transfers != 0;
+    if (!candidate.count(key)) less |= before.bytes != 0 || before.writes != 0 || before.transfers != 0;
   return less;
 }
 
-std::optional<SupplyEstimate> estimateSupply(riscv::MaterializeOp source, bool reload,
-                                            std::string &rejection, bool &invalid) {
+SupplyEstimate estimateSupply(riscv::MaterializeOp source, bool reload,
+                              int64_t lmulEighths, bool scalarLoadPrime,
+                              std::string &rejection, bool &invalid) {
   auto kernel = source->getParentOfType<riscv::KernelOp>();
   IRMapping mapping;
   OwningOpRef<ModuleOp> trial(cast<ModuleOp>(kernel->getParentOfType<ModuleOp>()->clone(mapping)));
   auto trialKernel = cast<riscv::KernelOp>(mapping.lookup(kernel.getOperation()));
   auto selected = cast<riscv::MaterializeOp>(mapping.lookup(source.getOperation()));
-  Block *scope = selected->getBlock();
-  std::optional<int64_t> levelId;
-  if (auto level = dyn_cast<riscv::LoopOp>(scope->getParentOp()))
-    levelId = level.getDomain().getType().getDomainId();
   if (reload) selected.setPlacementAttr(StringAttr::get(source.getContext(), "reload"));
+  RISCVCompilationReport report;
+  report.begin("shared-supply-candidate");
   ScopedDiagnosticHandler diagnostics(source.getContext(), [&](Diagnostic &diagnostic) {
+    report.capture(diagnostic);
     llvm::raw_string_ostream stream(rejection);
     diagnostic.print(stream);
     return success();
   });
-  // Shared births and their owning Levels must cross the same lowering
-  // boundary together. Verifying a half-expanded stage/Level pair is invalid.
-  PassManager prepare(source.getContext());
-  prepare.addPass(createPrepareRISCVCompositesPass());
-  if (failed(prepare.run(*trial))) { invalid = true; return {}; }
-  if (levelId) {
-    scope = nullptr;
-    unsigned matches = 0;
-    trialKernel.walk([&](scf::ForOp loop) {
-      auto level = loop->getAttrOfType<riscv::LevelAttr>("weft.riscv.level");
-      if (level && level.getDomainId() == *levelId) { scope = loop.getBody(); ++matches; }
-    });
-    if (matches != 1) {
-      rejection = "owning Level no longer has one physical body";
-      invalid = true;
-      return {};
-    }
-  }
-  // Analyze the resulting graph, including independent live values and the
-  // other consumers of the original read. Do not subtract an assumed buffer.
-  if (failed(verify(*trial))) { invalid = true; return {}; }
-  auto pressure = riscv_internal::physicalRegisterPressure(trialKernel);
-  auto work = readWork(scope, rejection);
-  auto program = programWork(scope, rejection);
-  if (!pressure || !work || !program) {
-    if (!pressure) rejection = "unknown register residency";
+  // The one registered production suffix includes packing, scheduling, private
+  // storage, explicit spills and final verification. Never recursively select
+  // supplies or use a cheaper, second materializer for candidate evaluation.
+  PassManager continuation(source.getContext());
+  buildRISCVSharedSupplyContinuation(continuation, lmulEighths, scalarLoadPrime);
+  if (failed(continuation.run(*trial))) {
+    report.ensureFailure();
+    invalid = !report.isCandidateRejection();
     return {};
   }
-  return SupplyEstimate{*work, *program, pressure->total()};
+  SupplyEstimate result;
+  result.legal = true;
+  result.registerPeak = trialKernel.getVectorRegisterPeak() + trialKernel.getFragmentRegisterPeak();
+  result.localBytes = trialKernel.getLocalStorageBytes();
+  trialKernel.walk([&](Operation *operation) {
+    result.spills += isa<riscv::SpillOp>(operation);
+    result.reloads += isa<riscv::ReloadOp, riscv::ReloadSliceOp>(operation);
+  });
+  // Final scheduling may distribute an owning Level across several regions.
+  // Price the complete function, including preparation and all other users.
+  Block *scope = &trialKernel.getBody().front();
+  auto work = readWork(scope, rejection);
+  auto program = programWork(scope, rejection);
+  if (work) result.work = std::move(*work);
+  if (program) result.program = std::move(*program);
+  result.costComplete = work.has_value() && program.has_value();
+  return result;
 }
 
 ArrayAttr workAttributes(Builder &b, const ReadPolynomial &work) {
@@ -633,6 +697,7 @@ ArrayAttr workAttributes(Builder &b, const ReadPolynomial &work) {
         b.getNamedAttr("dynamic_loops", frequencyAttributes(b, key.first)),
         b.getNamedAttr("memory_form", b.getStringAttr(key.second)),
         b.getNamedAttr("read_bytes", b.getI64IntegerAttr(term.bytes)),
+        b.getNamedAttr("write_bytes", b.getI64IntegerAttr(term.writes)),
         b.getNamedAttr("transfers", b.getI64IntegerAttr(term.transfers))}));
   }
   return b.getArrayAttr(terms);
@@ -658,6 +723,13 @@ DictionaryAttr programAttributes(Builder &b, const ProgramWork &work) {
 class SelectSharedSupply : public PassWrapper<SelectSharedSupply, OperationPass<ModuleOp>> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SelectSharedSupply)
+  explicit SelectSharedSupply(int64_t lmul = 8, bool scalarPrime = false) {
+    lmulEighths = lmul;
+    scalarLoadPrime = scalarPrime;
+  }
+  SelectSharedSupply(const SelectSharedSupply &other) : PassWrapper(other) {
+    copyOptionValuesFrom(&other);
+  }
   StringRef getArgument() const override { return "weft-riscv-select-shared-supply"; }
   StringRef getDescription() const override {
     return "Compare complete shared-read and projected-read graphs with frequency and residency";
@@ -668,6 +740,8 @@ public:
     getOperation().walk([&](riscv::KernelOp kernel) {
       if (kernel.getResourcesMaterialized()) return;
       SmallVector<Attribute> decisions;
+      std::optional<SupplyEstimate> incumbent;
+      std::string incumbentFailure;
       if (auto previous = kernel->getAttrOfType<ArrayAttr>("weft.riscv.residency_choices"))
         llvm::append_range(decisions, previous);
       kernel.walk([&](riscv::MaterializeOp materialize) {
@@ -689,48 +763,73 @@ public:
         });
         if (!legal) return;
         std::string beforeFailure, afterFailure;
-        auto before = estimateSupply(materialize, false, beforeFailure, invalid);
-        auto after = invalid ? std::optional<SupplyEstimate>() :
-            estimateSupply(materialize, true, afterFailure, invalid);
+        bool reusedIncumbent = incumbent.has_value();
+        if (!incumbent) {
+          incumbent = estimateSupply(materialize, false, lmulEighths, scalarLoadPrime,
+                                     incumbentFailure, invalid);
+        }
+        const SupplyEstimate &before = *incumbent;
+        beforeFailure = incumbentFailure;
+        auto after = invalid ? SupplyEstimate{} :
+            estimateSupply(materialize, true, lmulEighths, scalarLoadPrime, afterFailure, invalid);
         if (invalid) {
           materialize.emitError("shared supply materialization violated its physical contract: ")
               << (afterFailure.empty() ? beforeFailure : afterFailure);
           return;
         }
-        bool selected = before && after && after->registerPeak <= before->registerPeak &&
-            after->registerPeak <= kernel.getTarget().getVectorRegisters() &&
-            noAdditionalWork(after->program.instructions, before->program.instructions) &&
-            noAdditionalWork(after->program.opaque, before->program.opaque) &&
-            reducesTransfers(after->work, before->work);
+        bool selected = after.legal && (!before.legal ||
+            (before.costComplete && after.costComplete &&
+             after.registerPeak <= before.registerPeak && after.localBytes <= before.localBytes &&
+             noAdditionalWork(after.program.instructions, before.program.instructions) &&
+             noAdditionalWork(after.program.opaque, before.program.opaque) &&
+             reducesTransfers(after.work, before.work)));
         NamedAttrList record;
         record.set("birth", b.getI64IntegerAttr(materialize.getBirthId()));
         record.set("selected", b.getStringAttr(selected ? "reload" : "register"));
         record.set("evaluated_candidates", b.getI64IntegerAttr(2));
+        record.set("materialized_candidates", b.getI64IntegerAttr(reusedIncumbent ? 1 : 2));
+        record.set("incumbent_reused", b.getBoolAttr(reusedIncumbent));
         record.set("cost_basis", b.getStringAttr("physical-program-work-with-symbolic-frequency-and-opaque-terms"));
-        record.set("decision", b.getStringAttr(!before || !after ? "incomplete-domain-or-residency" :
+        record.set("materialization", b.getStringAttr("production-through-final-verification"));
+        record.set("lmul_eighths", b.getI64IntegerAttr(lmulEighths));
+        record.set("scalar_load_prime", b.getBoolAttr(scalarLoadPrime));
+        record.set("decision", b.getStringAttr(selected && !before.legal ? "only-legal-candidate" :
+            !before.legal || !after.legal ? "candidate-rejected" :
+            !before.costComplete || !after.costComplete ? "incomplete-physical-cost" :
             selected ? "no-additional-physical-work-and-residency" : "retain-shared-value"));
         if (!beforeFailure.empty()) record.set("register_unavailable", b.getStringAttr(beforeFailure));
         if (!afterFailure.empty()) record.set("reload_unavailable", b.getStringAttr(afterFailure));
-        if (before) {
-          record.set("register_read_work", workAttributes(b, before->work));
-          record.set("register_peak", b.getI64IntegerAttr(before->registerPeak));
-          record.set("register_program_work", programAttributes(b, before->program));
-        }
-        if (after) {
-          record.set("reload_read_work", workAttributes(b, after->work));
-          record.set("reload_peak", b.getI64IntegerAttr(after->registerPeak));
-          record.set("reload_program_work", programAttributes(b, after->program));
-        }
+        auto recordCandidate = [&](StringRef name, const SupplyEstimate &candidate) {
+          record.set((name + "_legal").str(), b.getBoolAttr(candidate.legal));
+          record.set((name + "_cost_complete").str(), b.getBoolAttr(candidate.costComplete));
+          if (!candidate.legal) return;
+          record.set((name + "_memory_work").str(), workAttributes(b, candidate.work));
+          record.set((name + "_peak").str(), b.getI64IntegerAttr(candidate.registerPeak));
+          record.set((name + "_local_bytes").str(), b.getI64IntegerAttr(candidate.localBytes));
+          record.set((name + "_spill_sites").str(), b.getI64IntegerAttr(candidate.spills));
+          record.set((name + "_reload_sites").str(), b.getI64IntegerAttr(candidate.reloads));
+          record.set((name + "_program_work").str(), programAttributes(b, candidate.program));
+        };
+        recordCandidate("register", before);
+        recordCandidate("reload", after);
         decisions.push_back(record.getDictionary(&getContext()));
-        if (selected) materialize.setPlacementAttr(b.getStringAttr("reload"));
+        if (selected) {
+          materialize.setPlacementAttr(b.getStringAttr("reload"));
+          incumbent = std::move(after);
+          incumbentFailure = std::move(afterFailure);
+        }
       });
       if (!decisions.empty()) kernel->setAttr("weft.riscv.residency_choices", b.getArrayAttr(decisions));
     });
     if (invalid) signalPassFailure();
   }
+private:
+  Option<int64_t> lmulEighths{*this, "lmul-eighths", llvm::cl::init(8)};
+  Option<bool> scalarLoadPrime{*this, "scalar-load-prime", llvm::cl::init(false)};
 };
 } // namespace
 
-std::unique_ptr<mlir::Pass> weft::createSelectRISCVSharedSupplyPass() {
-  return std::make_unique<SelectSharedSupply>();
+std::unique_ptr<mlir::Pass> weft::createSelectRISCVSharedSupplyPass(int64_t lmulEighths,
+                                                               bool scalarLoadPrime) {
+  return std::make_unique<SelectSharedSupply>(lmulEighths, scalarLoadPrime);
 }

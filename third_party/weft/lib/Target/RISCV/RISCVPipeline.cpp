@@ -326,7 +326,8 @@ std::unique_ptr<Pass> makePass(PassID id, const RISCVCompilerOptions &options,
   case PassID::LocalWindows: return createMaterializeRISCVLocalWindowsPass();
   case PassID::CanonicalizeLayouts: return createCanonicalizeRISCVLayoutsPass();
   case PassID::Memory: return createPlanRISCVMemoryPass();
-  case PassID::SharedSupply: return createSelectRISCVSharedSupplyPass();
+  case PassID::SharedSupply:
+    return createSelectRISCVSharedSupplyPass(options.lmulEighths, options.scalarLoadPrime != 0);
   case PassID::PointerOffsets: return createSpecializeRISCVPointerOffsetsPass();
   case PassID::Composites: return createLowerRISCVCompositesPass(options.lmulEighths);
   case PassID::SelectPanelTransfers: return createSelectRISCVPanelTransfersPass();
@@ -534,6 +535,20 @@ void weft::buildRISCVResumePipeline(OpPassManager &manager, RISCVRemainingBindin
   options.lmulEighths = binding.lmulEighths;
   append(manager, checkpointConsumer(binding.checkpoint), options);
   append(manager, afterCheckpoint(binding.checkpoint), options);
+  append(manager, suffix, options);
+}
+
+void weft::buildRISCVSharedSupplyContinuation(OpPassManager &manager,
+                                             int64_t lmulEighths, bool scalarLoadPrime) {
+  auto entries = llvm::ArrayRef<Entry>(prefix);
+  auto selection = llvm::find_if(entries, [](const Entry &entry) {
+    return entry.id == PassID::SharedSupply;
+  });
+  assert(selection != entries.end());
+  RISCVCompilerOptions options;
+  options.lmulEighths = lmulEighths;
+  options.scalarLoadPrime = scalarLoadPrime;
+  append(manager, entries.drop_front(selection - entries.begin() + 1), options);
   append(manager, suffix, options);
 }
 
