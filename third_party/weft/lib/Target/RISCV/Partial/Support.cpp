@@ -4221,7 +4221,22 @@ planScaledSourceLanes(mlir::Builder &builder, riscv::RVVWidenDotOp dot,
       peak = std::max(peak, input + output + 2);
       return true;
     };
-    bool fits = admit(geometry->sourceSetGroups, *repackedGroups);
+    auto sourceSet = riscv::PartialSetType::get(builder.getContext(),
+        geometry->sourceSlot, dot.getOver()[0], sourceSlots, sourceLanes,
+        geometry->sourceSetGroups);
+    auto repackedSet = riscv::PartialSetType::get(builder.getContext(),
+        geometry->partialSlot, dot.getOver()[0], facts.partialSlots,
+        dot.getReductionLanes(), *repackedGroups);
+    auto repack = partialRepackLeaf(builder, kernel.getTarget(), sourceSet,
+                                  repackedSet, split);
+    if (!repack) continue;
+    // Repacking consumes the source set here. Match the production liveness
+    // boundary: source plus the selected leaf's scratch before the operation,
+    // result afterwards. A register split is a view of the same payload; it
+    // must not be rejected as two simultaneously allocated register sets.
+    bool fits = repack->getTemporaryGroups() <= budget - geometry->sourceSetGroups &&
+        admit(std::max(geometry->sourceSetGroups + repack->getTemporaryGroups(),
+                       *repackedGroups), 0);
     if (reduceBeforeScale)
       fits &= admit(*repackedGroups, geometry->reducedGroups) &&
               admit(geometry->reducedGroups, *combinedGroups);

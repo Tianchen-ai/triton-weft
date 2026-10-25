@@ -26,13 +26,15 @@ public:
     getOperation().walk([&](scf::ForOp loop) {
       bool vectorBody = false;
       loop.walk([&](Operation *operation) {
-        if (operation->getParentOfType<scf::ForOp>() != loop) return;
         auto leaf = operation->getAttrOfType<riscv::LeafAttr>("leaf");
         vectorBody |= leaf && (leaf.getEngine() == "rvv" || leaf.getEngine() == "ime");
       });
+      // A finite child traversal can disappear in native code generation.
+      // Preserve the enclosing vector-work loop's placement as well, rather
+      // than aligning only a child header that no longer exists afterwards.
       if (vectorBody)
         loop->setAttr("weft.riscv.code_alignment",
-                      IntegerAttr::get(IntegerType::get(&getContext(), 64), 16));
+                      IntegerAttr::get(IntegerType::get(&getContext(), 64), 32));
     });
     getOperation().walk<WalkOrder::PostOrder>([&](riscv::HelperOp helper) {
       llvm::SetVector<Value> captures;

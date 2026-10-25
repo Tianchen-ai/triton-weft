@@ -15,6 +15,11 @@ RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改�
 分析在扩展位宽内计算取负，若结果可能跨过机器类型边界则退回完整类型域，
 不能用对 signed-min 无效的绝对值证明允许更多窄累加。
 
+partial source-lane 候选按正式 repack leaf 的临时资源评估输入／输出交接：
+操作前计入仍活跃的 source 与 leaf scratch，操作后计入 result。完整寄存器 split
+是原 payload 的视图，不将已消费的 source 与 result 当成两套同时分配的寄存器；
+需要 slice/copy 的 realization 仍计入其真实 scratch，之后重新验证完整程序的峰值。
+
 `Analysis/PhysicalDependence` 与 x86 共用 SCF 的精确静态迭代数，包括空域、非单位步长和
 有符号/无符号比较。RISC-V 的循环不变量读取据此证明循环确实执行；未知边界不获得默认次数。
 驻留成本查询可以保留动态循环次数为符号因子，不给条件分支编造执行概率；这些查询在改写后重建。
@@ -248,8 +253,9 @@ f32/f64 极值选择明确的 `fmax.s/d`、`fmin.s/d` leaf，保留 NaN 与 sign
 策略，最多增加 30 bytes 对齐填充，不是 VLEN 或 cache-line 大小声明。它避免入口仅按
 压缩指令的两字节要求放置、使相同指令随链接器布局产生不稳定的取指表现。
 final verifier 要求显式的合法二次幂对齐；C emitter 只输出已选 `aligned` 属性。
-包含局部 RVV/IME 操作的有序循环另行保存 `weft.riscv.code_alignment=16`，通过
+包含 RVV/IME 操作的有序循环及其外层遍历另行保存 `weft.riscv.code_alignment=32`，通过
 Clang 的 `code_align` 属性固定回边目标的最小对齐。函数入口对齐不能代替循环入口对齐；
+静态子循环可能在原生代码生成时完全展开，外层仍需保留自己的对齐决定。
 该策略不假定更大边界总是更快，也不根据 kernel 名称选择代码偏移。
 
 布局选择同时核对一个 control edge 上全部 carry/result slots 的常驻寄存器占用，
