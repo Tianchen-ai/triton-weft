@@ -10841,6 +10841,7 @@ mlir::LogicalResult RVVProjectedLayeredStreamOp::verify() {
 mlir::LogicalResult RVVSplatOp::verify() {
   if (!isScalar(getScalar().getType()) ||
       (!exactLeaf(getLeaf(), "rvv", "splat", "rvv.splat", "none", "exact") &&
+       !exactLeaf(getLeaf(), "rvv", "splat", "rvv.splat.shared", "none", "exact") &&
        !exactLeaf(getLeaf(), "rvv", "splat", "rvv.splat.local", "none", "exact")) ||
       getResult().getType().getLayout().getCarrier() != "rvv" ||
       elementOf(getScalar().getType()) !=
@@ -10849,6 +10850,11 @@ mlir::LogicalResult RVVSplatOp::verify() {
            << "RVV splat requires a matching scalar and RVV result; scalar="
            << getScalar().getType() << ", result=" << getResult().getType()
            << ", leaf engine=" << getLeaf().getEngine();
+  if (getLeaf().getInstruction() == "rvv.splat.shared") {
+    auto groups = sharedSplatRegisterGroups(getResult().getType());
+    if (!groups || getLeaf().getResultGroups() != *groups)
+      return emitOpError("shared splat requires complete equal-VL parts and one packet's register groups");
+  }
   return mlir::success();
 }
 

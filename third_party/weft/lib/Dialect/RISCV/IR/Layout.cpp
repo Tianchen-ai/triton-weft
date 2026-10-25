@@ -984,6 +984,16 @@ std::optional<int64_t> weft::riscv::axisBroadcastTemporaryGroups(RVVAxisBroadcas
   return peak;
 }
 
+std::optional<int64_t> weft::riscv::sharedSplatRegisterGroups(ValueType result) {
+  if (!result || result.getLayout().getCarrier() != "rvv" ||
+      result.getLayout().getValidity() != "full" ||
+      result.getLayout().getVl() <= 0 || !rvvCarrierCount(result.getLayout()))
+    return std::nullopt;
+  // All complete parts contain the same scalar at the same SEW/LMUL and VL.
+  // The selected splat materializes one immutable packet shared by those parts.
+  return std::max<int64_t>(1, (result.getLayout().getLmulEighths() + 7) / 8);
+}
+
 mlir::Value weft::riscv::registerAliasSource(mlir::Value value) {
   if (auto unpack = value.getDefiningOp<IMEUnpackOp>();
       unpack && isDirectFragmentRVVHandoff(unpack.getInput().getType(), unpack.getResult().getType()) &&

@@ -376,7 +376,7 @@ std::optional<Work> work(riscv::KernelOp kernel) {
     } else if (auto splat = mlir::dyn_cast<riscv::RVVSplatOp>(op)) {
       auto parts = riscv::rvvCarrierCount(splat.getResult().getType().getLayout());
       if (!parts) { complete = false; return; }
-      count = *parts;
+      count = splat.getLeaf().getInstruction() == "rvv.splat.shared" ? 1 : *parts;
     }
     unsigned depth = 0;
     int64_t repetitions = 1;

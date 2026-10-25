@@ -2640,11 +2640,26 @@ mlir::LogicalResult Emitter::compileRVVMultiplyHighScalar(
 
 mlir::LogicalResult Emitter::compileRVVSplat(riscv::RVVSplatOp operation) {
   const bool local = instructionOf(operation.getOperation()) == "rvv.splat.local";
-  if (!local && instructionOf(operation.getOperation()) != "rvv.splat")
+  const bool shared = instructionOf(operation.getOperation()) == "rvv.splat.shared";
+  if (!local && !shared && instructionOf(operation.getOperation()) != "rvv.splat")
     return fail(operation, "RVV splat has no exact selected leaf");
   Binding scalarValue = bindings.lookup(operation.getScalar());
   if (scalarValue.kind != Binding::Kind::Scalar)
     return fail(operation, "RVV splat input has no scalar representation");
+  if (shared) {
+    if (!riscv::sharedSplatRegisterGroups(operation.getResult().getType()))
+      return fail(operation, "shared splat lost its complete single-packet contract");
+    const bool floating = usesFloatingRegisters(operation.getResult().getType().getElementType());
+    auto name = fresh("shared_splat");
+    line(vectorType(operation.getResult()) + " " + name + " = __riscv_" +
+         (floating ? "vfmv_v_f_" : "vmv_v_x_") + vectorSuffix(operation.getResult()) +
+         "(" + scalarValue.scalar + ", " + partVL(operation.getResult(), 0) + ");");
+    Binding result;
+    result.kind = Binding::Kind::Vector;
+    result.parts.assign(vectorPartCount(operation.getResult()), name);
+    bindings[operation.getResult()] = std::move(result);
+    return mlir::success();
+  }
   if (local) {
     Binding result;
     result.kind = Binding::Kind::Vector;

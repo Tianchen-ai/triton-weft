@@ -1,5 +1,6 @@
 #include "RISCVPhysicalSupport.h"
 #include "Weft/Dialect/RISCV/IR/FMAIssue.h"
+#include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "Weft/Analysis/PhysicalDependence.h"
 #include "Weft/Target/RISCVPasses.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -47,11 +48,16 @@ public:
         // tied vfmacc this requires no copy for each iteration.
         scf::ForOp broadcastLoop;
         const bool scalarAddend = shaped && accumulator.getType() == element;
+        std::optional<int64_t> broadcastGroups;
         if (scalarAddend) {
+          broadcastGroups = riscv::sharedSplatRegisterGroups(shaped);
           broadcastLoop = dyn_cast<scf::ForOp>(add->getParentOp());
           auto trips = broadcastLoop ? analysis::staticTripCount(broadcastLoop) : std::nullopt;
-          if (kind != "add" || shaped.getLayout().getValidity() != "full" ||
-              !trips || *trips < 2 || !broadcastLoop.isDefinedOutsideOfLoop(accumulator)) {
+          if (!trips || *trips < 2 || !broadcastLoop.isDefinedOutsideOfLoop(accumulator))
+            broadcastLoop = {};
+          auto parts = riscv::rvvCarrierCount(shaped.getLayout());
+          if (kind != "add" || !broadcastGroups || !parts ||
+              (!broadcastLoop && *parts < 2)) {
             ++scalarAddendsRetained;
             continue;
           }
@@ -80,9 +86,7 @@ public:
           resident += *groups;
         }
         if (scalarAddend) {
-          auto broadcastGroups = residentRegisterGroups(product.getResult());
-          if (!broadcastGroups) known = false;
-          else resident += *broadcastGroups;
+          resident += *broadcastGroups;
         }
         if (!known || resident > add->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters()) {
           ++resourceFrontiersRetained;
@@ -101,10 +105,10 @@ public:
           return;
         }
         if (scalarAddend) {
-          b.setInsertionPoint(broadcastLoop);
+          b.setInsertionPoint(broadcastLoop ? broadcastLoop.getOperation() : add.getOperation());
           auto splat = riscv::RVVSplatOp::create(b, add.getLoc(), shaped, accumulator,
-              leaf(b, "rvv", "splat", "rvv.splat", "rvv.splat", 0,
-                   shaped.getLayout().getRegisterGroups(), 0, 0, "none", "exact"));
+              leaf(b, "rvv", "splat", "rvv.splat.shared", "rvv.splat.shared", 0,
+                   *broadcastGroups, 0, 0, "none", "exact"));
           copyOrigin(add, splat);
           accumulator = splat.getResult();
           ++reusedScalarAddends;

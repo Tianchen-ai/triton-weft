@@ -1064,6 +1064,9 @@ int64_t riscv_internal::issueRegisterGroups(mlir::Type type) {
 
 std::optional<int64_t>
 riscv_internal::residentRegisterGroups(mlir::Value value) {
+  if (auto splat = value.getDefiningOp<riscv::RVVSplatOp>();
+      splat && splat.getLeaf().getInstruction() == "rvv.splat.shared")
+    return riscv::sharedSplatRegisterGroups(splat.getResult().getType());
   if (riscv::isPredicateRegister(value))
     return riscv::predicatePartCount(mlir::cast<riscv::ValueType>(value.getType()));
   auto type = mlir::dyn_cast<riscv::ValueType>(value.getType());
@@ -1086,6 +1089,9 @@ riscv_internal::residentRegisterGroups(mlir::Value value) {
 }
 
 int64_t riscv_internal::issueRegisterGroups(mlir::Value value) {
+  if (auto splat = value.getDefiningOp<riscv::RVVSplatOp>();
+      splat && splat.getLeaf().getInstruction() == "rvv.splat.shared")
+    return riscv::sharedSplatRegisterGroups(splat.getResult().getType()).value();
   if (riscv::isPredicateRegister(value))
     return *riscv::predicateIssueGroups(mlir::cast<riscv::ValueType>(value.getType()));
   return issueRegisterGroups(value.getType());

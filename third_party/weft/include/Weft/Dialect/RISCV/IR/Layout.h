@@ -105,6 +105,7 @@ std::optional<int64_t> packedAxisBroadcastFactor(ValueType input, ValueType resu
 std::optional<int64_t> rvvRowScaleRows(BinaryOp operation);
 std::optional<int64_t> rvvRowScaleTemporaryGroups(BinaryOp operation);
 mlir::Value registerAliasSource(mlir::Value value);
+std::optional<int64_t> sharedSplatRegisterGroups(ValueType result);
 std::optional<llvm::SmallVector<int64_t>> scalarExtractParts(ExtractOp operation);
 std::optional<int64_t> scalarRegisterExtractLanes(ExtractOp operation);
 std::optional<llvm::SmallVector<int64_t>> rvvRegularGatherIndices(

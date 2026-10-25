@@ -1541,11 +1541,13 @@ accumulator-tied FMA leaf 将输出与 vector accumulator 绑定；即使广播�
 减少 issue，且增加向量驻留；同成本保留原实现。不能把尚未物化的广播外提、不同的
 寄存器绑定或仅有语义复用次数，当作已经减少的物理工作。
 对完整 RVV carrier、标量乘数和标量 addend 的加法，可选择另一种精确 leaf `rvv.vfmadd.vf`：
-只有向量乘数在这里最后使用、没有共享 storage identity，且直接 enclosing SCF loop 有至少
-两次已证明的静态迭代、addend 定义在该循环外时，才在循环前物化显式 `rvv_splat`。
-`vfmadd` 覆盖向量乘数，保留这个广播值供后续迭代复用，因此实际工作由每次两条算术变为
-一次广播加每次一条 FMA。广播的全部寄存器组进入前沿与最终活跃区间分析；动态次数、
-tail carrier、减法及仍有消费者的乘数不使用这项选择。不改变作者 Level 或复用范围。
+只有向量乘数在这里最后使用、没有共享 storage identity，且同一完整 Value 有多个 carrier
+parts，或直接 enclosing SCF loop 有至少两次已证明的静态迭代时，才物化显式 `rvv_splat`。
+后一种情况还要求 addend 定义在该循环外，才能将广播放到循环前。选择的 `rvv.splat.shared`
+leaf 将相同 scalar、SEW/LMUL 和完整 VL 的所有 parts 映射到一个只读 packet；emitter 按该决定
+只生成一次广播，成本与驻留查询也只计这个 packet，而完整输出仍计全部 parts。
+`vfmadd` 覆盖向量乘数，保留广播值，实际工作由每个 part 两条算术变为一次广播加每个 part
+一条 FMA。tail carrier、减法及仍有消费者的乘数不使用这项选择，不改变作者 Level 或复用范围。
 已有向量 accumulator 的融合继续进行；已经物化的 `fma` 不由这个隐式 pass 改写。
 选择还要核对三个输入的共同驻留前沿，沿共享 register identity 去重并计入完整 time parts。
 若这个必要输入集已经超过目标寄存器预算，保留原来的两条运算，使 addend 能在乘法输入死亡后
