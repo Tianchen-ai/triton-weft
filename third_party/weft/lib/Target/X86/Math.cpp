@@ -86,6 +86,36 @@ public:
       b.setInsertionPoint(op);
       // Both constants occur in the mask, so both scalar conversions were
       // already demanded. Reads and explicit narrowing stay at their origins.
+      if (target.hasFeature("f16c")) {
+        // Define the complete machine input through integer bits. The two
+        // independent scalar snapshots must not share undefined XMM lanes,
+        // but widening each one separately also loses the packed conversion.
+        auto carrierType = VectorType::get({8}, b.getI16Type());
+        Value carrier = arith::ConstantOp::create(b, op.getLoc(), carrierType,
+            DenseIntElementsAttr::get(carrierType, APInt(16, 0)));
+        for (auto [lane, enabled] : llvm::enumerate(mask.getValues<APInt>())) {
+          Value source = enabled.isZero() ? right.getSource() : left.getSource();
+          Value bits = arith::BitcastOp::create(b, op.getLoc(), b.getI16Type(), source);
+          carrier = vector::InsertOp::create(b, op.getLoc(), bits, carrier,
+              ArrayRef<int64_t>{static_cast<int64_t>(lane)});
+        }
+        auto fp = VectorType::get({4}, b.getF32Type());
+        StringRef name = "llvm.x86.vcvtph2ps.128";
+        auto function = getOperation().lookupSymbol<func::FuncOp>(name);
+        if (!function) {
+          OpBuilder::InsertionGuard guard(b);
+          b.setInsertionPointToEnd(getOperation().getBody());
+          function = func::FuncOp::create(b, op.getLoc(), name,
+              b.getFunctionType({carrierType}, {fp}));
+          function.setPrivate();
+        }
+        Value converted = func::CallOp::create(b, op.getLoc(), function, ValueRange{carrier}).getResult(0);
+        Value result = vector::ExtractStridedSliceOp::create(b, op.getLoc(), converted,
+            ArrayRef<int64_t>{0}, ArrayRef<int64_t>{2}, ArrayRef<int64_t>{1});
+        if (output.getElementType().isF64()) result = arith::ExtFOp::create(b, op.getLoc(), output, result);
+        b.replaceOp(op, result);
+        continue;
+      }
       auto widen = [&](Value value) -> Value {
         Value result = weft::widenX86ScalarHalf(getOperation(), b, op.getLoc(), value, target);
         if (output.getElementType().isF64()) result = arith::ExtFOp::create(b, op.getLoc(), b.getF64Type(), result);
