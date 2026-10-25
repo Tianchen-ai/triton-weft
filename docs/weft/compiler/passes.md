@@ -1519,11 +1519,11 @@ validity 保持相同。不穿过改变类型的数值操作，不移动任何�
 两次运算的精度必须相同，不能绕过 cast/widen/narrow、跨 region 或 write/未知 effect。
 当前支持 f32/f64 scalar，以及同布局 RVV vector/vector、vector/scalar；其它
 形状继续使用原有两条运算。选择不依赖 kernel、量化格式或扩展名称。
-向量结果只含一个物理 packet 且 scalar addend 在最近的循环内变化时，保留原有
-multiply 与 `.vf` add/subtract；新建 splat 再做 FMA 没有减少指令数。
-完整有效域的多个 time/replica packet 可以共用同一 scalar 广播，因而允许显式
-splat + FMA；不能只按一个 packet 的成本拒绝整个 Value 的融合。若 addend 定义在
-循环外，广播也可跨迭代复用。新增 accumulator 的存活与读写仍由资源 pass 核算。
+向量结果使用 scalar addend 时，成本必须计入每个 packet 的广播和破坏式目的寄存器准备。
+当前 FMA leaf 将输出与 vector accumulator 绑定；即使广播可共享，也仍需为后续 packet
+或循环迭代复制该初值。因此 `splat/copy + FMA` 没有比原 `mul + .vf add/subtract`
+减少 issue，且增加向量驻留；同成本保留原实现。不能把尚未物化的广播外提、不同的
+寄存器绑定或仅有语义复用次数，当作已经减少的物理工作。
 已有向量 accumulator 的融合继续进行；已经物化的 `fma` 不由这个隐式 pass 改写。
 独立的 `fma` 保存 typed operands 和 exact leaf，资源 pass 重新核算实际活跃值；
 它沿用原 pointwise 的逐 part 活动长度，没有 closed FMA issue 的调度屏障或 loop-unroll 限制。

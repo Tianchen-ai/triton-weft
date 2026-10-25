@@ -1,7 +1,6 @@
 #include "RISCVPhysicalSupport.h"
 #include "Weft/Dialect/RISCV/IR/FMAIssue.h"
 #include "Weft/Target/RISCVPasses.h"
-#include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 
 using namespace mlir;
@@ -34,26 +33,20 @@ public:
         Value lhs = product.getLhs(), rhs = product.getRhs();
         Value accumulator = add->getOperand(1 - operand);
         Type result = add.getResult().getType();
-        auto vector = dyn_cast<riscv::ValueType>(result);
-        const bool scalarAccumulator = vector && accumulator.getType() == vector.getElementType();
-        bool reusableSplat = false;
-        if (scalarAccumulator) {
-          auto layout = vector.getLayout();
-          const auto streams = staticProduct(layout.getTimeFactors().asArrayRef());
-          const auto replicas = staticProduct(layout.getReplicaFactors().asArrayRef());
-          reusableSplat = layout.getValidity() == "full" &&
-              (streams.value_or(1) > 1 || replicas.value_or(1) > 1);
-          if (!reusableSplat)
-            for (Operation *parent = add->getParentOp(); parent; parent = parent->getParentOp())
-              if (auto loop = dyn_cast<LoopLikeOpInterface>(parent)) {
-                reusableSplat = loop.isDefinedOutsideOfLoop(accumulator);
-                break;
-              }
+        auto shaped = dyn_cast<riscv::ValueType>(result);
+        Type element = shaped ? shaped.getElementType() : result;
+        if (!element.isF32() && !element.isF64()) continue;
+        // The selected FMA ties its output to the vector accumulator. A scalar
+        // addend therefore needs a splat (or a copy of a shared splat) for every
+        // packet, even when the scalar itself is loop-invariant. This replaces
+        // mul + .vf add/sub with splat/copy + FMA: equal issue work with longer
+        // vector residency. Preserve the existing implementation on that tie;
+        // do not price a broadcast hoist or a different tied operand that this
+        // materializer does not actually produce.
+        if (accumulator.getType() != result) {
+          if (accumulator.getType() == element) ++scalarAddendsRetained;
+          continue;
         }
-        // A changing scalar addend already has a direct .vf add/subtract form;
-        // splat + FMA saves no instruction for a single packet. Full packets
-        // share the broadcast, as can loop iterations with an invariant addend.
-        if (accumulator.getType() != result && !reusableSplat) continue;
         const StringRef kind = add.getKind() == "add" ? "add" :
             operand == 0 ? "subtract_accumulator" : "subtract_product";
         auto instruction = riscv::pointwiseFMAInstruction(lhs.getType(), rhs.getType(), result, kind);
@@ -75,13 +68,6 @@ public:
           return;
         }
         b.setInsertionPoint(add);
-        if (scalarAccumulator) {
-          auto splat = riscv::RVVSplatOp::create(b, add.getLoc(), vector, accumulator,
-              leaf(b, "rvv", "splat", "rvv.splat", "rvv.splat", 0,
-                   vector.getLayout().getRegisterGroups()));
-          copyOrigin(add, splat);
-          accumulator = splat.getResult();
-        }
         auto fused = riscv::FMAOp::create(b, add.getLoc(), result, lhs, rhs, accumulator,
             leaf(b, isa<riscv::ValueType>(result) ? "rvv" : "scalar", "fma", instruction, instruction,
                  issueRegisterGroups(lhs) + issueRegisterGroups(rhs) + issueRegisterGroups(accumulator),
@@ -97,6 +83,8 @@ public:
   }
 private:
   Statistic contracted{this, "weft-pointwise-fma", "Single-use floating multiply/add pairs contracted"};
+  Statistic scalarAddendsRetained{this, "weft-fma-scalar-addends-retained",
+                                  "Scalar addends retained after accounting for broadcast/copy issue work"};
 };
 } // namespace
 
