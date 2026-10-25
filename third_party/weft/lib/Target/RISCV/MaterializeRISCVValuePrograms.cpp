@@ -279,6 +279,7 @@ private:
         for (int64_t axis : riscv_internal::logicalAxes(type)) nextAxis = std::max(nextAxis, axis + 1);
       auto extract = dyn_cast<riscv::ExtractOp>(op);
       if (extract && extract.getResult().getType().isIntOrIndexOrFloat() &&
+          !extract->hasAttr("weft.riscv.validity_lowered") &&
           extract.getInput().getType().getLayout().getValidity() != "full" &&
           llvm::all_of(extract.getSelectors(), [](Attribute a) { return cast<StringAttr>(a).getValue() == "index"; }))
         projections.push_back(extract);

@@ -36,7 +36,7 @@ public:
     registry.insert<riscv::WEFTRISCVDialect, arith::ArithDialect, scf::SCFDialect>();
   }
   void runOnOperation() override {
-    SmallVector<riscv::MacGroupsOp> operations;
+    SmallVector<Operation *> operations;
     SmallVector<Operation *> original;
     int64_t nextAxis = 0;
     getOperation().walk<WalkOrder::PreOrder>([&](Operation *op) {
@@ -54,6 +54,16 @@ public:
         for (Block &block : region)
           for (Type type : block.getArgumentTypes()) inspect(type);
       if (auto mac = dyn_cast<riscv::MacGroupsOp>(op); mac && !hasWideningReduction(mac)) operations.push_back(mac);
+      if (auto fold = dyn_cast<riscv::Fold2Op>(op)) {
+        auto field = sourceField(fold.getInput());
+        auto facts = field ? fieldFacts(field) : FieldFacts{};
+        // A numerical snapshot is no longer an encoded field address. Keep the
+        // direct natural-field leaf only when its original storage edge exists;
+        // otherwise materialize the same pair sums through numeric projections.
+        if (!field || facts.mapping != "natural" || facts.bitOffset % 8 ||
+            !logicalElement(fold.getInput().getType()).isSignedInteger(16))
+          operations.push_back(fold);
+      }
     });
     IRRewriter b(&getContext());
     DenseMap<Value, Value> results, masks;
@@ -62,28 +72,31 @@ public:
       if (failed(materialize(b, op, groupedAxis, nextAxis, results, masks))) { signalPassFailure(); return; }
     }
     if (failed(propagateNumericValidity(b, original, masks, nextAxis))) { signalPassFailure(); return; }
-    for (auto op : operations) b.replaceOp(op, results.lookup(op.getResult()));
+    for (auto op : operations) b.replaceOp(op, results.lookup(op->getResult(0)));
   }
 private:
-  LogicalResult materialize(IRRewriter &b, riscv::MacGroupsOp op, int64_t groupedAxis, int64_t &nextAxis,
+  LogicalResult materialize(IRRewriter &b, Operation *op, int64_t groupedAxis, int64_t &nextAxis,
                             DenseMap<Value, Value> &results, DenseMap<Value, Value> &masks) {
-    auto left = cast<riscv::ValueType>(op.getLhs().getType());
-    auto right = cast<riscv::ValueType>(op.getRhs().getType());
-    auto result = cast<riscv::ValueType>(op.getResult().getType());
+    SmallVector<Value> inputs(op->getOperands());
+    auto mac = dyn_cast<riscv::MacGroupsOp>(op);
+    int64_t group = mac ? mac.getGroup() : 2;
+    auto result = cast<riscv::ValueType>(op->getResult(0).getType());
     auto domain = [](riscv::ValueType type) {
       return analysis::LogicalDomain{type.getShape().asArrayRef(), type.getAxisIds().asArrayRef()};
     };
-    auto relation = analysis::groupedAxes({domain(left), domain(right)}, domain(result), op.getGroup());
-    if (!relation) return op.emitError("grouped arithmetic requires a bounded complete group and matching logical axes");
-    if (llvm::any_of(left.getShape().asArrayRef(), [](int64_t n) { return n > UINT32_MAX; }) ||
-        llvm::any_of(right.getShape().asArrayRef(), [](int64_t n) { return n > UINT32_MAX; }))
-      return op.emitError("grouped projection exceeds its u32 coordinate domain");
+    SmallVector<analysis::LogicalDomain> domains;
+    for (Value input : inputs) domains.push_back(domain(cast<riscv::ValueType>(input.getType())));
+    auto relation = analysis::groupedAxes(domains, domain(result), group);
+    if (!relation) return op->emitError("grouped arithmetic requires a bounded complete group and matching logical axes");
+    for (const auto &input : domains)
+      if (llvm::any_of(input.shape, [](int64_t n) { return n > UINT32_MAX; }))
+        return op->emitError("grouped projection exceeds its u32 coordinate domain");
     b.setInsertionPoint(op);
-    Location loc = op.getLoc();
+    Location loc = op->getLoc();
     SmallVector<SmallVector<Value>> bounds;
-    for (Value input : {op.getLhs(), op.getRhs()}) {
+    for (Value input : inputs) {
       auto active = activeNumericExtents(b, input);
-      if (failed(active)) return op.emitError("grouped arithmetic requires a complete active-coordinate relation for each input");
+      if (failed(active)) return op->emitError("grouped arithmetic requires a complete active-coordinate relation for each input");
       bounds.push_back(*active);
     }
     auto makeType = [&](Type element, ArrayRef<int64_t> shape, ArrayRef<int64_t> axes) {
@@ -98,7 +111,8 @@ private:
     SmallVector<int64_t> outputAxes(result.getAxisIds().asArrayRef());
     outputAxes.back() = groupedAxis;
     SmallVector<int64_t> productAxes, productShape;
-    for (auto type : {left, right})
+    for (Value input : inputs) {
+      auto type = cast<riscv::ValueType>(input.getType());
       for (int64_t sourceAxis : type.getAxisIds().asArrayRef()) {
         int64_t axis = sourceAxis == relation->axis ? groupedAxis : sourceAxis;
         if (!llvm::is_contained(productAxes, axis)) {
@@ -106,6 +120,7 @@ private:
           productShape.push_back(result.getShape()[llvm::find(outputAxes, axis) - outputAxes.begin()]);
         }
       }
+    }
     auto accumulatorType = makeType(result.getElementType(), productShape, productAxes);
     // Every validity coordinate must be evaluated, including false rows on a
     // free-axis tail. Which free axis becomes an RVV lane is a later decision.
@@ -122,7 +137,7 @@ private:
       SmallVector<Value> values;
       Value valid = riscv::ConstantOp::create(b, loc, b.getI1Type(), b.getBoolAttr(true));
       SmallVector<int64_t> validityShape, validityAxes;
-      for (auto [inputNumber, input] : llvm::enumerate(SmallVector<Value>{op.getLhs(), op.getRhs()})) {
+      for (auto [inputNumber, input] : llvm::enumerate(inputs)) {
         auto type = cast<riscv::ValueType>(input.getType());
         SmallVector<int64_t> shape(type.getShape().asArrayRef()), axes(type.getAxisIds().asArrayRef());
         shape.back() = relation->groups; axes.back() = groupedAxis;
@@ -153,7 +168,7 @@ private:
               projected, unselectedLeaf(b));
         values.push_back(projected);
       }
-      Value value = riscv::BinaryOp::create(b, loc, accumulatorType, values[0], values[1], "mul", unselectedLeaf(b));
+      Value value = mac ? Value(riscv::BinaryOp::create(b, loc, accumulatorType, values[0], values[1], "mul", unselectedLeaf(b))) : values[0];
       Attribute zero = isa<FloatType>(result.getElementType()) ? Attribute(b.getFloatAttr(result.getElementType(), 0.0)) :
           Attribute(b.getIntegerAttr(result.getElementType(), 0));
       Value identity = riscv::ConstantOp::create(b, loc, result.getElementType(), zero);
@@ -199,8 +214,8 @@ private:
     auto restored = riscv::ReshapeOp::create(b, loc, result, accumulator,
         orderedType.getAxisIds(), DenseI64ArrayAttr());
     copyOrigin(op, restored);
-    results[op.getResult()] = restored;
-    masks[op.getResult()] = riscv::ReshapeOp::create(b, loc,
+    results[op->getResult(0)] = restored;
+    masks[op->getResult(0)] = riscv::ReshapeOp::create(b, loc,
         makeType(b.getI1Type(), result.getShape().asArrayRef(), result.getAxisIds().asArrayRef()), active,
         orderedMask.getAxisIds(), DenseI64ArrayAttr());
     return success();

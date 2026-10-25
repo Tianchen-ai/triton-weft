@@ -576,10 +576,8 @@ bool supportsPackedIndexedEntryLookup(riscv::LookupOp lookup,
   mlir::Value descriptor = table;
   if (auto load = table.getDefiningOp<riscv::LoadOp>())
     descriptor = load.getRegion();
-  int64_t alignment = 1;
+  int64_t alignment = riscv_internal::indexedEntrySourceAlignment(descriptor);
   int64_t bitOffset = 0;
-  if (auto memory = mlir::dyn_cast<riscv::MemDescType>(descriptor.getType()))
-    alignment = memory.getAlignment();
   if (auto field = descriptor.getDefiningOp<riscv::FieldOp>()) {
     auto facts = riscv_internal::fieldFacts(field);
     alignment = facts.alignment;
@@ -3028,13 +3026,6 @@ public:
           indices.getLayout().getCarrier() != "rvv" ||
           result.getLayout().getCarrier() != "rvv")
         return;
-      if (table.getLayout().getSew() != result.getLayout().getSew() ||
-          indices.getLayout().getSew() != result.getLayout().getSew()) {
-        lookup.emitError(
-            "register lookup operands have no common RVV SEW representation");
-        failed = true;
-        return;
-      }
       const int64_t requiredLMUL = result.getLayout().getLmulEighths();
       auto tableElements =
           riscv_internal::staticProduct(table.getShape().asArrayRef());
@@ -3045,8 +3036,19 @@ public:
       // addressable table.  PlanRISCVMemory will choose an indexed-memory leaf
       // for this physical instance instead of inventing a partial register
       // table or changing the logical lookup.
-      if (!tableElements || *tableElements > tableCapacity)
+      if (!tableElements || *tableElements <= 0 || *tableElements > tableCapacity ||
+          table.getLayout().getValidity() != "full")
         return;
+      // The equal-SEW restriction belongs to an actual register-table
+      // realization. Large/dynamic tables use indexed memory, whose EEW is
+      // independent of the payload SEW; their indices must remain wide enough.
+      if (table.getLayout().getSew() != result.getLayout().getSew() ||
+          indices.getLayout().getSew() != result.getLayout().getSew()) {
+        lookup.emitError(
+            "register lookup operands have no common RVV SEW representation");
+        failed = true;
+        return;
+      }
       if (table.getLayout().getLmulEighths() == requiredLMUL)
         return;
       if (computedTable) {

@@ -184,6 +184,9 @@ free-axis 对齐和完整分组范围，再展开为闭合 primitive 内的 type
 物理分组坐标使用私有轴；输出先完成坐标置换，再恢复原 grouped axis identity，
 不修改作者的 Level、state 或 workspace。已有 single-use 混合 byte
 `mac_groups → widen → reduce(add)` 仍交给 widening-dot 专门物化路径。
+普通数值 `sum_pairs` 复用相同的分组坐标、类型转换与有效域传播，只累加每组的两个输入；
+已闭合、自然对齐的 signed i16 编码字段仍可使用现有的直接 pair-fold leaf。数值快照
+不被伪装成 encoded field，也不要求作者为不同物理载体改写 pair-sum 算法。
 
 分组有效性是各原始有效项的逻辑 OR，不能把物理补零后的完整寄存器当作全部有效。
 独立 grouped program 显式携带该谓词，并在每个乘积进入累加前补 identity；
@@ -193,6 +196,10 @@ free-axis 对齐和完整分组范围，再展开为闭合 primitive 内的 type
 谓词的逻辑域覆盖整个容量，非活动位置明确为 false。谓词合取与选择使用私有坐标
 别名完成，再投影回原数值轴，避免外层数值 tail 的 VL 截短谓词本身；同域的单一
 谓词直接复用，不为窄化后再扩宽额外生成向量合取。
+标量 Extract 的所有用途完成上述 SSA 谓词传播后，记录 `weft.riscv.validity_lowered`；
+后续 numerical-value pass 不再从旧矩形 shape 重建另一份谓词。重建不同数值投影时不复制
+这一完成标记。私有 scalar store 同样消费有效谓词，全真谓词不额外生成分支；由显式
+identity seed 初始化的 stream reduction 保留其 surviving free axes 的已定义坐标。
 
 分组结果的自由轴也在完整私有谓词域内计算，不能依赖后来恰好选到哪条 SIMD 轴。
 归约先按相同数值合同给无效项补 identity，再对原谓词做 OR；完全无效的输出仍无效。
@@ -206,6 +213,9 @@ shaped store 物化为有界坐标遍历和受谓词控制的真实写入，不�
 实现：后续 Value program 新产生的 RVV 转换也必须显式形成合法 narrowing 链。
 Boolean predicate 是 packed mask，转为数值时物化同坐标的 0/1 select，不能按 byte
 向量 reinterpret。新值进入正常 leaf、生命周期与资源分析，terminal 不补造转换程序。
+后续 bitplane、signed-mask reduction 和 masked-negate 选择共用该 0/1 关系，接受转换
+物化后的 `select(predicate, 1, 0)`，不要求前一 pass 保留已经退出的 cast 形式。
+额外数值消费者、非布尔输入及改变坐标的转换继续受各局部实现的 use-def 和类型条件约束。
 
 `Analysis/ReductionIdentity` 由 x86 与 RISC-V 共用。整数极值使用声明 signedness 的边界；
 浮点 max/min 使用 NaN identity，保证全部有效元素为 NaN 时仍返回 NaN。标量尾段的
@@ -356,6 +366,10 @@ storage layer 宽度约束 raw field 和保持表示的 cast/conversion 链；lo
 table 完整元素能放入所需 register capacity 时，shared materialize 或同 SEW 的单消费者
 table load 可匹配查询的 LMUL；原读取点、逻辑 extent、VL 和 lane/time mapping 均不改变。
 不同 SEW 的 memory lookup 不属于该寄存器匹配候选，仍由 typed indexed-memory 关系选择。
+完整自然 record field 可以保持数值 load 和显式 `field_view`，无需先复制整张 encoded 表。
+`field_view` 仍保留原字段的存储对齐证明；indexed-entry 选择据此读取完整条目，不能因
+descriptor 的元素对齐较弱而遗失已经成立的 record 对齐。读取快照与别名写入继续由共同
+存储分析约束；表容量先决定寄存器候选是否合法，再核对寄存器 gather 的同 SEW 关系。
 
 dense stage 的 addressable supply 不可只凭投影形式或大小选成 reload。候选必须证明从原
 load 到每个 consumer 都处于同一 read epoch，包括重复子区域中 consumer 之后的写入。
@@ -1406,6 +1420,8 @@ copy leaf 在 target 合法的 m1/m2/m4 中按精确 transfer 次数与 scratch 
 的库函数调用。
 已有 snapshot storage operand 的 load 保留这个已验证的 copy leaf；重放 memory planning
 不能把它改回普通 load，清 resource marker 也不改变 snapshot 的归属和读取合同。
+多维完整 record 的别名保护统一由这一 pass 实现；字段规划不再为相同读取另建逐字段
+byte decode 快照。bit-level 非自然布局所需的显式字节投影仍由字段规划处理。
 
 ### `CloseRISCVLeafResources`
 

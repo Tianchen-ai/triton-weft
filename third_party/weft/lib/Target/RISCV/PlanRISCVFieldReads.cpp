@@ -185,10 +185,8 @@ FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
 
 LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter &b) {
   SmallVector<riscv::FieldOp> fields;
-  llvm::DenseMap<Operation *, bool> snapshots;
   module.walk([&](riscv::FieldOp field) {
     fields.push_back(field);
-    if (auto load = encodedReadEpoch(field.getOwner())) snapshots.try_emplace(load, needsReadSnapshot(load));
   });
   llvm::DenseMap<std::pair<Value, StringAttr>, Value> saved;
   int64_t identity = lastLocalIdentity(module);
@@ -252,8 +250,12 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     auto owner = load.getRegion().getType();
     auto facts = fieldFacts(field);
     int64_t bits = logicalBitWidth(value ? value.getElementType() : field.getResult().getType());
+    // Complete encoded snapshots, including multidimensional records, belong
+    // to MaterializeRISCVReadSnapshots. Preserve the field edge so its normal
+    // vector/fragment consumer reads that same saved record. Only layouts whose
+    // byte projection is not covered by an existing transfer need expansion.
     bool general = (facts.mapping == "natural" && (bits % 8 || facts.alignment < bits / 8)) ||
-        (owner.getShape().size() > 1 && (facts.mapping == "joined" || snapshots.lookup(load)));
+        (owner.getShape().size() > 1 && facts.mapping == "joined");
     if (!general) continue;
     if (owner.getShape().empty() || owner.getShape().asArrayRef().back() != owner.getElements())
       return field.emitError("field byte read requires one complete record along the encoded element axis");

@@ -75,6 +75,18 @@ public:
       auto extents = get(op->getOperand(0));
       if (failed(extents)) return failure();
       result = *extents;
+    } else if (isa<riscv::ReduceOp, riscv::RVVStreamFinalizeOp>(op)) {
+      // Reduction removes its contracted axes; every surviving coordinate
+      // retains the producer's domain. Stream accumulators are fully defined
+      // by their explicit seed even when an output tile has a tail.
+      auto input = cast<riscv::ValueType>(op->getOperand(0).getType());
+      auto incoming = get(op->getOperand(0));
+      if (failed(incoming)) return failure();
+      for (int64_t axis : type.getAxisIds().asArrayRef()) {
+        auto found = llvm::find(input.getAxisIds().asArrayRef(), axis);
+        if (found == input.getAxisIds().asArrayRef().end()) return failure();
+        result.push_back((*incoming)[found - input.getAxisIds().asArrayRef().begin()]);
+      }
     } else if (isa<riscv::IotaOp>(op)) {
       for (int64_t extent : type.getShape().asArrayRef()) {
         if (extent <= 0) return failure();
@@ -517,7 +529,11 @@ public:
         }
       }
       if (!llvm::any_of(op->getOperands(), [&](Value value) { return masks.contains(value); })) continue;
-      if (op->getNumResults() == 1 && masks.contains(op->getResult(0))) continue;
+      if (op->getNumResults() == 1 && masks.contains(op->getResult(0))) {
+        if (isa<riscv::ExtractOp>(op) && op->getResult(0).getType().isIntOrIndexOrFloat())
+          op->setAttr("weft.riscv.validity_lowered", b.getUnitAttr());
+        continue;
+      }
       b.setInsertionPoint(op);
       auto loc = op->getLoc();
       if (auto store = dyn_cast<riscv::PointerStoreOp>(op)) {
@@ -530,6 +546,14 @@ public:
         masks[atomic.getResult()] = mask;
       } else if (auto store = dyn_cast<riscv::StoreOp>(op)) {
         if (failed(this->store(store))) return failure();
+      } else if (isa<riscv::LocalStoreOp, riscv::FieldByteStoreOp>(op)) {
+        Value valid = combined(op, op->getOperand(0).getType());
+        if (!valid.getType().isInteger(1))
+          return op->emitError("scalar payload store requires one scalar active predicate");
+        if (!matchPattern(valid, m_One())) {
+          auto branch = scf::IfOp::create(b, loc, valid, false);
+          op->moveBefore(branch.thenBlock()->getTerminator());
+        }
       } else if (auto reduction = dyn_cast<riscv::ReduceOp>(op)) {
         if (failed(reduce(reduction))) return failure();
       } else if (auto extract = dyn_cast<riscv::ExtractOp>(op)) {
@@ -538,6 +562,8 @@ public:
         masks[extract.getResult()] = riscv::ExtractOp::create(b, loc,
             predicateType(b, extract.getResult().getType()), source, extract.getIndices(),
             extract.getSelectorsAttr(), unassignedAccess(b), unselectedLeaf(b));
+        if (extract.getResult().getType().isIntOrIndexOrFloat())
+          extract->setAttr("weft.riscv.validity_lowered", b.getUnitAttr());
       } else if (auto reshape = dyn_cast<riscv::ReshapeOp>(op)) {
         masks[reshape.getResult()] = riscv::ReshapeOp::create(b, loc,
             cast<riscv::ValueType>(predicateType(b, reshape.getResult().getType())), masks.lookup(reshape.getInput()),
@@ -556,7 +582,7 @@ public:
                      riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp>(op)) {
         masks[op->getResult(0)] = combined(op, op->getResult(0).getType());
       } else {
-        return op->emitError("numeric validity has no explicit physical propagation for this consumer");
+        return op->emitError("numeric validity has no explicit physical propagation for ") << op->getName();
       }
     }
     return success();

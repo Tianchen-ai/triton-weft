@@ -40,6 +40,12 @@ riscv_internal::ownedLocalStorageAlignment(mlir::Value value) {
 }
 
 int64_t riscv_internal::indexedEntrySourceAlignment(mlir::Value source) {
+  // A field view changes the addressable element type, not the address of
+  // its selected record field. Its descriptor may only promise element
+  // alignment; retain the stronger storage proof for packed entry loads.
+  if (auto view = source.getDefiningOp<riscv::FieldViewOp>())
+    if (auto field = view.getField().getDefiningOp<riscv::FieldOp>())
+      return fieldFacts(field).alignment;
   if (auto descriptor = mlir::dyn_cast<riscv::MemDescType>(source.getType()))
     return descriptor.getAlignment();
   if (auto field = sourceField(source))

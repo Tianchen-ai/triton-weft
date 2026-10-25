@@ -3566,6 +3566,19 @@ public:
       operation.setAccessAttr(access);
       operation.setLeafAttr(transferLeaf(
           builder, "encoded-field", ("rvv.encoded." + access.getMapping()).str()));
+      if (riscv::isContiguousRecordField(operation.getResult())) {
+        llvm::SmallVector<riscv::LoadOp> readers;
+        for (auto *user : operation.getResult().getUsers())
+          if (auto read = mlir::dyn_cast<riscv::LoadOp>(user)) readers.push_back(read);
+        for (auto read : readers) {
+          rewriter.setInsertionPoint(read);
+          auto zero = mlir::arith::ConstantIndexOp::create(rewriter, read.getLoc(), 0);
+          auto view = riscv::FieldViewOp::create(rewriter, read.getLoc(), operation.getResult().getType(),
+                                                operation.getResult(), zero);
+          riscv_internal::copyOrigin(operation, view);
+          read.getRegionMutable().assign(view.getResult());
+        }
+      }
     });
     // Register gathers must see a numeric table, with its storage decode
     // already explicit, before selecting and narrowing their index carriers.

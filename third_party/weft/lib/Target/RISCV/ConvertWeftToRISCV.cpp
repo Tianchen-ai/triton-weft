@@ -8,6 +8,7 @@
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/Kernel/IR/SubviewBounds.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
+#include "Weft/Dialect/RISCV/IR/Memory.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -1103,7 +1104,26 @@ private:
       auto field = projected.getDefiningOp<riscv::FieldOp>();
       auto owner = field ? mlir::dyn_cast<riscv::MemDescType>(field.getOwner().getType())
                          : riscv::MemDescType();
-      if (owner) {
+      auto fieldViewType = field ? mlir::dyn_cast<riscv::MemDescType>(projected.getType()) : riscv::MemDescType();
+      auto facts = field ? riscv_internal::fieldFacts(field) : riscv_internal::FieldFacts{};
+      auto recordEncoding = owner ? mlir::dyn_cast<kernel::EncodingType>(owner.getEncoding()) : kernel::EncodingType();
+      auto declaration = recordEncoding ? riscv_internal::findEncoding(field, recordEncoding.getFamily()) : riscv::EncodingDeclOp();
+      const bool completeNaturalStorage = owner && fieldViewType && windows.empty() &&
+          recordEncoding && recordEncoding.getKind() == "base" && declaration &&
+          declaration.getByteOrder() == "little" && declaration.getBitOrder() == "lsb_first" &&
+          (mlir::isa<mlir::BlockArgument>(field.getOwner()) ||
+           field.getOwner().getDefiningOp<riscv::MemoryViewOp>()) &&
+          facts.mapping == "natural" && facts.bitOffset == 0 && owner.getInterleaveRows() == 0 &&
+          fieldViewType.getStorageBits() >= 8 && fieldViewType.getStorageBits() % 8 == 0 &&
+          facts.alignment >= fieldViewType.getStorageBits() / 8 &&
+          facts.storageBits == owner.getStorageBits() &&
+          owner.getStorageBits() / fieldViewType.getStorageBits() == owner.getElements() &&
+          owner.getStorageBits() % fieldViewType.getStorageBits() == 0 &&
+          owner.getShape() == fieldViewType.getShape() && owner.getStrides() == fieldViewType.getStrides() &&
+          owner.getOrigins() == fieldViewType.getOrigins() &&
+          llvm::all_of(owner.getOrigins().asArrayRef(), [](int64_t origin) { return origin == 0; }) &&
+          riscv::hasContiguousDenseStorage(fieldViewType);
+      if (owner && !completeNaturalStorage) {
         // A field View retains its owner's packed storage; admitting it is a
         // numeric field projection, never a byte-addressable dense i4/i6 load.
         auto element = denseElementType(mlir::cast<kernel::EncodingType>(

@@ -88,6 +88,26 @@ mlir::Value stripSingleUsePureCopies(mlir::Value value, mlir::Block *block) {
   return {};
 }
 
+// Numeric conversion of a predicate is represented as select(1, 0) once
+// machine-width conversion materialization has run. Consumers of the bit
+// relation must use that same semantic edge, rather than requiring the old
+// cast spelling to survive until this pass.
+mlir::Value numericBitInput(mlir::Value value) {
+  mlir::Value bit;
+  if (auto widen = value.getDefiningOp<riscv::WidenOp>())
+    bit = widen.getInput();
+  else if (auto cast = value.getDefiningOp<riscv::CastOp>())
+    bit = cast.getInput();
+  else if (auto select = value.getDefiningOp<riscv::SelectOp>();
+           select && riscv_internal::constantInt(select.getTrueValue()) == 1 &&
+           riscv_internal::constantInt(select.getFalseValue()) == 0)
+    bit = select.getCondition();
+  auto type = bit ? mlir::dyn_cast<mlir::IntegerType>(
+                        riscv_internal::logicalElement(bit.getType()))
+                  : mlir::IntegerType();
+  return type && type.getWidth() == 1 && !type.isSigned() ? bit : mlir::Value();
+}
+
 std::optional<MaskedNegateRelation>
 matchMaskedNegate(riscv::BinaryOp product, mlir::Value data, mlir::Value sign) {
   auto type = mlir::dyn_cast<riscv::ValueType>(data.getType());
@@ -112,11 +132,8 @@ matchMaskedNegate(riscv::BinaryOp product, mlir::Value data, mlir::Value sign) {
   bit = stripSingleUsePureCopies(bit, block);
   if (!bit || bit.getType() != type)
     return std::nullopt;
-  if (auto widen = bit.getDefiningOp<riscv::WidenOp>())
-    bit = widen.getInput();
-  else if (auto cast = bit.getDefiningOp<riscv::CastOp>())
-    bit = cast.getInput();
-  else
+  bit = numericBitInput(bit);
+  if (!bit)
     return std::nullopt;
   bit = stripSingleUsePureCopies(bit, block);
   auto mask = bit ? bit.getDefiningOp<riscv::RVVBitmaskWindowLoadOp>()
@@ -224,13 +241,10 @@ matchSignedBitmaskReduction(riscv::RVVWidenDotOp dot, mlir::Value centered,
   if (!isBinaryWithConstant(multiply, "mul", 2, bitValue))
     return std::nullopt;
   bitValue = riscv_internal::stripRepresentationConversions(bitValue);
-  if (auto widen = bitValue.getDefiningOp<riscv::WidenOp>())
-    bitValue =
-        riscv_internal::stripRepresentationConversions(widen.getInput());
-  else if (auto cast = bitValue.getDefiningOp<riscv::CastOp>())
-    bitValue = riscv_internal::stripRepresentationConversions(cast.getInput());
-  else
+  bitValue = numericBitInput(bitValue);
+  if (!bitValue)
     return std::nullopt;
+  bitValue = riscv_internal::stripRepresentationConversions(bitValue);
   auto mask = bitValue.getDefiningOp<riscv::RVVBitmaskWindowLoadOp>();
   auto dataType = mlir::dyn_cast<riscv::ValueType>(data.getType());
   auto centeredType =
@@ -275,12 +289,10 @@ matchLogicalBitplane(riscv::BinaryOp merge, mlir::Value low,
                      riscv::BinaryOp shiftHigh, int64_t insertBit) {
   mlir::Value planeValue =
       riscv_internal::stripRepresentationConversions(shiftHigh.getLhs());
-  if (auto widen = planeValue.getDefiningOp<riscv::WidenOp>())
-    planeValue = riscv_internal::stripRepresentationConversions(widen.getInput());
-  else if (auto cast = planeValue.getDefiningOp<riscv::CastOp>())
-    planeValue = riscv_internal::stripRepresentationConversions(cast.getInput());
-  else
+  planeValue = numericBitInput(planeValue);
+  if (!planeValue)
     return std::nullopt;
+  planeValue = riscv_internal::stripRepresentationConversions(planeValue);
 
   auto window = planeValue.getDefiningOp<riscv::RVVBitmaskWindowLoadOp>();
   auto plane = window
@@ -787,11 +799,8 @@ public:
       bit = stripSingleUsePureCopies(bit, subtract->getBlock());
       if (!bit || bit.getType() != type)
         continue;
-      if (auto widen = bit.getDefiningOp<riscv::WidenOp>())
-        bit = widen.getInput();
-      else if (auto cast = bit.getDefiningOp<riscv::CastOp>())
-        bit = cast.getInput();
-      else
+      bit = numericBitInput(bit);
+      if (!bit)
         continue;
       bit = stripSingleUsePureCopies(bit, subtract->getBlock());
       auto mask = bit ? bit.getDefiningOp<riscv::RVVBitmaskWindowLoadOp>()
