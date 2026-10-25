@@ -2,6 +2,7 @@
 #define WEFT_TARGET_PIPELINE_SCHEDULE_H
 
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
+#include "Weft/Target/LoopPipeline.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/DenseMap.h"
@@ -18,18 +19,7 @@ inline constexpr llvm::StringLiteral pipelineInvariant = "weft.riscv.pipeline_in
 // A query over one physical loop, never a persistent planning IR. Stage and
 // total steady-state order are written on the operations themselves. Expansion
 // reads those decisions back and validates them before making any copies.
-struct PipelineSchedule {
-  mlir::scf::ForOp loop;
-  llvm::SmallVector<mlir::Operation *> producers;
-  llvm::SmallVector<mlir::Operation *> consumers;
-  llvm::SmallVector<mlir::Operation *> ordered;
-  llvm::SmallVector<mlir::Operation *> invariants;
-  llvm::SmallVector<mlir::Value> transported;
-  bool transportInduction = false;
-  bool descending = false;
-
-  bool isProducer(mlir::Operation *operation) const;
-  bool isInvariant(mlir::Operation *operation) const;
+struct PipelineSchedule : PhysicalPipeline {
   mlir::LogicalResult verify() const;
   void write() const;
   static mlir::FailureOr<PipelineSchedule> read(mlir::scf::ForOp loop);
@@ -42,11 +32,7 @@ enum class PipelineFrontier { Contraction, Carry };
 mlir::FailureOr<std::optional<PipelineSchedule>> schedulePipeline(
     mlir::scf::ForOp loop, PipelineFrontier frontier = PipelineFrontier::Contraction);
 
-struct PipelineExpansion {
-  mlir::scf::IfOp guard;
-  mlir::scf::ForOp steady;
-  llvm::DenseMap<mlir::Operation *, mlir::Operation *> steadyOperations;
-};
+using PipelineExpansion = PhysicalPipelineExpansion;
 
 mlir::FailureOr<PipelineExpansion> expandPipeline(
     const PipelineSchedule &schedule, mlir::IRRewriter &rewriter,

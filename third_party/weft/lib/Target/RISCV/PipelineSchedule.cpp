@@ -3,7 +3,9 @@
 #include "PhysicalLoopControl.h"
 #include "RISCVPhysicalSupport.h"
 #include "ValueLiveness.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 #include "Weft/Dialect/RISCV/IR/Memory.h"
+#include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "Weft/Target/RISCVCompilation.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Matchers.h"
@@ -14,36 +16,20 @@
 using namespace mlir;
 using namespace weft;
 using namespace weft::riscv_internal;
+using weft::analysis::externalOperands;
 
 namespace {
 constexpr unsigned maximumOperations = 1024;
 constexpr unsigned maximumEdges = 8192;
 
-bool definedInside(Operation *container, Value value) {
-  Operation *owner = value.getDefiningOp();
-  if (!owner) owner = cast<BlockArgument>(value).getOwner()->getParentOp();
-  return owner && (owner == container || container->isProperAncestor(owner));
-}
-
-SmallVector<Value> externalOperands(Operation *operation) {
-  SmallVector<Value> result;
-  llvm::DenseSet<Value> seen;
-  operation->walk([&](Operation *nested) {
-    for (Value operand : nested->getOperands())
-      if (!definedInside(operation, operand) && seen.insert(operand).second)
-        result.push_back(operand);
-  });
-  return result;
-}
-
 FailureOr<SmallVector<Value>> stageDependencies(Operation *operation) {
-  auto result = externalOperands(operation);
+  auto result = analysis::externalOperands(operation);
   llvm::DenseSet<Value> seen(result.begin(), result.end());
   auto walked = operation->walk([&](Operation *nested) -> WalkResult {
     auto shapes = physicalShapeDependencies(nested);
     if (failed(shapes)) return WalkResult::interrupt();
     for (Value shape : *shapes)
-      if (!definedInside(operation, shape) && seen.insert(shape).second) result.push_back(shape);
+      if (!analysis::isDefinedInside(operation, shape) && seen.insert(shape).second) result.push_back(shape);
     return WalkResult::advance();
   });
   if (walked.wasInterrupted()) return failure();
@@ -191,7 +177,8 @@ LogicalResult readonlyUnit(Operation *operation, const PipelineStorage &storage,
 // the consuming stage does not replay a numeric read or a source birth.
 bool replayableDescriptor(Operation *operation) {
   return isa<riscv::FieldOp, riscv::SliceOp, riscv::SubviewOp,
-             riscv::ReaxisOp, riscv::LinearViewOp, riscv::ExtentOp>(operation);
+             riscv::ReaxisOp, riscv::LinearViewOp, riscv::ExtentOp,
+             riscv::PhysicalPointOp, riscv::RecordCohortOp>(operation);
 }
 
 bool contractionConsumer(Operation *operation) {
@@ -260,8 +247,9 @@ LogicalResult loopContract(scf::ForOp loop, bool &descending,
   if (failed(control) || failed(control->verifyFiniteEndpoint(loop))) return failure();
   descending = control->descending;
   auto schedule = loop->getAttrOfType<riscv::ScheduleAttr>("weft.riscv.schedule");
-  if (!schedule || schedule.getPipelineDepth() != 2 || schedule.getBufferCount() != 2)
-    return loop.emitError("pipeline requires the selected distance-one, two-stage schedule");
+  if (!schedule || schedule.getPipelineDepth() < 2 || schedule.getPipelineDepth() > 4 ||
+      schedule.getBufferCount() != schedule.getPipelineDepth())
+    return loop.emitError("pipeline requires a bounded selected depth and its live-version capacity");
   if (loop.getInitArgs().empty())
     return unsupportedPipeline(loop, admission,
                                "pipeline requires a loop-carried numerical consumer");
@@ -310,14 +298,6 @@ LogicalResult verifyTransport(const PipelineSchedule &schedule) {
 }
 } // namespace
 
-bool PipelineSchedule::isProducer(Operation *operation) const {
-  return llvm::is_contained(producers, operation);
-}
-
-bool PipelineSchedule::isInvariant(Operation *operation) const {
-  return llvm::is_contained(invariants, operation);
-}
-
 LogicalResult PipelineSchedule::verify() const {
   auto loop = this->loop;
   bool direction;
@@ -327,57 +307,18 @@ LogicalResult PipelineSchedule::verify() const {
     return loop.emitError("pipeline stage membership or ordered domain is incomplete");
   auto storage = PipelineStorage::get(loop);
   if (failed(storage)) return failure();
+  if (failed(verifyPhysicalPipeline(*this, stageDependencies))) return failure();
   llvm::DenseMap<Operation *, unsigned> positions;
-  llvm::SmallPtrSet<Operation *, 32> producerSet(producers.begin(), producers.end());
-  llvm::SmallPtrSet<Operation *, 32> consumerSet(consumers.begin(), consumers.end());
-  if (producerSet.size() != producers.size() || consumerSet.size() != consumers.size())
-    return loop.emitError("pipeline stage contains a duplicate operation");
-  llvm::SmallPtrSet<Operation *, 32> invariantSet(invariants.begin(), invariants.end());
-  if (invariantSet.size() != invariants.size() ||
-      llvm::any_of(invariants, [&](Operation *operation) { return !producerSet.contains(operation); }))
-    return loop.emitError("pipeline invariants must be a unique subset of the producer stage");
-  for (auto [position, operation] : llvm::enumerate(ordered)) {
-    if (operation->getBlock() != loop.getBody() || isa<scf::YieldOp>(operation) ||
-        producerSet.contains(operation) == consumerSet.contains(operation) ||
-        !positions.try_emplace(operation, position).second)
-      return loop.emitError("pipeline order must contain every body operation exactly once");
-  }
-  unsigned edges = 0;
+  for (auto [position, operation] : llvm::enumerate(ordered)) positions[operation] = position;
   std::optional<unsigned> previousStorage;
   for (Operation &operation : loop.getBody()->without_terminator()) {
-    if (!positions.contains(&operation))
-      return operation.emitError("physical operation is missing from its pipeline order");
     if (failed(readonlyUnit(&operation, *storage))) return failure();
-    bool producer = producerSet.contains(&operation);
     if (storage->consumers.contains(&operation)) {
       unsigned position = positions.lookup(&operation);
-      if (producer || invariantSet.contains(&operation) ||
+      if (isProducer(&operation) || isInvariant(&operation) ||
           (previousStorage && position <= *previousStorage))
         return operation.emitError("pipeline private storage must preserve consumer-stage memory order");
       previousStorage = position;
-    }
-    auto dependencies = stageDependencies(&operation);
-    if (failed(dependencies)) return failure();
-    for (Value operand : *dependencies) {
-      if (++edges > maximumEdges) return loop.emitError("pipeline dependency graph exceeds its explicit edge bound");
-      if (auto argument = dyn_cast<BlockArgument>(operand); argument && argument.getOwner() == loop.getBody()) {
-        if (invariantSet.contains(&operation))
-          return operation.emitError("pipeline invariant depends on an iteration coordinate or carry");
-        if (producer && argument != loop.getInductionVar())
-          return operation.emitError("next-iteration producer depends on an uncomputed loop carry");
-        continue;
-      }
-      auto definition = ancestorInBlock(operand.getDefiningOp(), loop.getBody());
-      if (!definition) continue;
-      if (invariantSet.contains(&operation) && !invariantSet.contains(definition))
-        return operation.emitError("pipeline invariant depends on an iteration-varying producer");
-      bool sourceProducer = producerSet.contains(definition);
-      if (producer && !sourceProducer)
-        return operation.emitError("pipeline producer depends on its consumer stage");
-      // A producer-to-consumer edge uses the previous iteration's buffered
-      // value. All other edges are ordinary same-iteration SSA dependencies.
-      if (sourceProducer == producer && positions.lookup(definition) >= positions.lookup(&operation))
-        return operation.emitError("pipeline order uses a same-stage value before its definition");
     }
   }
   if (failed(verifyTransport(*this))) return failure();
@@ -387,7 +328,8 @@ LogicalResult PipelineSchedule::verify() const {
 void PipelineSchedule::write() const {
   Builder builder(loop->getContext());
   for (auto [position, operation] : llvm::enumerate(ordered)) {
-    operation->setAttr(pipelineStage, builder.getI64IntegerAttr(isProducer(operation) ? 0 : 1));
+    auto depth = loop->getAttrOfType<riscv::ScheduleAttr>("weft.riscv.schedule").getPipelineDepth();
+    operation->setAttr(pipelineStage, builder.getI64IntegerAttr(isProducer(operation) ? 0 : depth - 1));
     operation->setAttr(pipelineOrder, builder.getI64IntegerAttr(position));
     if (isInvariant(operation)) operation->setAttr(pipelineInvariant, builder.getUnitAttr());
     else operation->removeAttr(pipelineInvariant);
@@ -398,11 +340,13 @@ FailureOr<PipelineSchedule> PipelineSchedule::read(scf::ForOp loop) {
   PipelineSchedule result;
   result.loop = loop;
   if (failed(loopContract(loop, result.descending))) return failure();
+  auto depth = loop->getAttrOfType<riscv::ScheduleAttr>("weft.riscv.schedule").getPipelineDepth();
+  result.depth = depth;
   llvm::DenseMap<int64_t, Operation *> positions;
   for (Operation &operation : loop.getBody()->without_terminator()) {
     auto stage = operation.getAttrOfType<IntegerAttr>(pipelineStage);
     auto order = operation.getAttrOfType<IntegerAttr>(pipelineOrder);
-    if (!stage || (stage.getInt() != 0 && stage.getInt() != 1) || !order ||
+    if (!stage || (stage.getInt() != 0 && stage.getInt() != depth - 1) || !order ||
         order.getInt() < 0 || !positions.try_emplace(order.getInt(), &operation).second)
       return operation.emitError("pipeline requires a unique total order and an exact stage for every operation"), failure();
     (stage.getInt() ? result.consumers : result.producers).push_back(&operation);
@@ -433,6 +377,7 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
   PipelineSchedule result;
   result.loop = loop;
   if (failed(loopContract(loop, result.descending, true))) return failure();
+  result.depth = loop->getAttrOfType<riscv::ScheduleAttr>("weft.riscv.schedule").getPipelineDepth();
   // Freeze actual numeric reads before carrying the supply to another stage;
   // an encoded storage projection is not a buffered value.
   if (failed(materializeContractionReads(loop))) return failure();
@@ -485,6 +430,44 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
       }
     if (seen && onlyConsumers) consumerSet.insert(operation);
   }
+  // A coordinate/view identity can serve both frontiers without becoming a
+  // numerical payload or a new source birth. Rebuild its exact descriptor on
+  // the consumer's saved induction coordinate; never replay a memory read.
+  IRRewriter rewriter(loop.getContext());
+  IRMapping consumerDescriptors;
+  unsigned clonedDescriptors = 0;
+  std::function<FailureOr<Value>(Value)> descriptor = [&](Value value) -> FailureOr<Value> {
+    if (auto mapped = consumerDescriptors.lookupOrNull(value)) return mapped;
+    Operation *definition = value.getDefiningOp();
+    if (!definition || definition->getBlock() != loop.getBody() || consumerSet.contains(definition) ||
+        carryType(value.getType())) return value;
+    if (!replayableDescriptor(definition) || definition->getNumRegions() || ++clonedDescriptors > maximumOperations)
+      return definition->emitError("pipeline cannot replay a payload or ownership boundary as a descriptor"), failure();
+    for (Value operand : definition->getOperands()) {
+      auto replacement = descriptor(operand);
+      if (failed(replacement)) return failure();
+      if (*replacement != operand) consumerDescriptors.map(operand, *replacement);
+    }
+    Operation *clone = rewriter.clone(*definition, consumerDescriptors);
+    consumerSet.insert(clone);
+    return consumerDescriptors.lookup(value);
+  };
+  for (Operation *operation : operations) {
+    if (!consumerSet.contains(operation)) continue;
+    rewriter.setInsertionPoint(operation);
+    auto captured = analysis::externalOperands(operation);
+    for (Value value : captured) {
+      auto replacement = descriptor(value);
+      if (failed(replacement)) return failure();
+      if (*replacement == value) continue;
+      operation->walk([&](Operation *nested) {
+        for (OpOperand &operand : nested->getOpOperands())
+          if (operand.get() == value) operand.set(*replacement);
+      });
+    }
+  }
+  operations.clear();
+  for (Operation &operation : loop.getBody()->without_terminator()) operations.push_back(&operation);
   for (Operation *operation : operations)
     (consumerSet.contains(operation) ? result.consumers : result.producers).push_back(operation);
   if (result.producers.empty() || result.consumers.empty()) return std::optional<PipelineSchedule>{};
@@ -541,21 +524,15 @@ std::optional<FrontierResidency> frontierResidency(Value value, unsigned xlen) {
   FrontierResidency result{*vector, 0, 0};
   if (*vector || matchPattern(value, m_Constant())) return result;
   Type element = value.getType();
-  int64_t copies = 1;
   if (auto numeric = dyn_cast<riscv::ValueType>(element)) {
     if (numeric.getLayout().getCarrier() != "scalar") return result;
-    auto count = staticProduct(numeric.getShape().asArrayRef());
-    if (!count) return std::nullopt;
-    copies = *count;
     element = numeric.getElementType();
   }
-  if (isa<FloatType>(element)) result.floating = copies;
-  else if (element.isIndex()) result.integer = copies;
-  else if (auto integer = dyn_cast<IntegerType>(element)) {
-    int64_t words = (integer.getWidth() + xlen - 1) / xlen;
-    auto count = staticProduct({copies, words});
+  if (element.isIntOrIndexOrFloat()) {
+    auto count = scalarRegisterCount(value.getType(), xlen);
     if (!count) return std::nullopt;
-    result.integer = *count;
+    if (isa<FloatType>(element)) result.floating = *count;
+    else result.integer = *count;
   }
   return result;
 }

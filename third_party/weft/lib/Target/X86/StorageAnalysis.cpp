@@ -39,12 +39,29 @@ bool borrowedUse(OpOperand &use, SmallVectorImpl<Value> &aliases) {
 }
 }
 
-FailureOr<weft::analysis::StorageUses> weft::x86::privateStorageUses(Value root) {
+FailureOr<weft::analysis::StorageUses> weft::x86::privateStorageUses(
+    Value root, Operation *iteration) {
   if (!root.getDefiningOp<memref::AllocOp>() &&
       !root.getDefiningOp<memref::AllocaOp>()) return failure();
   DominanceInfo dominance;
   auto contains = [&](Value value) {
     if (value == root) return true;
+    // A selected branch can hand its fresh buffer to the rest of the same
+    // iteration. It may not retain that address on this iteration's back edge.
+    // This explicit owner is only supplied by transformations preserving the
+    // complete iteration, rather than promoting the allocation independently.
+    if (iteration) {
+      Operation *at = value.getDefiningOp();
+      if (!at) at = value.getParentBlock()->getParentOp();
+      if (!at || !iteration->isProperAncestor(at)) return false;
+      for (Operation *scope = root.getDefiningOp()->getParentOp();
+           scope && scope != iteration; scope = scope->getParentOp()) {
+        if (analysis::structuredStorageControl(scope) != analysis::StorageControl::Repeated) continue;
+        if (auto argument = dyn_cast<BlockArgument>(value);
+            argument && argument.getOwner()->getParentOp() == scope) return false;
+      }
+      return true;
+    }
     if (!root.getParentRegion()->isAncestor(value.getParentRegion())) return false;
     Operation *at = value.getDefiningOp();
     if (auto argument = dyn_cast<BlockArgument>(value))

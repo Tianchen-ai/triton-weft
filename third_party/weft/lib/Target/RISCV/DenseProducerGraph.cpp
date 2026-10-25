@@ -542,11 +542,16 @@ bool DenseProducerGraph::needsRealization() const {
   bool dynamic = llvm::any_of(domain.getShape().asArrayRef(), [](int64_t extent) { return extent < 0; });
   if ((!count && !dynamic) || (count && *count <= width)) return false;
   const int64_t budget = root->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters();
+  unsigned xlen = root->getParentOfType<riscv::KernelOp>().getTarget().getMarch().starts_with("rv32") ? 32 : 64;
   // Close an over-sized operation as a bounded producer/consumer program
   // before the generic materializer snapshots each value independently.
   if (llvm::any_of(order, [&](Operation *op) {
         auto groups = operationRegisterGroups(op);
-        return !groups || *groups > budget;
+        if (!groups || *groups > budget) return true;
+        return llvm::any_of(op->getResults(), [&](Value value) {
+          auto scalar = scalarRegisterCount(value.getType(), xlen);
+          return !scalar || *scalar > 32;
+        });
       })) return true;
   // A condition feeding several output stores has a long live range in the
   // whole-Value schedule. Keep its comparisons, mask logic and consumers in

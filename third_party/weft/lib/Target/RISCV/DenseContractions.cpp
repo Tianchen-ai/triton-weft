@@ -506,13 +506,18 @@ std::optional<TileChoice> costTile(ContractFacts &facts, ArrayRef<int64_t> shape
     computeInputs += converted;
   }
   int64_t supplyPeak = std::max(conversionPeak, computeInputs);
-  if (facts.schedule.getPipelineDepth() == 2) {
+  if (facts.schedule.getPipelineDepth() > 1) {
     // Every unrolled producer crosses the iteration boundary. The scheduler
     // may retire a current issue before filling that part of the next window;
     // it cannot make the old buffered issues disappear at loop entry. Exact
     // widening scratch is charged while the last new issue is formed.
     supplyPeak = std::max(computeInputs * facts.schedule.getUnroll(),
         computeInputs * (facts.schedule.getUnroll() - 1) + conversionPeak);
+    auto pending = staticProduct({facts.schedule.getPipelineDepth() - 2,
+                                  computeInputs, facts.schedule.getUnroll()});
+    if (!pending || supplyPeak > std::numeric_limits<int64_t>::max() - *pending)
+      return rejectTile(rejection, TileRejection::UnrepresentableCost);
+    supplyPeak += *pending;
   }
   // Final reduction's seed exists after the input operands have died. Charging
   // that seed on top of the compute phase rejects a legal 32-register tile.
@@ -590,9 +595,12 @@ std::optional<TileChoice> costOutputTile(ContractFacts &facts, ArrayRef<int64_t>
   int64_t loaded = vectorCopies * ((storageLMUL + 7) / 8);
   int64_t supplied = promote ? vectorCopies * groups : loaded;
   choice.registers = *count * groups + supplied + (promote ? loaded : 0);
-  if (facts.schedule.getPipelineDepth() == 2) {
+  if (facts.schedule.getPipelineDepth() > 1) {
     int64_t issues = scalarSteps * facts.schedule.getUnroll();
-    choice.registers = *count * groups + supplied * issues + (promote ? loaded : 0);
+    auto pending = staticProduct({supplied, issues, facts.schedule.getPipelineDepth() - 1});
+    if (!pending || *pending > std::numeric_limits<int64_t>::max() - *count * groups - (promote ? loaded : 0))
+      return rejectTile(rejection, TileRejection::UnrepresentableCost);
+    choice.registers = *count * groups + *pending + (promote ? loaded : 0);
   }
   if (finalEpilogue)
     choice.registers = std::max(choice.registers, outputEpilogueGroups(facts, shape, lanes));
@@ -630,9 +638,9 @@ std::optional<TileChoice> costOutputTile(ContractFacts &facts, ArrayRef<int64_t>
 FailureOr<TileChoice> chooseTile(ContractFacts &facts, std::optional<size_t> singletonAxis = {},
                                bool finalEpilogue = true) {
   if (facts.schedule.getUnroll() < 1 || facts.schedule.getUnroll() > 16 ||
-      (facts.schedule.getPipelineDepth() != 1 && facts.schedule.getPipelineDepth() != 2) ||
+      facts.schedule.getPipelineDepth() < 1 || facts.schedule.getPipelineDepth() > 4 ||
       facts.schedule.getBufferCount() != facts.schedule.getPipelineDepth())
-    return facts.operation->emitError("dense contraction requires bounded unroll and a one- or two-stage schedule"), failure();
+    return facts.operation->emitError("dense contraction requires bounded unroll and a pipeline depth from one to four"), failure();
   SmallVector<Value> replaceable;
   for (Value value : facts.operation->getOperands().take_front(2))
     if (riscv::hasUniqueRegisterUse(value)) replaceable.push_back(registerStorageIdentity(value));
@@ -1667,7 +1675,7 @@ private:
       auto main = scf::ForOp::create(b, loc, constant(0), fullEnd, constant(step), ValueRange{carry});
       main->setAttr("weft.riscv.direction", b.getStringAttr("ascending"));
       main->setAttr("weft.riscv.system_unroll", b.getStringAttr("disable"));
-      if (facts.schedule.getPipelineDepth() == 2) main->setAttr("weft.riscv.schedule", facts.schedule);
+      if (facts.schedule.getPipelineDepth() > 1) main->setAttr("weft.riscv.schedule", facts.schedule);
       copyOrigin(facts.operation, main);
       b.setInsertionPointToStart(main.getBody());
       carry = main.getRegionIterArg(0);
@@ -1871,7 +1879,7 @@ private:
       auto region = scf::ForOp::create(b, loc, begin, end, constant(unroll), ValueRange{seed});
       region->setAttr("weft.riscv.direction", b.getStringAttr("ascending"));
       region->setAttr("weft.riscv.system_unroll", b.getStringAttr("disable"));
-      if (pipeline && facts.schedule.getPipelineDepth() == 2)
+      if (pipeline && facts.schedule.getPipelineDepth() > 1)
         region->setAttr("weft.riscv.schedule", facts.schedule);
       copyOrigin(facts.operation, region);
       b.setInsertionPointToStart(region.getBody());

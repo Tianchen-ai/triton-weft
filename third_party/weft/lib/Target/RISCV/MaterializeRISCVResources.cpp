@@ -138,18 +138,37 @@ mlir::Operation *lastLocalUse(mlir::Value storage,
 
 void reuseLocalSlots(riscv::KernelOp kernel, mlir::IRRewriter &rewriter) {
   mlir::DominanceInfo dominance(kernel);
-  llvm::SmallVector<riscv::LocalAllocOp> allocations;
-  kernel.walk([&](riscv::LocalAllocOp allocation) {
+  llvm::SmallVector<mlir::Operation *> objects;
+  unsigned allocations = 0;
+  kernel.walk([&](mlir::Operation *operation) {
+    if (mlir::isa<riscv::LocalReuseOp>(operation)) {
+      objects.push_back(operation);
+      return;
+    }
+    auto allocation = mlir::dyn_cast<riscv::LocalAllocOp>(operation);
+    if (!allocation) return;
     auto type = allocation.getResult().getType();
     if (mlir::isa<mlir::IntegerType, mlir::FloatType>(type.getElementType()) &&
         llvm::all_of(allocation.getResult().getUsers(), [](mlir::Operation *user) {
-          return mlir::isa<riscv::LocalBindOp>(user);
-        }))
-      allocations.push_back(allocation);
+          return mlir::isa<riscv::LocalBindOp, riscv::LocalReuseOp>(user);
+        })) {
+      objects.push_back(allocation);
+      ++allocations;
+    }
   });
   llvm::DenseMap<mlir::Block *, llvm::SmallVector<mlir::Value>> slots;
   unsigned reused = 0;
-  for (riscv::LocalAllocOp allocation : allocations) {
+  for (mlir::Operation *object : objects) {
+    if (auto transfer = mlir::dyn_cast<riscv::LocalReuseOp>(object)) {
+      // An earlier physical copy elimination may already have transferred this
+      // slot. Continue from its current SSA owner instead of freezing the first
+      // allocation forever (which over-reserves pipelined drain instances).
+      auto &available = slots[transfer->getBlock()];
+      auto previous = llvm::find(available, transfer.getPrevious());
+      if (previous != available.end()) *previous = transfer.getResult();
+      continue;
+    }
+    auto allocation = mlir::cast<riscv::LocalAllocOp>(object);
     auto type = allocation.getResult().getType();
     auto &available = slots[allocation->getBlock()];
     bool selected = false;
@@ -217,7 +236,7 @@ void reuseLocalSlots(riscv::KernelOp kernel, mlir::IRRewriter &rewriter) {
     if (!selected) available.push_back(allocation.getResult());
   }
   if (reused)
-    llvm::errs() << "weft-local-reuse: objects=" << allocations.size()
+    llvm::errs() << "weft-local-reuse: objects=" << allocations
                  << " reused=" << reused << '\n';
 }
 

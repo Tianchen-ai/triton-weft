@@ -387,7 +387,9 @@ void init_weft(py::module_ &&m) {
       report.capture(diag); return success();
     });
     std::string tuneCPU = binding.contains("tune_cpu") ? py::cast<std::string>(binding["tune_cpu"]) : "";
-    auto lowered = weft::lowerX86Module(module, target, meta, tuneCPU);
+    int64_t depth = binding.contains("pipeline_depth") ? py::cast<int64_t>(binding["pipeline_depth"]) : 1;
+    if (depth < 1 || depth > 4) throw py::value_error("pipeline_depth must be one of 1, 2, 3, 4");
+    auto lowered = weft::lowerX86Module(module, target, meta, tuneCPU, depth);
     report.finishPass(succeeded(lowered));
     if (failed(lowered)) { report.captureFailedIR(module); compilationFailure(report); }
     auto compilation = py::cast<py::dict>(json(report.compilationJSON()));

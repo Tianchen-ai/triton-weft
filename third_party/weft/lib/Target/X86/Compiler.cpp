@@ -4900,10 +4900,16 @@ void weft::registerX86Passes() {
     registerPass(factory);
   registerPass([] { return createX86SubbyteProjectionPass(); });
   registerPass([] { return createX86IntegerProjectionPass(); });
+  registerPass([] { return createX86PipelineSchedulePass(); });
+  registerPass([] { return createX86PipelinePass(); });
 }
 
 FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
-    const X86Target &target, const llvm::StringMap<int64_t> &bindings, llvm::StringRef tuneCPU) {
+    const X86Target &target, const llvm::StringMap<int64_t> &bindings, llvm::StringRef tuneCPU,
+    unsigned pipelineDepth) {
+  if (pipelineDepth < 1 || pipelineDepth > 4) {
+    source.emitError("pipeline_depth must be one of 1, 2, 3, 4"); return failure();
+  }
   if (!tuneCPU.empty() && llvm::X86::parseTuneCPU(tuneCPU, true) == llvm::X86::CK_None) {
     source.emitError("unknown LLVM x86 tuning CPU: ") << tuneCPU;
     return failure();
@@ -5024,6 +5030,13 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   pm.addPass(createX86UniformValidityPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  if (pipelineDepth > 1) {
+    // Preserve iteration-private allocation identity until versioning is done;
+    // stack slot reuse must analyze the expanded lifetimes, not the source loop.
+    pm.addPass(createX86PipelineSchedulePass(pipelineDepth));
+    pm.addPass(createX86PipelinePass());
+    pm.addPass(createCanonicalizerPass());
+  }
   pm.addPass(createX86LocalStoragePass());
   pm.addPass(createCanonicalizerPass());
   recordPipeline(pm);

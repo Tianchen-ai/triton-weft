@@ -793,6 +793,8 @@ typed dense read、保持坐标的 conversion 和逐元素 use-def；跨越 regi
 
 整图选择和逐值物化共用单 operation 的 operands/results/scratch 驻留上界；若某个 operation
 超限，先闭合其 producer/consumer 窗口，不先把每个中间值分别快照到本地数组。
+标量 tuple 的全部 parts 同样占用整数或浮点寄存器；布局控制边界、数值物化和流水 frontier
+共用该计数，不能以 RVV groups 为零推定整数组可驻留。
 fresh local allocation 不改变已存在的输入，允许纯读取供应跨越该分配；原 alias/effect 检查仍适用。
 普通 dense read 跨越写入时查询实际 storage origins；只写不相关私有对象不构成输入依赖。
 尾部轴经完整轴置换重命名后，从原读取及 pointwise use-def 追溯其支配的 active extent；
@@ -837,6 +839,9 @@ producer graph 与 issue 资源查询。来自外层作用域的 local-read brid
 读取晚于复制、size/alignment/owner/lifetime 相容时，转为 `local_reuse`。删除已证明多余的
 copy traversal，destination 的 stage identity 保留。部分初始化、gather、跨干扰写入或
 未证明的旧版本观察者不能用该关系消除。
+一个动态轴可通过精确的完整向量主循环与标量余项证明覆盖；动态 extents 和分配容量须
+保持等价，不能给未知长度编造复制成本。完整 `View[:]` 与原 View 共用坐标关系，
+只在映射可证明单射时允许同坐标原地读写。快照、真实 payload 观察者及其顺序仍分别检查。
 
 共同寄存器 liveness 按 storage identity 合并表示别名，沿全部 use 计算区间，以事件扫描求
 驻留量。选择与最终 resource closure 消费同一事实；子 region 的峰值在父 live set 下计算，
@@ -912,7 +917,7 @@ mask读取点、time/lane/replica、tail、下游原宽乘法均保持；取负�
 
 `ScheduleRISCVLevels` 是 scheduler。它读取已 lowering 的 physical `scf.for`、SSA use-def、
 loop carry 和 operation effect，把与下一迭代无关的 pure/read producer 放在 stage 0，
-把依赖 carry 并生成 yield 的 consumer 放在 stage 1，并在具体 operation 上写入
+把依赖 carry 并生成 yield 的 consumer 放在 stage `pipeline_depth - 1`，并在具体 operation 上写入
 stage/order。已经数值化或具有直接 field supply 的 widening multiply/dot 与 fragment MMA
 也建立 consumer 边界，避免整段 contraction 都落入 producer、只重叠最终 scalar add。
 直接 field 在该边界前物化为 `field_read`，跨阶段传递真实 numeric value；带 shaped index 的
@@ -933,12 +938,23 @@ allocation、descriptor 和所有读写用户放入 consumer stage，并保留�
 为每个实际 consumer instance 克隆独立 allocation 与物理身份，最终资源 pass 重新核算
 存储峰值。该规则不接纳作者 state/stage birth、动态容量或跨 stage 的 local-storage ping-pong。
 
-`PipelineRISCVLevels` 是 expander。depth 1 只消费 schedule；depth 2 消费 scheduler 写入的
-stage/order，为所有跨 stage SSA value 增加 loop-carried 版本，支持多个 source carries，
-并生成空迭代 guard、prologue、steady-state loop 和 epilogue。当前只实现距离一迭代、
-depth=2/buffer=2；嵌套 region predication、write effect、depth>2 和显式 local-storage ping-pong
-尚无合法 physical program 时直接 unsupported。仅设置 `pipeline_depth=2` 而没有
-dependency-derived producer/consumer cluster 仍会失败，不算 pipeline。
+`PipelineRISCVLevels` 与 x86 的 `PipelineLevels` 使用同一个 `expandPhysicalPipeline`。
+depth 1 顺序执行；depth 2/3/4 在同一 producer/consumer frontier 中分别保存 1/2/3 个
+待消费迭代。共同展开器使用 SCF 与 IRMapping 形成 guarded fill、steady loop 和 ordered drain；
+空循环不执行 producer，短循环只消费已经初始化的版本。所有 source carries 按原顺序更新，
+跨阶段值及坐标版本来自实际依赖。RISC-V 的局部 shape 身份也从同一 IRMapping 克隆。
+
+x86 的 `ScheduleLevels` 写入 stage/order/invariant；expander 只读取并验证该决定。
+LLVM intrinsic 的纯度来自其内建 effect、termination 和 synchronization 属性，不能由名称
+前缀判断。私有 allocation 的完整使用闭包保留在 consumer 内；分支可向本次迭代的后续
+操作交付 buffer，但不能将本次新建的地址传到本次迭代的回边。stack slot 分配在展开后运行，
+向量/谓词驻留重新分析。RISC-V 同样在展开后完成 local storage 与寄存器资源闭合。
+
+`backend_options["pipeline_depth"]` 在两目标上接受整数 1/2/3/4，默认 1，与 GPU `num_stages`
+无隐式映射。当前 scheduler 选择两个依赖 frontier，不声称任意多阶段 DAG、跨阶段 local
+descriptor ping-pong 或 async transfer 已实现。显式深度不能建立合法 producer/consumer
+关系时给出诊断。Physical IR 保留 `weft.pipeline.expanded_depth` 与版本数量；这些是编译
+决定，实际性能仍由相同计时边界验证。
 
 ### `ShareRISCVLayeredWindows`
 

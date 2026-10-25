@@ -14,6 +14,7 @@ class CPUOptions:
     sanitize_overflow = False
     meta: dict = field(default_factory=dict)
     num_cpu_threads: int = 0
+    pipeline_depth: int = 1
     toolchain: dict = field(default_factory=dict)
     debug: bool = False
     instrumentation_mode: str = ""
@@ -31,7 +32,6 @@ class X86Options(CPUOptions):
 class WeftOptions(CPUOptions):
     lmul_eighths: int = 8
     unroll: int = 1
-    pipeline_depth: int = 1
     scalar_load_prime: int = 0
     pointwise_issue_copies: int = 1
     contraction_column_copies: int = 4
@@ -92,6 +92,8 @@ class WeftBackend(BaseBackend):
             weft.x86_target_capabilities(self.target.march, self.target.abi, self.target.vlen_bits)
         values["toolchain"] = Toolchain.resolve(values.get("toolchain", {}), self.target).to_dict()
         result = option_class(**values)
+        if type(result.pipeline_depth) is not int or result.pipeline_depth not in (1, 2, 3, 4):
+            raise ValueError("pipeline_depth must be one of 1, 2, 3, 4")
         if self.target.arch == "x86_64" and type(result.tune_cpu) is not str:
             raise ValueError("tune_cpu must be an LLVM x86 CPU name or an empty string")
         if type(result.num_cpu_threads) is not int or result.num_cpu_threads < 0:

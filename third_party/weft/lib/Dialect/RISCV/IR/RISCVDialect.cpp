@@ -5786,7 +5786,7 @@ mlir::LogicalResult LocalReuseOp::verify() {
   while (!capacities.empty()) {
     mlir::Value capacity = capacities.pop_back_val();
     if (!visited.insert(capacity).second) continue;
-    covered |= capacity == getSizeBytes();
+    covered |= sameDenseIndex(capacity, getSizeBytes());
     auto fixedCapacity = capacity.getDefiningOp<mlir::arith::ConstantIndexOp>();
     auto fixedRequest = getSizeBytes().getDefiningOp<mlir::arith::ConstantIndexOp>();
     if (fixedCapacity && fixedRequest && fixedRequest.value() >= 0)

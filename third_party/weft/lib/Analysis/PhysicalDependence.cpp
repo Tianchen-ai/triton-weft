@@ -9,6 +9,23 @@
 
 using namespace mlir;
 
+bool weft::analysis::isDefinedInside(Operation *operation, Value value) {
+  Operation *owner = value.getDefiningOp();
+  if (!owner) owner = value.getParentBlock()->getParentOp();
+  return owner && (owner == operation || operation->isProperAncestor(owner));
+}
+
+SmallVector<Value> weft::analysis::externalOperands(Operation *operation) {
+  SmallVector<Value> result;
+  llvm::SmallPtrSet<Value, 32> seen;
+  operation->walk([&](Operation *nested) {
+    for (Value value : nested->getOperands())
+      if (!isDefinedInside(operation, value) && seen.insert(value).second)
+        result.push_back(value);
+  });
+  return result;
+}
+
 std::optional<uint64_t> weft::analysis::staticTripCount(Operation *operation) {
   auto loop = dyn_cast<scf::ForOp>(operation);
   APInt lower, upper, step;

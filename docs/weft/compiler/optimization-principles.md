@@ -241,9 +241,10 @@ fragment consumer-layout 比较按 active bits / VLEN 估计每条向量算术�
 
 ### 7.3 调度边界
 
-当前`ScheduleRISCVLevels`负责从use-def/effect写stage/order，`PipelineRISCVLevels`只做
-SSA version与prologue/steady/epilogue展开。只实现distance=1、depth=2/buffer=2；没有typed
-transfer和latency事实时，prefetch保持不存在，而不是设一个非零默认值。
+RISC-V 与 x86 的 scheduler 从 use-def/effect 写 stage/order，共用 expander 生成 SSA
+版本与 prologue/steady/epilogue。显式深度 2/3/4 对应同一依赖 frontier 的 1/2/3 个待消费
+版本；版本数与资源从实际展开程序重新计算。DSL stage 的归属和初始化合同保持。
+没有 typed transfer 和 latency 事实时，prefetch 保持不存在。
 
 同一 block 内，`ScheduleRISCVLocalSupplies` 可把多 atom 的 fragment raw read 及其纯地址依赖
 移到紧邻的前一条 MMA 之前。它不跨写入、未知 effect、memory-clobber 或 birth，最多跨一次

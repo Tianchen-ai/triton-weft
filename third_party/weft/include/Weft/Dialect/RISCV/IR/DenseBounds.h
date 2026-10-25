@@ -32,6 +32,9 @@ std::optional<int64_t> denseConstantIndex(mlir::Value value);
 mlir::OpFoldResult denseDescriptorExtent(mlir::Value memory, unsigned axis);
 bool sameDenseExtent(mlir::Value extent, mlir::Value memory, unsigned axis);
 bool sameDenseIndex(mlir::Value first, mlir::Value second);
+// Resolve identities justified by the actual index interval (for example a
+// clamped loop coordinate already within bounds). Returns an existing SSA value.
+mlir::Value denseIndexIdentity(mlir::Value value);
 
 } // namespace weft::riscv
 #endif

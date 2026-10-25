@@ -140,10 +140,9 @@ private:
     mlir::IRMapping mapping;
     mapping.map(loop.getInductionVar(), coordinate);
     for (auto [argument, initial] : llvm::zip_equal(loop.getRegionIterArgs(), incoming)) mapping.map(argument, initial);
-    llvm::DenseMap<mlir::Value, int64_t> shapes;
     unsigned order = 0;
     for (mlir::Operation &operation : loop.getBody()->without_terminator()) {
-      auto clone = riscv_internal::clonePipelineOperation(b, &operation, mapping, shapes, shapeIdentity);
+      auto clone = riscv_internal::clonePipelineOperation(b, &operation, mapping, shapeIdentity);
       if (reorder) {
         clone->setAttr(kIssueOrderAttr, b.getI64IntegerAttr(order));
         clone->setAttr(kIssueIterationAttr, b.getI64IntegerAttr(instance));

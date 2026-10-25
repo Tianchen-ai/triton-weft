@@ -41,6 +41,9 @@ Bound multiply(const Bound &a, const Bound &b) {
 }
 
 IntegerType interpreted(Type type, IntegerType context) {
+  // Index has no language-level signedness/width. A target requesting a
+  // concrete index interpretation supplies that context explicitly.
+  if (type.isIndex() && context) return context;
   auto integer = integerElementType(type);
   if (integer && integer.isSignless() && context)
     return IntegerType::get(integer.getContext(), integer.getWidth(), context.getSignedness());

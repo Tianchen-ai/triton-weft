@@ -459,10 +459,32 @@ bool weft::riscv::sameDenseExtent(Value extent, Value memory, unsigned axis) {
   return lhs && rhs && sameDenseIndex(lhs, rhs);
 }
 
+Value weft::riscv::denseIndexIdentity(Value value) {
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    Value next;
+    auto resolved = ExtentQuery().index(value);
+    if (auto identity = dyn_cast_if_present<Value>(resolved); identity && identity != value) next = identity;
+    else if (auto op = value.getDefiningOp<arith::MinUIOp>()) {
+      auto order = denseIndexCompareAt(arith::CmpIPredicate::ule, op.getLhs(), op.getRhs(), op);
+      if (order) next = *order ? op.getLhs() : op.getRhs();
+    } else if (auto op = value.getDefiningOp<arith::MaxUIOp>()) {
+      auto order = denseIndexCompareAt(arith::CmpIPredicate::uge, op.getLhs(), op.getRhs(), op);
+      if (order) next = *order ? op.getLhs() : op.getRhs();
+    } else if (auto op = value.getDefiningOp<arith::RemUIOp>()) {
+      auto a = denseIndexBounds(op.getLhs()), b = denseIndexBounds(op.getRhs());
+      if (a.upper < b.lower) next = op.getLhs();
+    }
+    if (!next) break;
+    value = next;
+  }
+  return value;
+}
+
 bool weft::riscv::sameDenseIndex(Value first, Value second) {
   ExtentQuery query;
   unsigned budget = 64;
   auto equal = [&](auto &&self, Value lhs, Value rhs, unsigned depth) -> bool {
+    lhs = denseIndexIdentity(lhs); rhs = denseIndexIdentity(rhs);
     if (lhs == rhs) return true;
     if (!budget || depth > 16) return false;
     --budget;
@@ -473,8 +495,10 @@ bool weft::riscv::sameDenseIndex(Value first, Value second) {
     if (!x || !y || x.getType() != y.getType()) return false;
     Operation *left = x.getDefiningOp(), *right = y.getDefiningOp();
     if (!left || !right || left->getName() != right->getName() ||
-        left->getAttrs() != right->getAttrs() || left->getNumOperands() != right->getNumOperands() ||
-        !isa<arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::MinUIOp, arith::MaxUIOp>(left)) return false;
+        left->getPropertiesAsAttribute() != right->getPropertiesAsAttribute() ||
+        left->getNumOperands() != right->getNumOperands() ||
+        !isa<arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::MinUIOp, arith::MaxUIOp,
+             LocalSizeOp>(left)) return false;
     // Compare identical bounded index expressions, not arbitrary pure graphs.
     // In particular this never follows a load or assumes integer no-overflow.
     for (auto [a, b] : llvm::zip(left->getOperands(), right->getOperands()))

@@ -31,6 +31,11 @@ struct RegisterPeak {
 
 mlir::Operation *ancestorInBlock(mlir::Operation *operation, mlir::Block *block);
 
+// Words occupied by one scalar numerical value, including shaped scalar tuples.
+// Vector/local carriers occupy no scalar payload words. Unsupported scalar
+// representations fail the query instead of disappearing from admission.
+std::optional<int64_t> scalarRegisterCount(mlir::Type type, unsigned xlen);
+
 // A view of the current SSA graph. Rebuild after mutation. Storage aliases
 // share one interval, including all their last uses in nested regions.
 // Unknown or overflowing residency is a failed analysis, never zero cost.

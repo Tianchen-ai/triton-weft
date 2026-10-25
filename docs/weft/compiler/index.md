@@ -41,7 +41,7 @@ verifier 使用相同的合法域，不能以任意正整数冒充真实 RVV tar
 × 一个按有界 target 选择规则选定的 structural realization
 ```
 
-source `auto` 在进入 lowering 前绑定。结构固定后的 LMUL、microtile extent、unroll、pipeline depth 等有限参数，每组绑定各自建立并编译一份 RISC-V module。depth=1表示顺序执行；当前两阶段 pipeline 只接受 depth=2/buffer=2，并且必须能从一个带 carry 的 physical Level 中推导出 pure/read producer 与 carry-dependent consumer cluster，buffer count不是独立 binding。当前 compiler API 每次只接受一组单值 binding；外部 tuner 可以枚举这些 module 并比较可执行 artifacts，但不共享 `assignment` 字典，也不生成新的物理结构。
+source `auto` 在进入 lowering 前绑定。结构固定后的 LMUL、microtile extent、unroll、pipeline depth 等有限参数，每组绑定各自建立并编译一份目标 module。`pipeline_depth=1` 表示顺序执行；2/3/4 必须能从带 carry 的 physical Level 推导合法 producer/consumer frontier，共用展开器保存所需的迭代版本。buffer count 由真实跨阶段生命周期决定，不是独立 binding。每次编译接受一组单值绑定；Triton Config/autotuner 可以枚举这些绑定并比较可执行 artifacts，不共享可变 assignment 字典，也不创建另一棵作者程序。
 
 结构性选择可以采用固定优先级、可观察的分项成本，或由外部 tuner 实测 target 声明的有限候选；预算、合法性与记录要求见[物理优化方法](optimization-principles.md)。一个 module 内不保存备用路线。选定结构在后续 legality/resource pass 中失败时该 module 直接失败，不在 pass 或 emitter 中回退。显式枚举下一个候选时，从同一 canonical candidate 重新建立 module。
 

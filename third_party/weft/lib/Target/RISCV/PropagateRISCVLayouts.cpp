@@ -3,6 +3,7 @@
 #include "RISCVPhysicalSupport.h"
 #include "ContractionSupply.h"
 #include "RISCVResidencyPlanning.h"
+#include "ValueLiveness.h"
 
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
@@ -2918,8 +2919,12 @@ public:
     auto controlResidency = [&](mlir::Operation *control, mlir::ValueRange slots) {
       auto kernel = control->getParentOfType<riscv::KernelOp>();
       if (!kernel) return;
-      llvm::SmallVector<mlir::Value> residentSlots;
-      int64_t resident = 0, issue = 0;
+      llvm::SmallVector<mlir::Value> residentSlots[3];
+      int64_t resident[3] = {}, issue[3] = {};
+      // Scalar tuples occupy real integer/FP registers as well. A large branch
+      // result must not become thousands of scalar carriers merely because no
+      // lane role crosses the control edge.
+      const int64_t budgets[] = {kernel.getTarget().getVectorRegisters(), 32, 32};
       for (mlir::Value value : slots) {
         if (!mlir::isa<riscv::ValueType>(value.getType()) || roles[value].local) continue;
         if (llvm::any_of(mlir::cast<riscv::ValueType>(value.getType()).getShape().asArrayRef(),
@@ -2930,21 +2935,36 @@ public:
         }
         auto layout = buildLayout(builder, value, roles[value],
             std::max<int64_t>(1, connectedLaneSpans.lookup(value)), valueLMULBounds.lookup(value));
-        if (!layout || layout.getCarrier() != "rvv") continue;
-        auto count = riscv_internal::staticProduct(layout.getTimeFactors().asArrayRef());
-        auto groups = count ? riscv_internal::staticProduct({*count, layout.getRegisterGroups()}) : std::nullopt;
-        if (!groups || *groups > kernel.getTarget().getVectorRegisters()) {
+        if (!layout) continue;
+        unsigned bank = 0;
+        int64_t operationIssue = layout.getRegisterGroups();
+        std::optional<int64_t> groups;
+        if (layout.getCarrier() == "rvv") {
+          auto count = riscv_internal::staticProduct(layout.getTimeFactors().asArrayRef());
+          groups = count ? riscv_internal::staticProduct({*count, layout.getRegisterGroups()}) : std::nullopt;
+        } else if (layout.getCarrier() == "scalar") {
+          auto type = mlir::cast<riscv::ValueType>(value.getType()).getElementType();
+          if (!type.isIntOrFloat()) continue;
+          bank = mlir::isa<mlir::FloatType>(type) ? 2 : 1;
+          int64_t xlen = kernel.getTarget().getMarch().starts_with("rv32") ? 32 : 64;
+          operationIssue = bank == 2 ? 1 : (type.getIntOrFloatBitWidth() + xlen - 1) / xlen;
+          groups = riscv_internal::scalarRegisterCount(riscv_internal::withLayout(
+              mlir::cast<riscv::ValueType>(value.getType()), layout), xlen);
+        } else continue;
+        if (!groups || *groups > budgets[bank]) {
           roles[value].local = true;
           localState = true;
           continue;
         }
-        residentSlots.push_back(value);
-        resident += *groups;
-        issue = std::max(issue, layout.getRegisterGroups());
+        residentSlots[bank].push_back(value);
+        resident[bank] += *groups;
+        issue[bank] = std::max(issue[bank], operationIssue);
       }
-      if (resident <= kernel.getTarget().getVectorRegisters() - issue) return;
-      for (mlir::Value value : residentSlots) roles[value].local = true;
-      localState = true;
+      for (unsigned bank = 0; bank != 3; ++bank) {
+        if (resident[bank] <= budgets[bank] - issue[bank]) continue;
+        for (mlir::Value value : residentSlots[bank]) roles[value].local = true;
+        localState = true;
+      }
     };
     getOperation().walk([&](mlir::scf::ForOp loop) {
       controlResidency(loop, loop.getRegionIterArgs());

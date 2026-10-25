@@ -1,5 +1,6 @@
 #include "Weft/Target/X86Compiler.h"
 #include "StorageAnalysis.h"
+#include "Weft/Analysis/IntegerFacts.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -90,33 +91,15 @@ void legalizePayloadStorage(ModuleOp module, IRRewriter &b) {
   }
 }
 
-std::optional<uint64_t> upperBound(Value value, unsigned depth = 0) {
-  if (depth > 24) return {};
-  APInt constant;
-  if (matchPattern(value, m_ConstantInt(&constant))) {
-    if (constant.getActiveBits() > 16) return {};
-    return constant.getZExtValue();
-  }
-  if (auto op = value.getDefiningOp<arith::MinUIOp>()) {
-    auto a = upperBound(op.getLhs(), depth + 1), c = upperBound(op.getRhs(), depth + 1);
-    if (a && c) return std::min(*a, *c);
-    return a ? a : c;
-  }
-  if (auto op = value.getDefiningOp<arith::MulIOp>()) {
-    auto a = upperBound(op.getLhs(), depth + 1), c = upperBound(op.getRhs(), depth + 1);
-    if (a && c && (!*c || *a <= stackBudget / *c)) return *a * *c;
-  }
-  if (auto op = value.getDefiningOp<arith::DivUIOp>()) {
-    APInt divisor;
-    auto a = upperBound(op.getLhs(), depth + 1);
-    if (a && matchPattern(op.getRhs(), m_ConstantInt(&divisor)) && !divisor.isZero())
-      return *a / divisor.getLimitedValue();
-  }
-  if (auto op = value.getDefiningOp<arith::SelectOp>()) {
-    auto a = upperBound(op.getTrueValue(), depth + 1), c = upperBound(op.getFalseValue(), depth + 1);
-    if (a && c) return std::max(*a, *c);
-  }
-  return {};
+std::optional<uint64_t> upperBound(Value value) {
+  auto type = value.getType().isIndex() ?
+      IntegerType::get(value.getContext(), 64, IntegerType::Unsigned) :
+      weft::analysis::integerElementType(value.getType());
+  if (!type) return {};
+  if (type.isSignless()) type = IntegerType::get(type.getContext(), type.getWidth(), IntegerType::Unsigned);
+  auto range = weft::analysis::integerRange(value, type);
+  if (!range || range->minimum < 0 || range->maximum > stackBudget) return {};
+  return range->maximum.getZExtValue();
 }
 
 struct Candidate {

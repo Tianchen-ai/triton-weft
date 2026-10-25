@@ -4,6 +4,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
+#include <functional>
 
 using namespace mlir;
 using namespace weft;
@@ -24,101 +25,14 @@ void copyLoopAttributes(scf::ForOp source, Operation *target, bool levelIdentity
       target->setAttr("weft.riscv.direction", StringAttr::get(target->getContext(), level.getDirection()));
 }
 
-// Each stage instance has its own index, numerical SSA and shape declaration
-// map. Sharing one mapping would bind the consumer to a future load or to the
-// next iteration's descriptor extent when stages are interleaved.
-struct StageInstance {
-  IRMapping values;
-  llvm::DenseMap<Value, int64_t> shapes;
-
-  Operation *clone(IRRewriter &b, Operation *operation, int64_t &identity) {
-    return clonePipelineOperation(b, operation, values, shapes, identity);
-  }
-};
 } // namespace
 
 FailureOr<PipelineExpansion> riscv_internal::expandPipeline(
     const PipelineSchedule &schedule, IRRewriter &b, int64_t &shapeIdentity) {
   if (failed(schedule.verify()) || failed(verifyPipelineShapeStages(schedule.loop))) return failure();
-  auto loop = schedule.loop;
-  Location loc = loop.getLoc();
-  auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
-  b.setInsertionPoint(loop);
-  auto predicate = schedule.descending ? arith::CmpIPredicate::sgt : arith::CmpIPredicate::ult;
-  Value nonEmpty = arith::CmpIOp::create(b, loc, predicate, loop.getLowerBound(), loop.getUpperBound());
-  auto guard = scf::IfOp::create(b, loc, loop.getResultTypes(), nonEmpty, true);
-  copyLoopAttributes(loop, guard, true);
-
-  b.setInsertionPointToStart(&guard.getThenRegion().front());
-  StageInstance prologue;
-  prologue.values.map(loop.getInductionVar(), loop.getLowerBound());
-  for (auto [argument, initial] : llvm::zip(loop.getRegionIterArgs(), loop.getInitArgs()))
-    prologue.values.map(argument, initial);
-  for (Operation *operation : schedule.producers) prologue.clone(b, operation, shapeIdentity);
-
-  SmallVector<Value> initial(loop.getInitArgs());
-  if (schedule.transportInduction) initial.push_back(loop.getLowerBound());
-  for (Value value : schedule.transported) initial.push_back(prologue.values.lookup(value));
-  Value first = arith::AddIOp::create(b, loc, loop.getLowerBound(), loop.getStep());
-  auto steady = scf::ForOp::create(b, loc, first, loop.getUpperBound(), loop.getStep(), initial);
-  copyLoopAttributes(loop, steady, false);
-  if (!steady.getBody()->empty()) b.eraseOp(steady.getBody()->getTerminator());
-  b.setInsertionPointToStart(steady.getBody());
-
-  const unsigned carryCount = loop.getInitArgs().size();
-  const unsigned transportStart = carryCount + unsigned(schedule.transportInduction);
-  StageInstance future, current;
-  auto bindInvariants = [&](StageInstance &instance) {
-    for (Operation *operation : schedule.invariants) {
-      for (Value value : operation->getResults()) instance.values.map(value, prologue.values.lookup(value));
-      operation->walk([&](riscv::LocalShapeOp shape) {
-        auto version = prologue.shapes.find(shape.getResult());
-        if (version != prologue.shapes.end()) instance.shapes[shape.getResult()] = version->second;
-      });
-    }
-  };
-  bindInvariants(future);
-  bindInvariants(current);
-  future.values.map(loop.getInductionVar(), steady.getInductionVar());
-  if (schedule.transportInduction)
-    current.values.map(loop.getInductionVar(), steady.getRegionIterArg(carryCount));
-  for (auto [argument, value] : llvm::zip(loop.getRegionIterArgs(), steady.getRegionIterArgs().take_front(carryCount)))
-    current.values.map(argument, value);
-  for (auto [position, value] : llvm::enumerate(schedule.transported))
-    current.values.map(value, steady.getRegionIterArg(transportStart + position));
-
-  PipelineExpansion result;
-  result.guard = guard;
-  result.steady = steady;
-  for (Operation *operation : schedule.ordered) {
-    if (schedule.isInvariant(operation)) continue;
-    StageInstance &instance = schedule.isProducer(operation) ? future : current;
-    result.steadyOperations[operation] = instance.clone(b, operation, shapeIdentity);
-  }
-  SmallVector<Value> returned;
-  for (Value value : yield.getOperands()) returned.push_back(current.values.lookupOrDefault(value));
-  if (schedule.transportInduction) returned.push_back(steady.getInductionVar());
-  for (Value value : schedule.transported) returned.push_back(future.values.lookup(value));
-  scf::YieldOp::create(b, loc, returned);
-
-  b.setInsertionPointAfter(steady);
-  StageInstance epilogue;
-  bindInvariants(epilogue);
-  if (schedule.transportInduction)
-    epilogue.values.map(loop.getInductionVar(), steady.getResult(carryCount));
-  for (auto [argument, value] : llvm::zip(loop.getRegionIterArgs(), steady.getResults().take_front(carryCount)))
-    epilogue.values.map(argument, value);
-  for (auto [position, value] : llvm::enumerate(schedule.transported))
-    epilogue.values.map(value, steady.getResult(transportStart + position));
-  for (Operation *operation : schedule.consumers) epilogue.clone(b, operation, shapeIdentity);
-  SmallVector<Value> finalValues;
-  for (Value value : yield.getOperands()) finalValues.push_back(epilogue.values.lookupOrDefault(value));
-  scf::YieldOp::create(b, loc, finalValues);
-  b.setInsertionPointToStart(&guard.getElseRegion().front());
-  scf::YieldOp::create(b, loc, loop.getInitArgs());
-  // The caller owns replacement. Keeping the source alive here lets the
-  // scheduler inspect a disposable expansion without dangling stage identities.
-  return result;
+  return expandPhysicalPipeline(schedule, b, [&](IRRewriter &rewriter, Operation *source, IRMapping &values) {
+    return clonePipelineOperation(rewriter, source, values, shapeIdentity);
+  }, copyLoopAttributes);
 }
 
 namespace {

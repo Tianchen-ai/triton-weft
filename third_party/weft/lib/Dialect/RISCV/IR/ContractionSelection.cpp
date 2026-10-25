@@ -97,7 +97,7 @@ LogicalResult ContractionPlanAttr::verify(
     if (llvm::is_contained(reductionAxes.asArrayRef(), axis))
       return error() << "contraction plan output and reduction coordinates must be disjoint";
   if (maximumLMUL < 1 || maximumLMUL > 64 || (maximumLMUL & (maximumLMUL - 1)) ||
-      unroll < 1 || unroll > 16 || (pipelineDepth != 1 && pipelineDepth != 2))
+      unroll < 1 || unroll > 16 || pipelineDepth < 1 || pipelineDepth > 4)
     return error() << "contraction plan has an invalid target schedule binding";
   if (cases.empty() || cases.size() > outputAxes.size() + 1)
     return error() << "contraction plan must end in one general case";

@@ -265,14 +265,14 @@ local cluster 是从作者已有 Level/ordinary loop 中抽取的一组物理 pr
 
 这些结构只改变同一 source instances 的 issue time和temporary lifetime；不能创建新的算法 pass、跨 Level workspace、persistent buffer或另一种state recurrence。pipeline depth、buffer count、unroll和prefetch distance是有限物理参数，可由构建期实测选择。
 
-当前 RISC-V 实现已将 scheduler 与 expander 分开。depth=1 是顺序执行；depth=2
+RISC-V 与 x86 的实现将 scheduler 与共用 expander 分开。depth=1 是顺序执行；depth=2/3/4
 先从一个带 carry 的 physical Level 的 use-def/effect 推导 pure/read producer 和 carry-dependent
 consumer，再为任意数量的跨 stage SSA value 与多个 source carries 生成真实 prologue/
-steady-state/epilogue。当前只实现距离一迭代、depth=2/buffer=2；闭合普通 `for/if` 保持为
+steady-state/epilogue，分别保存 1/2/3 个待消费迭代。闭合普通 `for/if` 保持为
 阶段内有序单元。静态 `physical-share` / `local-value-copy` 数组的 allocation、全部 alias 和读写用户可共同
 留在 consumer stage，按实际迭代克隆独立存储；没有 local descriptor 跨阶段传递。
 作者 birth、外部 write/unknown effect 没有重排合同，会明确拒绝。async transfer、wait、
-多于两个 buffer、显式 local-storage ping-pong 和非零 prefetch 尚未形成合法 physical
+任意多阶段 DAG、显式 local-storage ping-pong 和非零 prefetch 尚未形成合法 physical
 program，不能仅通过设置参数声称支持。
 
 同一iteration内，闭合grouped/layered raw window可以选择一个target-local
@@ -313,7 +313,8 @@ local memory-leaf variant和prefetch distance。target提供有限合法域，tu
 在emission前拒绝。当前RISC-V compiler API暴露LMUL、unroll、pipeline depth和boolean
 scalar-load-prime；后者适用于已证明的单 window grouped/layered partial supply，或完整的
 二至四 atom 连续 byte fragment supply，均只在当前局部读取范围内选择固定指令序列。
-depth=2固定导出两个buffer，prefetch固定为0，后二者还不是独立可调域。
+跨阶段版本按实际 SSA 活跃范围生成，consumer 内私有存储按其最后读取点复用；buffer
+count 不是独立调参维度。prefetch 固定为 0。
 
 ## 14. Target profile
 

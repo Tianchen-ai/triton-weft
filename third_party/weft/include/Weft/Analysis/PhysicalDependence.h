@@ -7,6 +7,11 @@
 #include <optional>
 
 namespace weft::analysis {
+// Operands captured by a complete structured unit, excluding values defined
+// inside its own regions. Requery after cloning, replacing or moving the unit.
+bool isDefinedInside(mlir::Operation *operation, mlir::Value value);
+llvm::SmallVector<mlir::Value> externalOperands(mlir::Operation *operation);
+
 // A flat read epoch permits reordering ordinary reads, not writes, allocation,
 // synchronization, volatile access or an operation with unknown effects.
 bool isReadEpoch(mlir::Block &block,

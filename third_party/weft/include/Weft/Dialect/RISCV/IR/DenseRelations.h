@@ -6,6 +6,8 @@
 
 namespace weft::riscv {
 
+class SliceOp;
+
 // Relations between logical coordinates of two dense projections. None of
 // these flags asserts that different coordinates denote different addresses.
 // That additional fact requires an injective full-view mapping at the use.
@@ -16,6 +18,9 @@ struct DenseProjectionRelation {
   bool pointwise = false;
   bool disjoint = false;
 };
+
+// An all-selector slice retains every logical coordinate of its base.
+bool isCompleteDenseSlice(SliceOp slice);
 
 // Strip a common, coordinate-preserving subview suffix from sibling fields.
 // Descriptor shape identities may differ when their extent SSA is equal.

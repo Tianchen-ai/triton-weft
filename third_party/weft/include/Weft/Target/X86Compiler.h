@@ -33,9 +33,11 @@ std::unique_ptr<mlir::Pass> createX86ReductionTreePass();
 std::unique_ptr<mlir::Pass> createX86LocalStoragePass();
 std::unique_ptr<mlir::Pass> createX86StreamingStorePass();
 std::unique_ptr<mlir::Pass> createX86StreamPrefetchPass();
+std::unique_ptr<mlir::Pass> createX86PipelineSchedulePass(unsigned depth = 1);
+std::unique_ptr<mlir::Pass> createX86PipelinePass();
 mlir::FailureOr<mlir::OwningOpRef<mlir::ModuleOp>> lowerX86Module(
     mlir::ModuleOp source, const X86Target &target,
-    const llvm::StringMap<int64_t> &bindings, llvm::StringRef tuneCPU = {});
+    const llvm::StringMap<int64_t> &bindings, llvm::StringRef tuneCPU = {}, unsigned pipelineDepth = 1);
 mlir::FailureOr<std::string> translateX86Module(mlir::ModuleOp physical);
 } // namespace weft
 #endif

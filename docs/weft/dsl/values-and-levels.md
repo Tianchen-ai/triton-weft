@@ -168,7 +168,7 @@ panel = stage(local_decode(packed))
 acc += reduce_dot(panel, x, over="k")
 ```
 
-`local_decode` 是保持 K axis 的普通 helper。`panel` 由 `stage` 建立的本层复用边界与普通 SSA use-def 已完整表达 source-visible value boundary；core DSL 不再增加 `stage_handoff` 或 source engine annotation。
+`local_decode` 是保持 K axis 的普通 helper。`panel` 由 `stage` 建立的本层复用边界与普通 SSA use-def 已完整表达 source-visible value boundary。局部 contraction 的 `engine` 约束选择向量或矩阵路线，不建立程序级 engine ownership，也不需要额外的 `stage_handoff`。
 
 若 target 让 producer 与 consumer 使用不同 physical engine，它在具体 use edge 上插入 register/fragment/local-storage conversion，并承担相应 ordering 与 resources。若同步、并发或 workspace 会改变 source-visible effects，则必须定义真实的 effect operation 或另一棵作者程序，不能由 engine convention 暗中补出。
 

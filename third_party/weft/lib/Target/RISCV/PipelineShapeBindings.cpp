@@ -94,12 +94,13 @@ void replaceShapeTypes(Operation *operation, const llvm::DenseMap<int64_t, int64
 }
 
 void renameTypes(Operation *operation, Operation *source,
-                 const llvm::DenseMap<Value, int64_t> &bindings) {
+                 const IRMapping &values) {
   llvm::DenseMap<int64_t, int64_t> versions;
   for (int64_t id : shapeReferences(source)) {
     auto binding = weft::localShapeExtent<riscv::LocalShapeOp>(source, id);
-    auto version = bindings.find(binding);
-    if (version != bindings.end()) versions[id] = version->second;
+    if (auto mapped = values.lookupOrNull(binding))
+      if (auto declaration = mapped.getDefiningOp<riscv::LocalShapeOp>())
+        versions[id] = declaration.getId();
   }
   replaceShapeTypes(operation, versions);
 }
@@ -158,11 +159,11 @@ LogicalResult riscv_internal::verifyPipelineShapeStages(scf::ForOp loop) {
 }
 
 bool riscv_internal::isPipelineTemporary(Operation *operation) {
-  auto allocation = dyn_cast<riscv::LocalAllocOp>(operation);
-  if (!allocation) return false;
-  auto type = allocation.getResult().getType();
+  if (!isa<riscv::LocalAllocOp, riscv::LocalReuseOp>(operation)) return false;
+  auto type = cast<riscv::LocalType>(operation->getResult(0).getType());
   return type.getPurpose() == "pack" &&
-      (type.getSchema() == "physical-share" || type.getSchema() == "local-value-copy");
+      (type.getSchema() == "physical-share" || type.getSchema() == "local-value-copy" ||
+       type.getSchema() == "control-value");
 }
 
 int64_t riscv_internal::nextPipelineShapeIdentity(Operation *root) {
@@ -171,15 +172,16 @@ int64_t riscv_internal::nextPipelineShapeIdentity(Operation *root) {
     identity = std::max(identity, int64_t(kernel.getShapeSymbols().size()));
   });
   root->walk([&](riscv::LocalShapeOp shape) { identity = std::max(identity, int64_t(shape.getId())); });
-  root->walk([&](riscv::LocalAllocOp allocation) {
-    auto type = allocation.getResult().getType();
-    identity = std::max({identity, type.getAliasSet(), type.getBirthId()});
+  root->walk([&](Operation *operation) {
+    for (Value result : operation->getResults())
+      if (auto type = dyn_cast<riscv::LocalType>(result.getType()))
+        identity = std::max({identity, type.getAliasSet(), type.getBirthId()});
   });
   return identity;
 }
 
 Operation *riscv_internal::clonePipelineOperation(IRRewriter &rewriter, Operation *source,
-    IRMapping &values, llvm::DenseMap<Value, int64_t> &shapeVersions, int64_t &nextIdentity) {
+    IRMapping &values, int64_t &nextIdentity) {
   Operation *clone = rewriter.clone(*source, values);
   SmallVector<Operation *> originalOperations, clonedOperations;
   source->walk<WalkOrder::PreOrder>([&](Operation *operation) { originalOperations.push_back(operation); });
@@ -187,21 +189,19 @@ Operation *riscv_internal::clonePipelineOperation(IRRewriter &rewriter, Operatio
   for (auto [original, operation] : llvm::zip_equal(originalOperations, clonedOperations)) {
     if (auto shape = dyn_cast<riscv::LocalShapeOp>(original)) {
       int64_t id = ++nextIdentity;
-      shapeVersions[shape.getResult()] = id;
       cast<riscv::LocalShapeOp>(operation).setIdAttr(rewriter.getI64IntegerAttr(id));
     }
     // Resolve the source declaration lexically. A nested declaration may use
     // the same spelling as an outer one; its version must not escape its block.
-    renameTypes(operation, original, shapeVersions);
-    if (auto allocation = dyn_cast<riscv::LocalAllocOp>(operation)) {
-      auto type = allocation.getResult().getType();
-      if (isPipelineTemporary(allocation)) {
+    renameTypes(operation, original, values);
+    if (isPipelineTemporary(operation)) {
+      auto result = operation->getResult(0);
+      auto type = cast<riscv::LocalType>(result.getType());
         int64_t id = ++nextIdentity;
-        allocation.getResult().setType(riscv::LocalType::get(rewriter.getContext(),
+        result.setType(riscv::LocalType::get(rewriter.getContext(),
             type.getElementType(), type.getShape(), type.getAxisIds(), type.getSizeBytes(),
             type.getAlignment(), id, type.getPurpose(), type.getOwnerDomainId(), id,
             type.getLifetimeEndDomainId(), type.getSchema()));
-      }
     }
   }
   clone->removeAttr("weft.riscv.pipeline_stage");

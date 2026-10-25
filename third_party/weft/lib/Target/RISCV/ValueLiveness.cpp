@@ -10,6 +10,22 @@ using namespace mlir;
 using namespace weft;
 using namespace weft::riscv_internal;
 
+std::optional<int64_t> riscv_internal::scalarRegisterCount(Type type, unsigned xlen) {
+  if (xlen != 32 && xlen != 64) return std::nullopt;
+  int64_t copies = 1;
+  if (auto numeric = dyn_cast<riscv::ValueType>(type)) {
+    if (numeric.getLayout().getCarrier() != "scalar") return 0;
+    auto coordinates = riscv::RegisterCoordinates::get(numeric.getLayout());
+    if (!coordinates) return std::nullopt;
+    copies = coordinates->parts();
+    type = numeric.getElementType();
+  }
+  if (isa<FloatType, IndexType>(type)) return copies;
+  if (auto integer = dyn_cast<IntegerType>(type))
+    return staticProduct({copies, (int64_t(integer.getWidth()) + xlen - 1) / xlen});
+  return std::nullopt;
+}
+
 std::optional<int64_t> riscv_internal::operationRegisterGroups(Operation *operation) {
   int64_t total = 0;
   llvm::DenseSet<Value> seen;

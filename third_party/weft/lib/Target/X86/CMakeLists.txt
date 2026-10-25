@@ -1,5 +1,6 @@
 add_library(WeftX86Target STATIC
   Compiler.cpp
+  Pipeline.cpp
   ContractionEngines.cpp
   AMXContractions.cpp
   AMXTransfers.cpp
@@ -23,7 +24,7 @@ add_library(WeftX86Target STATIC
   LocalStorage.cpp
   StorageAnalysis.cpp
   SnapshotLoads.cpp)
-target_link_libraries(WeftX86Target PUBLIC WeftKernelDialect WeftX86Platform WeftSourceSpecialization WeftAnalysis
+target_link_libraries(WeftX86Target PUBLIC WeftKernelDialect WeftX86Platform WeftSourceSpecialization WeftAnalysis WeftPhysicalTransforms
   LLVMTargetParser
   MLIRAnalysis MLIRArithDialect MLIRFuncDialect MLIRSCFDialect MLIRMathDialect MLIRVectorDialect
   MLIRLLVMDialect MLIRTransforms MLIRArithToLLVM MLIRMathToLLVM MLIRVectorToLLVM

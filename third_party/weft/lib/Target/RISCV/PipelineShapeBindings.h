@@ -25,6 +25,6 @@ mlir::FailureOr<llvm::SmallVector<mlir::Value>> physicalShapeDependencies(mlir::
 
 mlir::Operation *clonePipelineOperation(mlir::IRRewriter &rewriter,
     mlir::Operation *source, mlir::IRMapping &values,
-    llvm::DenseMap<mlir::Value, int64_t> &shapeVersions, int64_t &nextIdentity);
+    int64_t &nextIdentity);
 
 } // namespace weft::riscv_internal

@@ -87,26 +87,39 @@ bool impliedAt(Operation *at, Predicate predicate) {
 }
 
 bool staticallyInjective(MemoryViewOp view) {
-  struct Dimension { uint64_t stride, extent; };
+  struct Dimension { uint64_t stride; std::optional<uint64_t> extent; };
   SmallVector<Dimension> dimensions;
   for (auto [size, step] : llvm::zip(view.getExtents(), view.getStrides())) {
     auto extent = denseConstantIndex(size), stride = denseConstantIndex(step);
-    if (!extent || *extent < 0) return false;
-    if (*extent == 0) return true;
-    if (*extent == 1) continue;
+    if (extent && *extent < 0) return false;
+    if (extent && *extent == 0) return true;
+    if (extent && *extent == 1) continue;
     if (!stride || *stride <= 0) return false;
-    dimensions.push_back({uint64_t(*stride), uint64_t(*extent)});
+    dimensions.push_back({uint64_t(*stride), extent ? std::optional<uint64_t>(*extent) : std::nullopt});
   }
   llvm::sort(dimensions, [](auto a, auto b) { return a.stride < b.stride; });
   uint64_t span = 1;
-  for (auto dimension : dimensions) {
-    if (dimension.stride < span || dimension.extent - 1 >
+  for (auto [axis, dimension] : llvm::enumerate(dimensions)) {
+    if (dimension.stride < span) return false;
+    // The final dimension cannot overlap another outer dimension. Its length
+    // need not be constant: a 1-D stride-one View is injective for every valid
+    // runtime extent, and the same proof holds for complete inner dimensions.
+    if (!dimension.extent) return axis + 1 == dimensions.size();
+    if (*dimension.extent - 1 >
         (std::numeric_limits<uint64_t>::max() - span) / dimension.stride) return false;
-    span += (dimension.extent - 1) * dimension.stride;
+    span += (*dimension.extent - 1) * dimension.stride;
   }
   return true;
 }
 } // namespace
+
+bool weft::riscv::isCompleteDenseSlice(SliceOp slice) {
+  return slice && slice.getBase().getType().getShape() == slice.getType().getShape() &&
+      slice.getBase().getType().getAxisIds() == slice.getType().getAxisIds() &&
+      llvm::all_of(slice.getSelectors(), [](Attribute selector) {
+        return cast<StringAttr>(selector).getValue() == "all";
+      });
+}
 
 std::optional<DenseProjectionRelation> weft::riscv::denseProjectionRelation(
     Value lhs, Value rhs) {
@@ -120,6 +133,8 @@ std::optional<DenseProjectionRelation> weft::riscv::denseProjectionRelation(
   for (unsigned depth = 0; depth < 64; ++depth) {
     if (auto a = lhs.getDefiningOp<ReaxisOp>()) { lhs = a.getBase(); continue; }
     if (auto b = rhs.getDefiningOp<ReaxisOp>()) { rhs = b.getBase(); continue; }
+    if (auto a = lhs.getDefiningOp<SliceOp>(); isCompleteDenseSlice(a)) { lhs = a.getBase(); continue; }
+    if (auto b = rhs.getDefiningOp<SliceOp>(); isCompleteDenseSlice(b)) { rhs = b.getBase(); continue; }
     if (auto a = lhs.getDefiningOp<SliceOp>()) {
       auto b = rhs.getDefiningOp<SliceOp>();
       if (!b || a.getSelectors() != b.getSelectors() ||

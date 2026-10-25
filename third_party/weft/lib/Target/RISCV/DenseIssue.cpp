@@ -30,7 +30,7 @@ FailureOr<SmallVector<Value>> riscv_internal::emitDenseIssues(
     ValueRange initial, DenseIssueBody body, int64_t pipelineDepth, bool includePartial, bool registerPieces,
     bool separatePartial) {
   if (width <= 0 || !extent.getType().isIndex() ||
-      (pipelineDepth != 1 && pipelineDepth != 2)) return failure();
+      pipelineDepth < 1 || pipelineDepth > 4) return failure();
   Location loc = anchor->getLoc();
   auto constant = [&](int64_t n) -> Value { return arith::ConstantIndexOp::create(b, loc, n); };
   Value zero = constant(0), step = constant(width);
@@ -57,7 +57,7 @@ FailureOr<SmallVector<Value>> riscv_internal::emitDenseIssues(
     loop->setAttr("weft.riscv.system_unroll", b.getStringAttr("disable"));
     // Only the main traversal has a next issue. The remainder is at most one
     // iteration and retains the same carry without creating a pipeline buffer.
-    if ((full || capActive) && pipelineDepth == 2)
+    if ((full || capActive) && pipelineDepth > 1)
       loop->setAttr("weft.riscv.schedule", schedule(b, 1, pipelineDepth));
     copyOrigin(anchor, loop);
     b.setInsertionPointToStart(loop.getBody());

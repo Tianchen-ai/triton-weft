@@ -119,9 +119,26 @@ public:
         continue;
       }
       if (auto reduce = dyn_cast<riscv::ReduceOp>(op)) {
-        if (Value source = local(reduce.getInput()); source &&
-            riscv::supportsStreamReduction(cast<riscv::ValueType>(source.getType()).getElementType(), reduce.getKind()))
-          if (failed(riscv_internal::materializeDenseValueProgram(reduce))) return failure();
+        if (Value source = local(reduce.getInput())) {
+          auto type = cast<riscv::ValueType>(source.getType());
+          // A completed local reduction can leave a one-element shaped result.
+          // Read that one value through the normal memory contract and retain
+          // the original reduction (including its numerical identity). There
+          // is no stream axis to schedule and no reason to invent one.
+          if (riscv_internal::staticProduct(type.getShape().asArrayRef()) == 1 &&
+              type.getLayout().getValidity() == "full") {
+            b.setInsertionPoint(reduce);
+            auto memory = view(source, reduce);
+            if (failed(memory)) return failure();
+            auto loadedType = riscv_internal::withLayout(type, riscv_internal::scalarLayout(
+                b, type.getElementType(), type.getShape().asArrayRef(), type.getAxisIds().asArrayRef()));
+            auto loaded = riscv::LoadOp::create(b, reduce.getLoc(), loadedType, *memory, Value(),
+                riscv_internal::unassignedAccess(b), riscv_internal::unselectedLeaf(b));
+            reduce.getInputMutable().assign(loaded);
+          } else if (riscv::supportsStreamReduction(type.getElementType(), reduce.getKind())) {
+            if (failed(riscv_internal::materializeDenseValueProgram(reduce))) return failure();
+          }
+        }
         continue;
       }
       if (auto extract = dyn_cast<riscv::ExtractOp>(op)) {
