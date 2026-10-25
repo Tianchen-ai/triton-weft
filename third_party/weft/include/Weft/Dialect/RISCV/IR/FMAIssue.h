@@ -10,7 +10,8 @@ namespace weft::riscv {
 // Pointwise contraction has no reduction or closed scheduling frontier. The
 // vector operand is lhs; rhs is either the identical carrier or a scalar.
 llvm::StringRef pointwiseFMAInstruction(mlir::Type lhs, mlir::Type rhs,
-                                      mlir::Type result, llvm::StringRef kind = "add");
+                                      mlir::Type result, llvm::StringRef kind = "add",
+                                      bool overwriteLHS = false);
 llvm::StringRef pointwiseIntegerMACInstruction(TargetAttr target, ValueType lhs,
                                                mlir::Type rhs, ValueType result);
 std::optional<llvm::SmallVector<std::pair<int64_t, int64_t>>>

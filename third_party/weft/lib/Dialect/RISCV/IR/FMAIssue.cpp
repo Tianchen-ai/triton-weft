@@ -155,7 +155,8 @@ bool weft::riscv::legalFMAIssueGroups(const FMAIssueGeometry &geometry,
   return !ends.empty() && begin == geometry.parts();
 }
 
-StringRef weft::riscv::pointwiseFMAInstruction(Type lhs, Type rhs, Type result, StringRef kind) {
+StringRef weft::riscv::pointwiseFMAInstruction(Type lhs, Type rhs, Type result, StringRef kind,
+                                            bool overwriteLHS) {
   if (kind != "add" && kind != "subtract_product" && kind != "subtract_accumulator") return "";
   auto select = [&](StringRef add, StringRef subtractProduct, StringRef subtractAccumulator) {
     return kind == "add" ? add : kind == "subtract_product" ? subtractProduct : subtractAccumulator;
@@ -167,6 +168,8 @@ StringRef weft::riscv::pointwiseFMAInstruction(Type lhs, Type rhs, Type result, 
       value.getLayout().getCarrier() != "rvv" ||
       (value.getLayout().getValidity() != "full" && value.getLayout().getValidity() != "tail") || lhs != result)
     return "";
+  if (overwriteLHS)
+    return kind == "add" && rhs == value.getElementType() ? "rvv.vfmadd.vf" : "";
   if (rhs == result) return select("rvv.vfmacc.vv", "rvv.vfnmsac.vv", "rvv.vfmsac.vv");
   if (auto scalar = dyn_cast<ValueType>(rhs);
       scalar && scalar.getLayout().getCarrier() == "scalar") {
@@ -258,7 +261,8 @@ LogicalResult RVVIntegerMACOp::verify() {
 
 LogicalResult FMAOp::verify() {
   auto instruction = pointwiseFMAInstruction(getLhs().getType(), getRhs().getType(),
-                                            getResult().getType(), getKind());
+                                            getResult().getType(), getKind(),
+                                            getLeaf().getInstruction() == "rvv.vfmadd.vf");
   auto kernel = (*this)->getParentOfType<KernelOp>();
   if (!kernel || instruction.empty() || getAccumulator().getType() != getResult().getType())
     return emitOpError("pointwise FMA requires equal floating precision and a closed scalar or RVV carrier");

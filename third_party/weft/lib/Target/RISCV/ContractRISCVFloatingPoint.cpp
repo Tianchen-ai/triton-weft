@@ -1,6 +1,8 @@
 #include "RISCVPhysicalSupport.h"
 #include "Weft/Dialect/RISCV/IR/FMAIssue.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 #include "Weft/Target/RISCVPasses.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
 
@@ -37,25 +39,33 @@ public:
         auto shaped = dyn_cast<riscv::ValueType>(result);
         Type element = shaped ? shaped.getElementType() : result;
         if (!element.isF32() && !element.isF64()) continue;
-        // The selected FMA ties its output to the vector accumulator. A scalar
-        // addend therefore needs a splat (or a copy of a shared splat) for every
-        // packet, even when the scalar itself is loop-invariant. This replaces
-        // mul + .vf add/sub with splat/copy + FMA: equal issue work with longer
-        // vector residency. Preserve the existing implementation on that tie;
-        // do not price a broadcast hoist or a different tied operand that this
-        // materializer does not actually produce.
-        if (accumulator.getType() != result) {
-          if (accumulator.getType() == element) ++scalarAddendsRetained;
-          continue;
-        }
         const StringRef kind = add.getKind() == "add" ? "add" :
             operand == 0 ? "subtract_accumulator" : "subtract_product";
-        auto instruction = riscv::pointwiseFMAInstruction(lhs.getType(), rhs.getType(), result, kind);
+        // A loop-invariant scalar addend can have one explicit broadcast before
+        // a complete, repeated issue loop. vfmadd overwrites the dying vector
+        // multiplicand and leaves that broadcast reusable. Unlike accumulator-
+        // tied vfmacc this requires no copy for each iteration.
+        scf::ForOp broadcastLoop;
+        const bool scalarAddend = shaped && accumulator.getType() == element;
+        if (scalarAddend) {
+          broadcastLoop = dyn_cast<scf::ForOp>(add->getParentOp());
+          auto trips = broadcastLoop ? analysis::staticTripCount(broadcastLoop) : std::nullopt;
+          if (kind != "add" || shaped.getLayout().getValidity() != "full" ||
+              !trips || *trips < 2 || !broadcastLoop.isDefinedOutsideOfLoop(accumulator)) {
+            ++scalarAddendsRetained;
+            continue;
+          }
+        } else if (accumulator.getType() != result) continue;
+        auto instruction = riscv::pointwiseFMAInstruction(lhs.getType(), rhs.getType(), result, kind, scalarAddend);
         if (instruction.empty()) {
           std::swap(lhs, rhs);
-          instruction = riscv::pointwiseFMAInstruction(lhs.getType(), rhs.getType(), result, kind);
+          instruction = riscv::pointwiseFMAInstruction(lhs.getType(), rhs.getType(), result, kind, scalarAddend);
         }
         if (instruction.empty()) continue;
+        if (scalarAddend && (!lhs.hasOneUse() || registerStorageIdentity(lhs) != lhs)) {
+          ++scalarAddendsRetained;
+          continue;
+        }
         // Fusion makes all three inputs simultaneously necessary. The unfused
         // pair can reload the addend after the multiply's inputs die. Preserve
         // that legal schedule when even the fused input frontier exceeds the
@@ -68,6 +78,11 @@ public:
           auto groups = residentRegisterGroups(input);
           if (!groups) { known = false; break; }
           resident += *groups;
+        }
+        if (scalarAddend) {
+          auto broadcastGroups = residentRegisterGroups(product.getResult());
+          if (!broadcastGroups) known = false;
+          else resident += *broadcastGroups;
         }
         if (!known || resident > add->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters()) {
           ++resourceFrontiersRetained;
@@ -84,6 +99,15 @@ public:
           add.emitError("floating contraction requires an open physical resource boundary");
           signalPassFailure();
           return;
+        }
+        if (scalarAddend) {
+          b.setInsertionPoint(broadcastLoop);
+          auto splat = riscv::RVVSplatOp::create(b, add.getLoc(), shaped, accumulator,
+              leaf(b, "rvv", "splat", "rvv.splat", "rvv.splat", 0,
+                   shaped.getLayout().getRegisterGroups(), 0, 0, "none", "exact"));
+          copyOrigin(add, splat);
+          accumulator = splat.getResult();
+          ++reusedScalarAddends;
         }
         b.setInsertionPoint(add);
         auto fused = riscv::FMAOp::create(b, add.getLoc(), result, lhs, rhs, accumulator,
@@ -103,6 +127,8 @@ private:
   Statistic contracted{this, "weft-pointwise-fma", "Single-use floating multiply/add pairs contracted"};
   Statistic scalarAddendsRetained{this, "weft-fma-scalar-addends-retained",
                                   "Scalar addends retained after accounting for broadcast/copy issue work"};
+  Statistic reusedScalarAddends{this, "weft-fma-shared-scalar-addends",
+                               "Explicit loop-invariant broadcasts consumed by multiplicand-tied FMA"};
   Statistic resourceFrontiersRetained{this, "weft-fma-resource-frontiers-retained",
                                       "Unfused schedules retained to keep simultaneous input residency legal"};
 };

@@ -74,8 +74,9 @@ mlir::LogicalResult Emitter::compileFMA(riscv::FMAOp operation) {
   }
   bool rows = instruction.ends_with(".row.vf");
   bool vf = instruction.ends_with(".vf");
+  const bool overwriteLHS = instruction == "rvv.vfmadd.vf";
   const auto mnemonic = instruction.split('.').second.split('.').first;
-  if (mnemonic != "vfmacc" && mnemonic != "vfnmsac" && mnemonic != "vfmsac")
+  if (mnemonic != "vfmacc" && mnemonic != "vfnmsac" && mnemonic != "vfmsac" && !overwriteLHS)
     return fail(operation, "pointwise FMA has no selected arithmetic instruction");
   std::optional<riscv::FMAIssueGeometry> geometry;
   if (rows)
@@ -100,8 +101,9 @@ mlir::LogicalResult Emitter::compileFMA(riscv::FMAOp operation) {
         ? rhs->parts[row] : vf ? rhs->scalar : rhs->parts[part];
     std::string name = fresh("fma");
     line(vectorType(operation.getResult()) + " " + name + " = __riscv_" + mnemonic.str() + "_" +
-         (vf ? "vf_" : "vv_") + vectorSuffix(operation.getResult()) + "(" + acc->parts[part] +
-         ", " + multiplier + ", " + lhs->parts[part] + ", " +
+         (vf ? "vf_" : "vv_") + vectorSuffix(operation.getResult()) + "(" +
+         (overwriteLHS ? lhs->parts[part] : acc->parts[part]) +
+         ", " + multiplier + ", " + (overwriteLHS ? acc->parts[part] : lhs->parts[part]) + ", " +
          partVL(operation.getResult(), part) + ");");
     result.parts.push_back(std::move(name));
   }

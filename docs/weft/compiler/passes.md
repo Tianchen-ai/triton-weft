@@ -1533,10 +1533,16 @@ validity 保持相同。不穿过改变类型的数值操作，不移动任何�
 当前支持 f32/f64 scalar，以及同布局 RVV vector/vector、vector/scalar；其它
 形状继续使用原有两条运算。选择不依赖 kernel、量化格式或扩展名称。
 向量结果使用 scalar addend 时，成本必须计入每个 packet 的广播和破坏式目的寄存器准备。
-当前 FMA leaf 将输出与 vector accumulator 绑定；即使广播可共享，也仍需为后续 packet
+accumulator-tied FMA leaf 将输出与 vector accumulator 绑定；即使广播可共享，也仍需为后续 packet
 或循环迭代复制该初值。因此 `splat/copy + FMA` 没有比原 `mul + .vf add/subtract`
 减少 issue，且增加向量驻留；同成本保留原实现。不能把尚未物化的广播外提、不同的
 寄存器绑定或仅有语义复用次数，当作已经减少的物理工作。
+对完整 RVV carrier、标量乘数和标量 addend 的加法，可选择另一种精确 leaf `rvv.vfmadd.vf`：
+只有向量乘数在这里最后使用、没有共享 storage identity，且直接 enclosing SCF loop 有至少
+两次已证明的静态迭代、addend 定义在该循环外时，才在循环前物化显式 `rvv_splat`。
+`vfmadd` 覆盖向量乘数，保留这个广播值供后续迭代复用，因此实际工作由每次两条算术变为
+一次广播加每次一条 FMA。广播的全部寄存器组进入前沿与最终活跃区间分析；动态次数、
+tail carrier、减法及仍有消费者的乘数不使用这项选择。不改变作者 Level 或复用范围。
 已有向量 accumulator 的融合继续进行；已经物化的 `fma` 不由这个隐式 pass 改写。
 选择还要核对三个输入的共同驻留前沿，沿共享 register identity 去重并计入完整 time parts。
 若这个必要输入集已经超过目标寄存器预算，保留原来的两条运算，使 addend 能在乘法输入死亡后
