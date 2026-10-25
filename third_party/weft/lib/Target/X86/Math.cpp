@@ -7,6 +7,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Math/Transforms/Passes.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/IR/Matchers.h"
@@ -73,7 +74,7 @@ public:
   StringRef getArgument() const override { return "weft-x86-legalize-half-carriers"; }
   StringRef getDescription() const override { return "Avoid partial-register conversion dependencies between independent half snapshots"; }
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect, func::FuncDialect, vector::VectorDialect>();
+    registry.insert<arith::ArithDialect, func::FuncDialect, vector::VectorDialect, ub::UBDialect>();
   }
   void runOnOperation() override {
     SmallVector<arith::ExtFOp> conversions;
@@ -85,11 +86,6 @@ public:
       weft::X86Target target;
       std::string error;
       if (!cpu || !weft::parseX86Target(cpu.str(), "sysv", 0, target, error)) continue;
-      if (op.getIn().getType().isF16() && op.getType().isF32() && target.hasFeature("avx512fp16")) {
-        b.setInsertionPoint(op);
-        b.replaceOp(op, weft::widenX86ScalarHalf(getOperation(), b, op.getLoc(), op.getIn(), target));
-        continue;
-      }
       auto input = dyn_cast<VectorType>(op.getIn().getType());
       if (!input || input.isScalable() || input.getRank() != 1 ||
           !input.getElementType().isF16() || input.getNumElements() != 2) continue;
@@ -238,7 +234,10 @@ Value weft::widenX86ScalarHalf(ModuleOp module, OpBuilder &b, Location loc,
     auto fp = VectorType::get({4}, b.getF32Type());
     auto hp = VectorType::get({8}, b.getF16Type());
     Value zero = arith::ConstantOp::create(b, loc, fp, DenseElementsAttr::get(fp, b.getF32FloatAttr(0)));
-    Value source = arith::ConstantOp::create(b, loc, hp, DenseElementsAttr::get(hp, b.getFloatAttr(b.getF16Type(), 0)));
+    // Only the low half is consumed by the scalar instruction. Its remaining
+    // lanes need no initialization; the independent, defined merge operand
+    // below owns the result's upper lanes.
+    Value source = ub::PoisonOp::create(b, loc, hp);
     source = vector::InsertOp::create(b, loc, input, source, ArrayRef<int64_t>{0});
     Value mask = arith::ConstantOp::create(b, loc, b.getI8Type(), b.getI8IntegerAttr(1));
     Value rounding = arith::ConstantOp::create(b, loc, b.getI32Type(), b.getI32IntegerAttr(4));
