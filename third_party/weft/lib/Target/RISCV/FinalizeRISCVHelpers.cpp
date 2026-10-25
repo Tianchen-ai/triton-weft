@@ -24,7 +24,19 @@ public:
       kernel->setAttr("native_entry_alignment",
                      IntegerAttr::get(IntegerType::get(&getContext(), 64), 32));
     });
+    bool invalidAlignment = false;
+    getOperation().walk([&](riscv::KernelOp kernel) {
+      auto alignment = kernel->getAttrOfType<IntegerAttr>("native_loop_alignment");
+      if (!alignment || !llvm::is_contained(ArrayRef<int64_t>{0, 2, 4, 8, 16, 32, 64, 128}, alignment.getInt())) {
+        kernel.emitError("native loop placement requires a valid explicit alignment policy");
+        invalidAlignment = true;
+      }
+    });
+    if (invalidAlignment) { signalPassFailure(); return; }
     getOperation().walk([&](scf::ForOp loop) {
+      auto kernel = loop->getParentOfType<riscv::KernelOp>();
+      if (!kernel) return;
+      const int64_t alignment = kernel->getAttrOfType<IntegerAttr>("native_loop_alignment").getInt();
       bool vectorBody = false;
       bool retainedChild = false;
       loop.walk([&](Operation *operation) {
@@ -40,9 +52,9 @@ public:
       // Align its enclosing vector-work loop, but do not pad every outer
       // traversal around a surviving child. Those headers add no vector issue
       // locality and can displace the child and its neighbouring hot blocks.
-      if (vectorBody && !retainedChild)
+      if (alignment && vectorBody && !retainedChild)
         loop->setAttr("weft.riscv.code_alignment",
-                      IntegerAttr::get(IntegerType::get(&getContext(), 64), 32));
+                      IntegerAttr::get(IntegerType::get(&getContext(), 64), alignment));
       else
         loop->removeAttr("weft.riscv.code_alignment");
     });

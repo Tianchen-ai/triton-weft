@@ -108,6 +108,9 @@ ISA/ABI flags 必须与编译目标一致。工具路径、版本、stat、相�
 明确的 target VLEN 同时通过 `-mrvv-vector-bits=N` 交给 Clang，不能在 intrinsic C
 边界丢失已经用于 physical layout 和执行检查的机器事实；显式冲突的 VLEN 参数拒绝。
 CPU 调度参数可通过工具链的 `-mtune` 显式声明，它不替代 ISA、ABI 或实际执行能力检查。
+RISC-V 的 `backend_options.native_loop_alignment` 取 `0、2、4、8、16、32、64、128`，
+默认 `32`；`0` 将循环放置交给原生工具链。显式 `-falign-loops` / `-fno-align-loops`
+也选择 `0`，与同时指定的非零 backend 对齐冲突时拒绝，避免两处配置互相覆盖。
 只使用 Triton cache，通过 TRITON_CACHE_DIR 选择目录，不建立第二套 Weft 缓存。
 开发测量的 cache、dump、native 产物均由 Bench 配置在其输出目录。
 

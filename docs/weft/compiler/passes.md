@@ -277,6 +277,9 @@ final verifier 要求显式的合法二次幂对齐；C emitter 只输出已选 
 子循环视为保留；其外层遍历不重复添加 padding。静态小子循环可能在原生代码生成时完全展开，
 外层仍保留自己的对齐决定。四次是有限放置策略的边界，不是 ISA 事实或展开正确性的前提。
 该策略不假定更大边界总是更快，也不根据 kernel 名称选择代码偏移。
+原生工具链显式配置 `-falign-loops` 或 `-fno-align-loops` 时，backend 将循环放置交还
+该配置，Physical kernel 保存 `native_loop_alignment=0`，不再用 statement attribute
+覆盖用户的选择。其它情况保留 32-byte 策略；checkpoint 重放继承同一放置决定。
 
 布局选择同时核对一个 control edge 上全部 carry/result slots 的常驻寄存器占用，
 并保留更新 issue 的空间；不能用各 slot 单独放得下来证明它们可以同时存活。
@@ -866,6 +869,8 @@ physical origins 与活动范围必须可证明。子 point 的全局 base 减�
 scalar carrier 若保留非单位 lane window，表示该窗口内已证明一致的标量供应；
 time/replica parts 是有限标量 tuple，不能仅因 time factor 大于一就建立局部数组。
 普通逐元素 scalar traversal、动态数值域和超寄存器预算的程序仍使用原来的物化规则。
+scalar reduction 的被消去轴若含多个 time parts，必须物化实际遍历；标量 tuple
+即使能放入寄存器，也不能交给只覆盖 register replica 的终端归约指令。
 I16/I32/I64 向 2～7 位整数的普通截断先按合法 RVV 宽度缩到 byte carrier，再执行
 已有有限位宽转换；这些中间步骤显式进入 Physical IR，不用不存在的 sub-byte SEW。
 

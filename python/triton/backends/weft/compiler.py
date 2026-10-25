@@ -31,6 +31,7 @@ class X86Options(CPUOptions):
 @dataclass(frozen=True)
 class WeftOptions(CPUOptions):
     lmul_eighths: int = 8
+    native_loop_alignment: int = 32
     unroll: int = 1
     scalar_load_prime: int = 0
     pointwise_issue_copies: int = 1
@@ -91,6 +92,16 @@ class WeftBackend(BaseBackend):
         if self.target.arch == "x86_64":
             weft.x86_target_capabilities(self.target.march, self.target.abi, self.target.vlen_bits)
         values["toolchain"] = Toolchain.resolve(values.get("toolchain", {}), self.target).to_dict()
+        if self.target.arch == "riscv64":
+            # Statement alignment overrides Clang's command-line policy. An
+            # explicitly configured native policy owns placement instead.
+            explicit_alignment = any(
+                flag == "-falign-loops" or flag.startswith("-falign-loops=") or flag == "-fno-align-loops"
+                for flag in values["toolchain"]["cflags"])
+            if explicit_alignment:
+                if "native_loop_alignment" in values and values["native_loop_alignment"] != 0:
+                    raise ValueError("native_loop_alignment conflicts with the explicit toolchain loop alignment")
+                values["native_loop_alignment"] = 0
         result = option_class(**values)
         if type(result.pipeline_depth) is not int or result.pipeline_depth not in (1, 2, 3, 4):
             raise ValueError("pipeline_depth must be one of 1, 2, 3, 4")

@@ -19,6 +19,7 @@ bool RISCVCompilerOptions::validateBindings(std::string &error) const {
   };
   if (!finite("lmul-eighths", lmulEighths, {1, 2, 4, 8, 16, 32, 64}) ||
       !finite("pipeline-depth", pipelineDepth, {1, 2, 3, 4}) ||
+      !finite("native-loop-alignment", nativeLoopAlignment, {0, 2, 4, 8, 16, 32, 64, 128}) ||
       !finite("scalar-load-prime", scalarLoadPrime, {0, 1}) ||
       !finite("pointwise-issue-copies", pointwiseIssueCopies, {1, 2, 4}) ||
       !finite("contraction-column-copies", contractionColumnCopies, {1, 2, 4}) ||

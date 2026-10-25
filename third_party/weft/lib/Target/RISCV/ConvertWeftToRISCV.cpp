@@ -1426,6 +1426,7 @@ private:
     state.addAttribute("required_extensions", riscv_internal::strings(builder, requirements));
     state.addAttribute("local_tile_strategy", builder.getStringAttr(options.localTileStrategy));
     state.addAttribute("pointwise_issue_copies", builder.getI64IntegerAttr(options.pointwiseIssueCopies));
+    state.addAttribute("native_loop_alignment", builder.getI64IntegerAttr(options.nativeLoopAlignment));
     state.addAttribute("contraction_column_copies", builder.getI64IntegerAttr(options.contractionColumnCopies));
     state.addAttribute("panel_transfer_fields", builder.getI64IntegerAttr(options.panelTransferFields));
     state.addAttribute("panel_transfer_strategy", builder.getStringAttr(options.panelTransferStrategy));
@@ -1594,6 +1595,7 @@ public:
     lmul = options.lmulEighths;
     unroll = options.unroll;
     pipeline = options.pipelineDepth;
+    nativeLoopAlignment = options.nativeLoopAlignment;
     scalarPrime = options.scalarLoadPrime;
     pointwiseCopies = options.pointwiseIssueCopies;
     columnCopies = options.contractionColumnCopies;
@@ -1635,6 +1637,7 @@ public:
     options.lmulEighths = lmul;
     options.unroll = unroll;
     options.pipelineDepth = pipeline;
+    options.nativeLoopAlignment = nativeLoopAlignment;
     options.scalarLoadPrime = scalarPrime;
     options.pointwiseIssueCopies = pointwiseCopies;
     options.contractionColumnCopies = columnCopies;
@@ -1659,6 +1662,7 @@ private:
   Option<int64_t> lmul{*this, "lmul-eighths", llvm::cl::init(8)};
   Option<int64_t> unroll{*this, "unroll", llvm::cl::init(1)};
   Option<int64_t> pipeline{*this, "pipeline-depth", llvm::cl::init(1)};
+  Option<int64_t> nativeLoopAlignment{*this, "native-loop-alignment", llvm::cl::init(32)};
   Option<int64_t> scalarPrime{*this, "scalar-load-prime", llvm::cl::init(0)};
   Option<int64_t> pointwiseCopies{*this, "pointwise-issue-copies", llvm::cl::init(1)};
   Option<int64_t> columnCopies{*this, "contraction-column-copies", llvm::cl::init(4)};

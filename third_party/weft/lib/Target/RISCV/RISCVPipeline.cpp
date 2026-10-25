@@ -410,6 +410,7 @@ struct PhysicalPipelineOptions : PassPipelineOptions<PhysicalPipelineOptions> {
   Option<int64_t> lmul{*this, "lmul-eighths", llvm::cl::init(8)};
   Option<int64_t> unroll{*this, "unroll", llvm::cl::init(1)};
   Option<int64_t> pipeline{*this, "pipeline-depth", llvm::cl::init(1)};
+  Option<int64_t> nativeLoopAlignment{*this, "native-loop-alignment", llvm::cl::init(32)};
   Option<int64_t> scalarPrime{*this, "scalar-load-prime", llvm::cl::init(0)};
   Option<int64_t> pointwiseCopies{*this, "pointwise-issue-copies", llvm::cl::init(1)};
   Option<int64_t> columnCopies{*this, "contraction-column-copies", llvm::cl::init(4)};
@@ -435,6 +436,7 @@ struct PhysicalPipelineOptions : PassPipelineOptions<PhysicalPipelineOptions> {
     options.lmulEighths = lmul;
     options.unroll = unroll;
     options.pipelineDepth = pipeline;
+    options.nativeLoopAlignment = nativeLoopAlignment;
     options.scalarLoadPrime = scalarPrime;
     options.pointwiseIssueCopies = pointwiseCopies;
     options.contractionColumnCopies = columnCopies;
@@ -619,7 +621,7 @@ void weft::registerRISCVPasses() {
     llvm::StringSet<> registered;
     auto registerEntries = [&](llvm::ArrayRef<Entry> entries) {
       for (const Entry &entry : entries) {
-        if (entry.id == PassID::CSE || entry.id == PassID::SCCP)
+        if (entry.id == PassID::SCCP)
           continue;
         auto argument = makePass(entry.id, RISCVCompilerOptions{}, {})->getArgument();
         if (!registered.insert(argument).second)

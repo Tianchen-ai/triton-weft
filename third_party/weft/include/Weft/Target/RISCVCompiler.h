@@ -26,6 +26,8 @@ struct RISCVCompilerOptions {
   int64_t lmulEighths = 8;
   int64_t unroll = 1;
   int64_t pipelineDepth = 1;
+  // Zero delegates loop placement to an explicitly configured native toolchain.
+  int64_t nativeLoopAlignment = 32;
   int64_t scalarLoadPrime = 0;
   int64_t pointwiseIssueCopies = 1;
   int64_t contractionColumnCopies = 4;

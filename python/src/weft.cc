@@ -175,6 +175,7 @@ weft::RISCVCompilerOptions options(const py::dict &values) {
   result.lmulEighths = integer("lmul_eighths");
   result.unroll = integer("unroll");
   result.pipelineDepth = integer("pipeline_depth");
+  result.nativeLoopAlignment = integer("native_loop_alignment");
   result.scalarLoadPrime = integer("scalar_load_prime");
   result.pointwiseIssueCopies = integer("pointwise_issue_copies");
   result.contractionColumnCopies = integer("contraction_column_copies");

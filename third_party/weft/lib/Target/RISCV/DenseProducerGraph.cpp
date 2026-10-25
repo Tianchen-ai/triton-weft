@@ -543,6 +543,13 @@ bool DenseProducerGraph::needsRealization() const {
   if ((!count && !dynamic) || (count && *count <= width)) return false;
   const int64_t budget = root->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters();
   unsigned xlen = root->getParentOfType<riscv::KernelOp>().getTarget().getMarch().starts_with("rv32") ? 32 : 64;
+  // Time parts describe separate ordered issues, not register replicas of a
+  // scalar reduction leaf. Materialize that traversal even when the complete
+  // scalar tuple fits in registers; otherwise a small non-power-of-two domain
+  // can reach final selection without any instruction covering its members.
+  if (!reductions.empty() && domain.getLayout().getCarrier() == "scalar" &&
+      domain.getLayout().getTimeFactors()[lanePosition] > 1)
+    return true;
   if (!dynamic && reductions.empty() && domain.getLayout().getCarrier() == "rvv") {
     // Compare the whole-Value schedule with the same issue resource model used
     // for candidate tiles. A last-use reuse in today's binary graph does not
