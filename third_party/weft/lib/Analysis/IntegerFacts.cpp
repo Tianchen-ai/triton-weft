@@ -2,6 +2,7 @@
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/MathExtras.h"
@@ -14,10 +15,29 @@ namespace wk = weft::kernel;
 namespace {
 using Kind = IntegerExpressionKind;
 
-std::optional<IntegerRange> representable(__int128 minimum, __int128 maximum) {
-  if (minimum > maximum || minimum < INT64_MIN || maximum > INT64_MAX)
-    return std::nullopt;
-  return IntegerRange{static_cast<int64_t>(minimum), static_cast<int64_t>(maximum)};
+using Bound = llvm::APSInt;
+
+Bound signedBound(Bound value) {
+  return value.isUnsigned() ? Bound(value.zext(value.getBitWidth() + 1), false) : value;
+}
+
+Bound low(const Bound &a, const Bound &b) {
+  return Bound::compareValues(a, b) <= 0 ? a : b;
+}
+Bound high(const Bound &a, const Bound &b) {
+  return Bound::compareValues(a, b) >= 0 ? a : b;
+}
+Bound add(const Bound &a, const Bound &b) {
+  unsigned bits = std::max(a.getBitWidth(), b.getBitWidth()) + 1;
+  return a.extend(bits) + b.extend(bits);
+}
+Bound subtract(const Bound &a, const Bound &b) {
+  unsigned bits = std::max(a.getBitWidth(), b.getBitWidth()) + 1;
+  return a.extend(bits) - b.extend(bits);
+}
+Bound multiply(const Bound &a, const Bound &b) {
+  unsigned bits = a.getBitWidth() + b.getBitWidth();
+  return a.extend(bits) * b.extend(bits);
 }
 
 IntegerType interpreted(Type type, IntegerType context) {
@@ -30,20 +50,22 @@ IntegerType interpreted(Type type, IntegerType context) {
 std::optional<IntegerRange> constantRange(Attribute attribute, IntegerType type) {
   if (!integerTypeRange(type)) return std::nullopt;
   auto number = [&](APInt value) {
-    return type.isSigned() ? value.getSExtValue() : static_cast<int64_t>(value.getZExtValue());
+    value = type.isSigned() ? value.sextOrTrunc(type.getWidth()) : value.zextOrTrunc(type.getWidth());
+    return signedBound(Bound(value, !type.isSigned()));
   };
   if (auto scalar = dyn_cast_or_null<IntegerAttr>(attribute)) {
-    int64_t value = number(scalar.getValue());
+    Bound value = number(scalar.getValue());
     return IntegerRange{value, value};
   }
   if (auto elements = dyn_cast_or_null<DenseIntElementsAttr>(attribute)) {
     if (elements.empty()) return std::nullopt;
-    int64_t low = INT64_MAX, high = INT64_MIN;
+    std::optional<IntegerRange> result;
     for (APInt value : elements.getValues<APInt>()) {
-      int64_t n = number(value);
-      low = std::min(low, n); high = std::max(high, n);
+      Bound n = number(value);
+      result = result ? IntegerRange{low(result->minimum, n), high(result->maximum, n)} :
+                        IntegerRange{n, n};
     }
-    return IntegerRange{low, high};
+    return result;
   }
   return std::nullopt;
 }
@@ -63,18 +85,9 @@ IntegerExpression describe(Value value, IntegerType type) {
   else if (auto op = value.getDefiningOp<wk::ConstantOp>()) known(op.getValue());
   else if (auto op = value.getDefiningOp<wk::IotaOp>()) {
     expression.kind = Kind::Known;
-    if (op.getEnd() > op.getStart() && op.getEnd() - 1 <= uint64_t(INT64_MAX))
-      expression.known = IntegerRange{static_cast<int64_t>(op.getStart()), static_cast<int64_t>(op.getEnd() - 1)};
-  } else if (auto op = value.getDefiningOp<arith::ExtUIOp>()) {
-    unary(op.getIn(), Kind::Cast);
-    auto input = integerElementType(op.getIn().getType());
-    expression.interpretations = {IntegerType::get(type.getContext(), input.getWidth(), IntegerType::Unsigned)};
-  } else if (auto op = value.getDefiningOp<arith::ExtSIOp>()) {
-    unary(op.getIn(), Kind::Cast);
-    auto input = integerElementType(op.getIn().getType());
-    expression.interpretations = {IntegerType::get(type.getContext(), input.getWidth(), IntegerType::Signed)};
-  } else if (auto op = value.getDefiningOp<arith::TruncIOp>()) unary(op.getIn(), Kind::Cast);
-  else if (auto op = value.getDefiningOp<wk::WidenOp>()) unary(op.getInput(), Kind::Cast);
+    if (op.getEnd() > op.getStart())
+      expression.known = IntegerRange{Bound::getUnsigned(op.getStart()), Bound::getUnsigned(op.getEnd() - 1)};
+  } else if (auto op = value.getDefiningOp<wk::WidenOp>()) unary(op.getInput(), Kind::Cast);
   else if (auto op = value.getDefiningOp<wk::CastOp>()) unary(op.getInput(), Kind::Cast);
   else if (auto op = value.getDefiningOp<wk::NarrowOp>()) unary(op.getInput(), op.getSaturate() ? Kind::Saturate : Kind::Cast);
   else if (auto op = value.getDefiningOp<wk::ExtractOp>()) unary(op.getInput());
@@ -95,21 +108,12 @@ IntegerExpression describe(Value value, IntegerType type) {
     }
   }
   else if (auto op = value.getDefiningOp<vector::InsertStridedSliceOp>()) pair(op.getValueToStore(), op.getDest(), Kind::Union);
-  else if (auto op = value.getDefiningOp<arith::SelectOp>()) pair(op.getTrueValue(), op.getFalseValue(), Kind::Union);
   else if (auto op = value.getDefiningOp<wk::SelectOp>()) pair(op.getTrueValue(), op.getFalseValue(), Kind::Union);
   else if (auto op = value.getDefiningOp<wk::BinaryOp>()) pair(op.getLhs(), op.getRhs(), integerBinaryKind(op.getKind()));
   else if (auto op = value.getDefiningOp<wk::MacGroupsOp>()) {
     if (op.getOverflow() == "wrap") {
       pair(op.getLhs(), op.getRhs(), Kind::ProductSum); expression.group = op.getGroup();
     }
-  } else if (auto *op = value.getDefiningOp(); op && op->getNumOperands() == 2) {
-    auto kind = llvm::StringSwitch<Kind>(op->getName().getStringRef())
-        .Case("arith.addi", Kind::Add).Case("arith.subi", Kind::Sub)
-        .Case("arith.muli", Kind::Mul).Case("arith.andi", Kind::And)
-        .Case("arith.ori", Kind::Or).Case("arith.shli", Kind::ShiftLeft)
-        .Case("arith.shrui", Kind::ShiftRight).Case("arith.divui", Kind::Divide)
-        .Default(Kind::Unknown);
-    if (kind != Kind::Unknown) pair(op->getOperand(0), op->getOperand(1), kind);
   }
   return expression;
 }
@@ -126,6 +130,13 @@ public:
     auto found = cache.find(key);
     if (found != cache.end()) return found->second;
     IntegerExpression expression = custom ? *custom : describe(value, type);
+    // Standard MLIR operations already define signed/unsigned, wrap and shift
+    // behavior. Reuse that interface instead of another arithmetic interpreter.
+    if (!custom && expression.kind != Kind::Known)
+      if (auto inferred = infer(value, type, depth)) {
+        cache[key] = inferred;
+        return inferred;
+      }
     auto fit = [&](std::optional<IntegerRange> range) -> std::optional<IntegerRange> {
       return range && range->fits(type) ? range : full;
     };
@@ -143,47 +154,52 @@ public:
       IntegerRange a = inputs.front();
       if (expression.kind == Kind::Preserve || expression.kind == Kind::Cast) return fit(a);
       if (expression.kind == Kind::ZeroOr)
-        return fit(IntegerRange{std::min(int64_t{0}, a.minimum), std::max(int64_t{0}, a.maximum)});
+        return fit(IntegerRange{low(Bound::get(0), a.minimum), high(Bound::get(0), a.maximum)});
       if (expression.kind == Kind::Saturate)
-        return IntegerRange{std::clamp(a.minimum, full->minimum, full->maximum),
-                            std::clamp(a.maximum, full->minimum, full->maximum)};
+        return IntegerRange{low(high(a.minimum, full->minimum), full->maximum),
+                            low(high(a.maximum, full->minimum), full->maximum)};
       if (expression.kind == Kind::Sum)
         return fit(productSumRange(a, {1, 1}, expression.group));
       if (expression.kind == Kind::ProductSum && inputs.size() == 3) {
         auto products = productSumRange(a, inputs[1], expression.group);
         if (!products) return full;
-        return fit(representable(__int128(products->minimum) + inputs[2].minimum,
-                                 __int128(products->maximum) + inputs[2].maximum));
+        return fit(IntegerRange{add(products->minimum, inputs[2].minimum),
+                                add(products->maximum, inputs[2].maximum)});
       }
       if (inputs.size() != 2) return full;
       IntegerRange c = inputs[1];
       switch (expression.kind) {
-      case Kind::Union: return fit(IntegerRange{std::min(a.minimum, c.minimum), std::max(a.maximum, c.maximum)});
-      case Kind::Add: return fit(representable(__int128(a.minimum) + c.minimum, __int128(a.maximum) + c.maximum));
-      case Kind::Sub: return fit(representable(__int128(a.minimum) - c.maximum, __int128(a.maximum) - c.minimum));
+      case Kind::Union: return fit(IntegerRange{low(a.minimum, c.minimum), high(a.maximum, c.maximum)});
+      case Kind::Add: return fit(IntegerRange{add(a.minimum, c.minimum), add(a.maximum, c.maximum)});
+      case Kind::Sub: return fit(IntegerRange{subtract(a.minimum, c.maximum), subtract(a.maximum, c.minimum)});
       case Kind::Mul: return fit(productSumRange(a, c, 1));
       case Kind::ProductSum: return fit(productSumRange(a, c, expression.group));
       case Kind::And:
-        if (a.minimum >= 0 && c.minimum >= 0) return fit(IntegerRange{0, std::min(a.maximum, c.maximum)});
-        if (a.minimum == a.maximum && a.minimum >= 0) return fit(IntegerRange{0, a.maximum});
-        if (c.minimum == c.maximum && c.minimum >= 0) return fit(IntegerRange{0, c.maximum});
+        if (a.minimum >= 0 && c.minimum >= 0) return fit(IntegerRange{Bound::get(0), low(a.maximum, c.maximum)});
+        if (a.minimum == a.maximum && a.minimum >= 0) return fit(IntegerRange{Bound::get(0), a.maximum});
+        if (c.minimum == c.maximum && c.minimum >= 0) return fit(IntegerRange{Bound::get(0), c.maximum});
         break;
       case Kind::Or:
         if (a.minimum >= 0 && c.minimum >= 0) {
-          unsigned width = std::max(llvm::bit_width(uint64_t(a.maximum)), llvm::bit_width(uint64_t(c.maximum)));
-          return fit(IntegerRange{0, static_cast<int64_t>(llvm::maskTrailingOnes<uint64_t>(width))});
+          unsigned width = std::max(a.maximum.getActiveBits(), c.maximum.getActiveBits());
+          return fit(IntegerRange{Bound::get(0), Bound(APInt::getLowBitsSet(width + 1, width), false)});
         }
         break;
       case Kind::ShiftLeft:
         if (a.minimum >= 0 && c.minimum == c.maximum && c.minimum >= 0 && c.maximum < type.getWidth())
-          return fit(representable(__int128(a.minimum) << c.minimum, __int128(a.maximum) << c.minimum));
+          return fit(IntegerRange{a.minimum.extend(a.minimum.getBitWidth() + c.minimum.getZExtValue()) << c.minimum.getZExtValue(),
+                                  a.maximum.extend(a.maximum.getBitWidth() + c.minimum.getZExtValue()) << c.minimum.getZExtValue()});
         break;
       case Kind::ShiftRight:
         if (a.minimum >= 0 && c.minimum == c.maximum && c.minimum >= 0 && c.maximum < type.getWidth())
-          return fit(IntegerRange{a.minimum >> c.minimum, a.maximum >> c.minimum});
+          return fit(IntegerRange{a.minimum >> c.minimum.getZExtValue(), a.maximum >> c.minimum.getZExtValue()});
         break;
       case Kind::Divide:
-        if (a.minimum >= 0 && c.minimum > 0) return fit(IntegerRange{a.minimum / c.maximum, a.maximum / c.minimum});
+        if (a.minimum >= 0 && c.minimum > 0) {
+          unsigned bits = std::max(a.maximum.getBitWidth(), c.maximum.getBitWidth());
+          return fit(IntegerRange{a.minimum.extend(bits) / c.maximum.extend(bits),
+                                  a.maximum.extend(bits) / c.minimum.extend(bits)});
+        }
         break;
       default: break;
       }
@@ -194,6 +210,27 @@ public:
     return result;
   }
 private:
+  std::optional<IntegerRange> infer(Value value, IntegerType type, unsigned depth) {
+    auto result = dyn_cast<OpResult>(value);
+    auto interface = result ? dyn_cast<InferIntRangeInterface>(result.getOwner()) : InferIntRangeInterface();
+    if (!interface) return std::nullopt;
+    SmallVector<ConstantIntRanges> operands;
+    for (Value operand : result.getOwner()->getOperands()) {
+      unsigned bits = ConstantIntRanges::getStorageBitwidth(operand.getType());
+      auto operandType = interpreted(operand.getType(), type);
+      auto range = operandType ? get(operand, operandType, depth + 1) : std::nullopt;
+      if (!range) operands.push_back(ConstantIntRanges::maxRange(bits));
+      else operands.push_back(ConstantIntRanges::range(range->minimum.extOrTrunc(bits),
+           range->maximum.extOrTrunc(bits), operandType.isSigned()));
+    }
+    std::optional<IntegerRange> answer;
+    interface.inferResultRanges(operands, [&](Value inferred, const ConstantIntRanges &range) {
+      if (inferred != value) return;
+      answer = IntegerRange{Bound(type.isSigned() ? range.smin() : range.umin(), !type.isSigned()),
+                            Bound(type.isSigned() ? range.smax() : range.umax(), !type.isSigned())};
+    });
+    return answer;
+  }
   const IntegerDescription &target;
   unsigned visits = 0;
   llvm::DenseMap<std::pair<Value, IntegerType>, std::optional<IntegerRange>> cache;
@@ -207,25 +244,40 @@ IntegerType weft::analysis::integerElementType(Type type) {
 }
 
 std::optional<IntegerRange> weft::analysis::integerTypeRange(IntegerType type) {
-  if (!type || type.isSignless() || !type.getWidth() || type.getWidth() >= 63) return std::nullopt;
-  int64_t limit = int64_t{1} << (type.getWidth() - (type.isSigned() ? 1 : 0));
-  return IntegerRange{type.isSigned() ? -limit : 0, limit - 1};
+  if (!type || type.isSignless() || !type.getWidth()) return std::nullopt;
+  unsigned bits = type.getWidth();
+  return type.isSigned() ? IntegerRange{Bound(APInt::getSignedMinValue(bits), false),
+                                        Bound(APInt::getSignedMaxValue(bits), false)} :
+                          IntegerRange{Bound::get(0), Bound(APInt::getMaxValue(bits), true)};
+}
+
+IntegerRange::IntegerRange(int64_t minimum, int64_t maximum)
+    : IntegerRange(Bound::get(minimum), Bound::get(maximum)) {}
+
+IntegerRange::IntegerRange(Bound low, Bound high)
+    : minimum(signedBound(std::move(low))), maximum(signedBound(std::move(high))) {
+  // One spare sign bit also makes negating a bound safe for magnitude queries.
+  unsigned bits = std::max(minimum.getSignificantBits(), maximum.getSignificantBits()) + 1;
+  minimum = minimum.extOrTrunc(bits);
+  maximum = maximum.extOrTrunc(bits);
+}
+
+std::optional<IntegerRange> weft::analysis::integerConstantRange(Attribute attr, IntegerType type) {
+  return constantRange(attr, type);
 }
 
 bool IntegerRange::fits(IntegerType type) const {
   auto domain = integerTypeRange(type);
-  return domain && minimum >= domain->minimum && maximum <= domain->maximum && minimum <= maximum;
+  return domain && Bound::compareValues(minimum, domain->minimum) >= 0 &&
+      Bound::compareValues(maximum, domain->maximum) <= 0 && minimum <= maximum;
 }
 
 std::optional<IntegerRange> weft::analysis::productSumRange(IntegerRange lhs, IntegerRange rhs, int64_t group) {
   if (group <= 0 || lhs.minimum > lhs.maximum || rhs.minimum > rhs.maximum) return std::nullopt;
-  const __int128 products[] = {__int128(lhs.minimum) * rhs.minimum, __int128(lhs.minimum) * rhs.maximum,
-                             __int128(lhs.maximum) * rhs.minimum, __int128(lhs.maximum) * rhs.maximum};
-  __int128 low, high;
-  if (__builtin_mul_overflow(*std::min_element(std::begin(products), std::end(products)), __int128(group), &low) ||
-      __builtin_mul_overflow(*std::max_element(std::begin(products), std::end(products)), __int128(group), &high))
-    return std::nullopt;
-  return representable(low, high);
+  const Bound products[] = {multiply(lhs.minimum, rhs.minimum), multiply(lhs.minimum, rhs.maximum),
+                            multiply(lhs.maximum, rhs.minimum), multiply(lhs.maximum, rhs.maximum)};
+  return IntegerRange{multiply(*std::min_element(std::begin(products), std::end(products)), Bound::get(group)),
+                      multiply(*std::max_element(std::begin(products), std::end(products)), Bound::get(group))};
 }
 
 bool weft::analysis::saturatingProductSumIsExact(IntegerRange lhs, IntegerRange rhs, int64_t group, IntegerType accumulator) {

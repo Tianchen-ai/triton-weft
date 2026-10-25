@@ -4,6 +4,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/StringRef.h"
 #include <functional>
 #include <optional>
@@ -11,16 +12,20 @@
 namespace weft::analysis {
 
 // Mathematical bounds for every lane, independent of validity and storage.
-// Unknown/wrapping results retain their entire type domain. The current exact
-// interval representation covers integer types through 62 bits; wider types
-// return no proof, never a truncated bound.
+// Unknown/wrapping results retain their entire type domain. Bounds are signed
+// mathematical integers, including positive unsigned machine maxima. Arithmetic
+// extends them before evaluating a proof; it never wraps in the host type.
 struct IntegerRange {
-  int64_t minimum;
-  int64_t maximum;
+  llvm::APSInt minimum;
+  llvm::APSInt maximum;
+  IntegerRange(int64_t minimum, int64_t maximum);
+  IntegerRange(llvm::APSInt minimum, llvm::APSInt maximum);
   bool fits(mlir::IntegerType type) const;
 };
 
 std::optional<IntegerRange> integerTypeRange(mlir::IntegerType type);
+std::optional<IntegerRange> integerConstantRange(mlir::Attribute attribute,
+                                                 mlir::IntegerType type);
 std::optional<IntegerRange> productSumRange(IntegerRange lhs, IntegerRange rhs,
                                            int64_t group);
 bool saturatingProductSumIsExact(IntegerRange lhs, IntegerRange rhs,

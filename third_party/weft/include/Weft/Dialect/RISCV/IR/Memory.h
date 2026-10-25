@@ -74,6 +74,10 @@ void appendStorageAliases(mlir::OpOperand &use,
                           llvm::SmallVectorImpl<mlir::Value> &aliases);
 bool storageAliasesRemainInScope(mlir::Value value, mlir::Block *scope);
 
+// Coordinate identities describe a logical execution point, not a payload
+// access. This classification does not grant speculation, motion or erasure.
+bool isCoordinateIdentity(mlir::Operation *operation);
+
 // Read-only is an effect fact, not speculation or motion permission. Unknown
 // operations and trapping guards are barriers. Recursive queries understand
 // only operations which declare RecursiveMemoryEffects.

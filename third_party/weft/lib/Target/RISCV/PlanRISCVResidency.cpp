@@ -4,19 +4,42 @@
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
 #include "Weft/Dialect/RISCV/IR/Memory.h"
 #include "RISCVPhysicalSupport.h"
+#include "Weft/Target/RISCVPasses.h"
+#include "Weft/Analysis/PhysicalDependence.h"
+#include "Weft/Dialect/RISCV/IR/Layout.h"
+#include "Weft/Dialect/RISCV/IR/DenseBounds.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/IRMapping.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 
 #include <limits>
+#include <map>
 
 namespace {
 
 using namespace weft;
 
+void copySharedIdentity(mlir::Operation *source, mlir::Operation *target) {
+  for (llvm::StringRef name : {"source_origin", "canonical_op"})
+    if (auto attribute = source->getAttr(name)) target->setAttr(name, attribute);
+}
+
 bool isDenseLoadBacked(riscv::MaterializeOp materialize) {
-  auto load = riscv_internal::sourceLoad(materialize.getInput());
+  auto load = riscv_internal::stripRepresentationConversions(materialize.getInput())
+                  .getDefiningOp<riscv::LoadOp>();
   if (!load)
+    return false;
+  auto source = mlir::dyn_cast<riscv::ValueType>(load.getResult().getType());
+  auto result = mlir::dyn_cast<riscv::ValueType>(materialize.getResult().getType());
+  if (!source || !result || source.getElementType() != result.getElementType() ||
+      source.getShape() != result.getShape() || source.getAxisIds() != result.getAxisIds())
     return false;
   auto encoding =
       mlir::dyn_cast<kernel::EncodingType>(load.getRegion().getType().getEncoding());
@@ -164,6 +187,92 @@ planEncodedLocalPack(mlir::Builder &builder,
 
 } // namespace
 
+mlir::LogicalResult weft::materializeRISCVSharedSupply(
+    riscv::MaterializeOp operation, mlir::IRRewriter &rewriter) {
+  if (operation.getPlacement() == "local")
+    return operation.emitError("local shared supply requires its storage materializer");
+  if (operation.getPlacement() == "reload") {
+    auto load = riscv_internal::sourceLoad(operation.getInput());
+    if (!load) return operation.emitError("reload supply requires an existing numerical read");
+    rewriter.setInsertionPoint(operation);
+    auto staged = riscv::StagedViewOp::create(rewriter, operation.getLoc(),
+        load.getRegion().getType(), load.getRegion(), operation.getSchema(),
+        operation.getOwnerDomainId(), operation.getBirthId(), operation.getLifetimeEndDomainId());
+    copySharedIdentity(operation, staged);
+    llvm::SmallVector<riscv::ExtractOp> extracts;
+    for (mlir::Operation *user : operation.getResult().getUsers())
+      if (auto extract = mlir::dyn_cast<riscv::ExtractOp>(user);
+          extract && extract.getInput() == operation.getResult()) extracts.push_back(extract);
+    for (riscv::ExtractOp extract : extracts) {
+      auto result = mlir::dyn_cast<riscv::ValueType>(extract.getResult().getType());
+      auto source = load.getRegion().getType();
+      if (!result) return extract.emitError("reload projection requires one shaped physical result");
+      llvm::SmallVector<int64_t> strides, origins;
+      for (int64_t axis : result.getAxisIds().asArrayRef()) {
+        auto found = llvm::find(source.getAxisIds().asArrayRef(), axis);
+        if (found == source.getAxisIds().asArrayRef().end())
+          return extract.emitError("reload projection introduced an axis absent from its memory descriptor");
+        size_t index = found - source.getAxisIds().asArrayRef().begin();
+        strides.push_back(source.getStrides()[index]);
+        origins.push_back(source.getOrigins()[index]);
+      }
+      auto descriptor = riscv::MemDescType::get(rewriter.getContext(), source.getEncoding(),
+          result.getShape(), result.getAxisIds(), riscv_internal::integers(rewriter, strides),
+          riscv_internal::integers(rewriter, origins), source.getAlignment(), "slice", source.getAccess(),
+          source.getAliasSet(), source.getLayoutIdentity(), source.getStorageBits(),
+          source.getElements(), source.getInterleaveRows());
+      rewriter.setInsertionPoint(extract);
+      auto slice = riscv::SliceOp::create(rewriter, extract.getLoc(), descriptor,
+          staged.getResult(), extract.getIndices(), extract.getSelectors());
+      copySharedIdentity(extract, slice);
+      auto form = extract.getAccess().getForm();
+      auto leaf = riscv_internal::leaf(rewriter, "transfer", "load", ("rvv.load." + form).str(),
+          ("rvv.load." + form).str(), 0, 0);
+      auto projected = riscv::LoadOp::create(rewriter, extract.getLoc(), result, slice.getResult(),
+          mlir::Value(), extract.getAccess(), leaf);
+      copySharedIdentity(extract, projected);
+      rewriter.replaceOp(extract, projected.getResult());
+    }
+    llvm::SmallVector<mlir::OpOperand *> uses;
+    for (mlir::OpOperand &use : operation.getResult().getUses()) uses.push_back(&use);
+    for (mlir::OpOperand *use : uses) {
+      rewriter.setInsertionPoint(use->getOwner());
+      auto cloned = riscv::LoadOp::create(rewriter, operation.getLoc(), operation.getResult().getType(),
+          staged.getResult(), mlir::Value(), load.getAccess(), load.getLeaf());
+      copySharedIdentity(load, cloned);
+      use->set(cloned.getResult());
+    }
+    mlir::Value oldInput = operation.getInput();
+    rewriter.eraseOp(operation);
+    while (auto convert = oldInput.getDefiningOp<riscv::ConvertLayoutOp>()) {
+      if (!convert.getResult().use_empty() || convert.getConversion().getEffect() != "pure") break;
+      oldInput = convert.getInput();
+      rewriter.eraseOp(convert);
+    }
+    if (load.getResult().use_empty()) rewriter.eraseOp(load);
+    return mlir::success();
+  }
+  rewriter.setInsertionPoint(operation);
+  mlir::Value input = operation.getInput();
+  if (input.getType() != operation.getResult().getType()) {
+    auto source = mlir::dyn_cast<riscv::ValueType>(input.getType());
+    auto target = mlir::dyn_cast<riscv::ValueType>(operation.getResult().getType());
+    if (!source || !target)
+      return operation.emitError("register materialization cannot convert a non-shaped representation");
+    auto conversion = riscv::ConvertLayoutOp::create(rewriter, operation.getLoc(), target, input,
+        riscv_internal::layoutConversion(rewriter, source.getLayout(), target.getLayout()),
+        riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
+    copySharedIdentity(operation, conversion);
+    input = conversion.getResult();
+  }
+  auto materialized = riscv::RegisterMaterializeOp::create(rewriter, operation.getLoc(),
+      operation.getResult().getType(), input, operation.getOwnerDomainId(), operation.getBirthId(),
+      operation.getLifetimeEndDomainId(), "share");
+  copySharedIdentity(operation, materialized);
+  rewriter.replaceOp(operation, materialized.getResult());
+  return mlir::success();
+}
+
 mlir::LogicalResult weft::planRISCVResidency(mlir::ModuleOp module) {
   mlir::Builder builder(module.getContext());
   bool invalid = false;
@@ -200,4 +309,238 @@ mlir::LogicalResult weft::planRISCVResidency(mlir::ModuleOp module) {
     }
   });
   return mlir::failure(invalid);
+}
+
+namespace {
+using namespace mlir;
+
+bool orderedLoop(Operation *operation) {
+  return isa<scf::ForOp>(operation);
+}
+
+struct ReadWork { uint64_t bytes = 0, transfers = 0; };
+using ReadKey = std::pair<SmallVector<unsigned>, std::string>;
+using ReadPolynomial = std::map<ReadKey, ReadWork>;
+struct SupplyEstimate {
+  ReadPolynomial work;
+  int64_t registerPeak;
+};
+
+// Only changed transfers are ranked. Other arithmetic is identical between the
+// candidates. Unknown trip counts stay independent symbols; no "inner loop is
+// large" assumption can amortize a preparation or justify an extra read.
+std::optional<ReadPolynomial> readWork(Block *scope, std::string &rejection) {
+  DenseMap<Operation *, unsigned> loopIds;
+  unsigned next = 0;
+  scope->walk([&](Operation *operation) { if (orderedLoop(operation)) loopIds[operation] = next++; });
+  ReadPolynomial result;
+  bool complete = true;
+  auto reject = [&](Operation *operation, StringRef reason) {
+    complete = false;
+    if (rejection.empty()) {
+      llvm::raw_string_ostream stream(rejection);
+      stream << operation->getName() << ": " << reason;
+    }
+  };
+  scope->walk([&](Operation *operation) {
+    if (isa<riscv::LoadOp>(operation) || riscv::isCoordinateIdentity(operation) ||
+        operation->hasTrait<OpTrait::IsTerminator>() || isMemoryEffectFree(operation)) return;
+    auto memory = dyn_cast<MemoryEffectOpInterface>(operation);
+    if (!memory) {
+      if (!operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>())
+        reject(operation, "payload effects are not described");
+      return;
+    }
+    SmallVector<MemoryEffects::EffectInstance> effects;
+    memory.getEffects(effects);
+    // Specialized panel/fragment/atomic reads must acquire their own cost
+    // relation. They cannot disappear from a generic-load comparison as zero.
+    if (llvm::any_of(effects, [](const auto &effect) { return isa<MemoryEffects::Read>(effect.getEffect()); }))
+      reject(operation, "read has no transfer cost relation");
+  });
+  scope->walk([&](riscv::LoadOp load) {
+    if (load.getResult().use_empty()) return;
+    auto type = dyn_cast<riscv::ValueType>(load.getResult().getType());
+    if (!type || !type.getElementType().isIntOrFloat() ||
+        type.getLayout().getValidity() != "full") {
+      reject(load, "read has no complete numeric active domain"); return;
+    }
+    auto elements = riscv_internal::staticProduct(type.getShape().asArrayRef());
+    auto carriers = riscv::rvvCarrierCount(type.getLayout());
+    auto frequency = analysis::executionMultiplicityInBlock(load, scope);
+    if (!elements || !carriers || !frequency || *elements < 0 || *carriers < 0) {
+      reject(load, "read has no bounded carrier or execution frequency"); return;
+    }
+    SmallVector<unsigned> key;
+    for (Operation *loop : frequency->dynamicLoops) key.push_back(loopIds.lookup(loop));
+    auto access = load.getAccess();
+    if (!access || access.getForm() == "unassigned") {
+      reject(load, "read has no selected memory form"); return;
+    }
+    // A strided/indexed issue cannot borrow the cost of a contiguous load.
+    // Compare each access class independently until a target model can price
+    // their relative costs; fewer bytes alone cannot justify a new gather.
+    auto &term = result[{key, access.getForm().str()}];
+    const unsigned width = (type.getElementType().getIntOrFloatBitWidth() + 7) / 8;
+    const uint64_t limit = std::numeric_limits<int64_t>::max();
+    if (uint64_t(*elements) > limit / width) {
+      reject(load, "read byte count exceeds the cost representation"); return;
+    }
+    uint64_t bytesPerRead = uint64_t(*elements) * width;
+    if ((bytesPerRead && frequency->fixed > (limit - term.bytes) / bytesPerRead) ||
+        (*carriers && frequency->fixed > (limit - term.transfers) / uint64_t(*carriers))) {
+      reject(load, "dynamic transfer coefficient exceeds the cost representation"); return;
+    }
+    term.bytes += bytesPerRead * frequency->fixed;
+    term.transfers += uint64_t(*carriers) * frequency->fixed;
+  });
+  return complete ? std::optional<ReadPolynomial>(result) : std::nullopt;
+}
+
+bool reducesTransfers(const ReadPolynomial &candidate, const ReadPolynomial &baseline) {
+  bool less = false;
+  for (const auto &[key, after] : candidate) {
+    auto found = baseline.find(key);
+    ReadWork before = found == baseline.end() ? ReadWork{} : found->second;
+    if (after.bytes > before.bytes || after.transfers > before.transfers) return false;
+    less |= after.bytes < before.bytes || after.transfers < before.transfers;
+  }
+  for (const auto &[key, before] : baseline)
+    if (!candidate.count(key)) less |= before.bytes != 0 || before.transfers != 0;
+  return less;
+}
+
+std::optional<SupplyEstimate> estimateSupply(riscv::MaterializeOp source, bool reload,
+                                            std::string &rejection, bool &invalid) {
+  auto kernel = source->getParentOfType<riscv::KernelOp>();
+  IRMapping mapping;
+  OwningOpRef<ModuleOp> trial(cast<ModuleOp>(kernel->getParentOfType<ModuleOp>()->clone(mapping)));
+  auto trialKernel = cast<riscv::KernelOp>(mapping.lookup(kernel.getOperation()));
+  auto selected = cast<riscv::MaterializeOp>(mapping.lookup(source.getOperation()));
+  Block *scope = selected->getBlock();
+  std::optional<int64_t> levelId;
+  if (auto level = dyn_cast<riscv::LoopOp>(scope->getParentOp()))
+    levelId = level.getDomain().getType().getDomainId();
+  if (reload) selected.setPlacementAttr(StringAttr::get(source.getContext(), "reload"));
+  ScopedDiagnosticHandler diagnostics(source.getContext(), [&](Diagnostic &diagnostic) {
+    llvm::raw_string_ostream stream(rejection);
+    diagnostic.print(stream);
+    return success();
+  });
+  // Shared births and their owning Levels must cross the same lowering
+  // boundary together. Verifying a half-expanded stage/Level pair is invalid.
+  PassManager prepare(source.getContext());
+  prepare.addPass(createPrepareRISCVCompositesPass());
+  if (failed(prepare.run(*trial))) { invalid = true; return {}; }
+  if (levelId) {
+    scope = nullptr;
+    unsigned matches = 0;
+    trialKernel.walk([&](scf::ForOp loop) {
+      auto level = loop->getAttrOfType<riscv::LevelAttr>("weft.riscv.level");
+      if (level && level.getDomainId() == *levelId) { scope = loop.getBody(); ++matches; }
+    });
+    if (matches != 1) {
+      rejection = "owning Level no longer has one physical body";
+      invalid = true;
+      return {};
+    }
+  }
+  // Analyze the resulting graph, including independent live values and the
+  // other consumers of the original read. Do not subtract an assumed buffer.
+  if (failed(verify(*trial))) { invalid = true; return {}; }
+  auto pressure = riscv_internal::physicalRegisterPressure(trialKernel);
+  auto work = readWork(scope, rejection);
+  if (!pressure || !work) {
+    if (!pressure) rejection = "unknown register residency";
+    return {};
+  }
+  return SupplyEstimate{*work, pressure->total()};
+}
+
+ArrayAttr workAttributes(Builder &b, const ReadPolynomial &work) {
+  SmallVector<Attribute> terms;
+  for (const auto &[key, term] : work) {
+    SmallVector<int64_t> symbols(key.first.begin(), key.first.end());
+    terms.push_back(b.getDictionaryAttr({
+        b.getNamedAttr("dynamic_loops", b.getDenseI64ArrayAttr(symbols)),
+        b.getNamedAttr("memory_form", b.getStringAttr(key.second)),
+        b.getNamedAttr("read_bytes", b.getI64IntegerAttr(term.bytes)),
+        b.getNamedAttr("transfers", b.getI64IntegerAttr(term.transfers))}));
+  }
+  return b.getArrayAttr(terms);
+}
+
+class SelectSharedSupply : public PassWrapper<SelectSharedSupply, OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SelectSharedSupply)
+  StringRef getArgument() const override { return "weft-riscv-select-shared-supply"; }
+  StringRef getDescription() const override {
+    return "Compare complete shared-read and projected-read graphs with frequency and residency";
+  }
+  void runOnOperation() override {
+    Builder b(&getContext());
+    bool invalid = false;
+    getOperation().walk([&](riscv::KernelOp kernel) {
+      if (kernel.getResourcesMaterialized()) return;
+      SmallVector<Attribute> decisions;
+      if (auto previous = kernel->getAttrOfType<ArrayAttr>("weft.riscv.residency_choices"))
+        llvm::append_range(decisions, previous);
+      kernel.walk([&](riscv::MaterializeOp materialize) {
+        if (invalid) return;
+        if (materialize.getPlacement() != "shared" || !isDenseLoadBacked(materialize)) return;
+        auto input = dyn_cast<riscv::ValueType>(materialize.getResult().getType());
+        auto load = riscv_internal::sourceLoad(materialize.getInput());
+        if (!input || input.getLayout().getCarrier() != "rvv" || !load ||
+            load->getBlock() != materialize->getBlock() || load.getSnapshotStorage() ||
+            materialize.getResult().use_empty()) return;
+        bool legal = llvm::all_of(materialize.getResult().getUsers(), [&](Operation *user) {
+          auto extract = dyn_cast<riscv::ExtractOp>(user);
+          auto output = extract ? dyn_cast<riscv::ValueType>(extract.getResult().getType()) : riscv::ValueType();
+          return extract && output && extract.getInput() == materialize.getResult() &&
+              !riscv::readCrossesWrite(load, extract) &&
+              llvm::all_of(output.getAxisIds().asArrayRef(), [&](int64_t axis) {
+                return llvm::is_contained(load.getRegion().getType().getAxisIds().asArrayRef(), axis);
+              });
+        });
+        if (!legal) return;
+        std::string beforeFailure, afterFailure;
+        auto before = estimateSupply(materialize, false, beforeFailure, invalid);
+        auto after = invalid ? std::optional<SupplyEstimate>() :
+            estimateSupply(materialize, true, afterFailure, invalid);
+        if (invalid) {
+          materialize.emitError("shared supply materialization violated its physical contract: ")
+              << (afterFailure.empty() ? beforeFailure : afterFailure);
+          return;
+        }
+        bool selected = before && after && after->registerPeak <= before->registerPeak &&
+            after->registerPeak <= kernel.getTarget().getVectorRegisters() &&
+            reducesTransfers(after->work, before->work);
+        NamedAttrList record;
+        record.set("birth", b.getI64IntegerAttr(materialize.getBirthId()));
+        record.set("selected", b.getStringAttr(selected ? "reload" : "register"));
+        record.set("cost_basis", b.getStringAttr("actual-full-domain-transfers-by-loop-identity"));
+        record.set("decision", b.getStringAttr(!before || !after ? "incomplete-domain-or-residency" :
+            selected ? "no-more-transfers-and-residency" : "retain-shared-value"));
+        if (!beforeFailure.empty()) record.set("register_unavailable", b.getStringAttr(beforeFailure));
+        if (!afterFailure.empty()) record.set("reload_unavailable", b.getStringAttr(afterFailure));
+        if (before) {
+          record.set("register_read_work", workAttributes(b, before->work));
+          record.set("register_peak", b.getI64IntegerAttr(before->registerPeak));
+        }
+        if (after) {
+          record.set("reload_read_work", workAttributes(b, after->work));
+          record.set("reload_peak", b.getI64IntegerAttr(after->registerPeak));
+        }
+        decisions.push_back(record.getDictionary(&getContext()));
+        if (selected) materialize.setPlacementAttr(b.getStringAttr("reload"));
+      });
+      if (!decisions.empty()) kernel->setAttr("weft.riscv.residency_choices", b.getArrayAttr(decisions));
+    });
+    if (invalid) signalPassFailure();
+  }
+};
+} // namespace
+
+std::unique_ptr<mlir::Pass> weft::createSelectRISCVSharedSupplyPass() {
+  return std::make_unique<SelectSharedSupply>();
 }

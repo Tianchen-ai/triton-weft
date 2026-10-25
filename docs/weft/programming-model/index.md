@@ -30,7 +30,7 @@ lane / register tuple / fragment / memory operation / intrinsic / local asm
 - load/gather/segment/unpack 指令；
 - primitive 内部的物理 partial；
 - invocation-local pack 的存在、方向与物理目标形状；
-- scalar/RVV/IME/transfer engine 的选择与交接；
+- 特定 RVV/IME/AMX 指令及其物理交接；contraction 的向量/矩阵路线可由 `engine` 约束；
 - 局部软件流水、spill、reload 和 rematerialization；
 - intrinsic 名称与 inline asm spelling。
 
@@ -115,7 +115,7 @@ RVV register group、IME fragment、AMX/SME tile 和 VLIW register file 都是�
 指令端：显式 operation 提供 typed numerical/effect contract
 ```
 
-target profile 根据 canonical operation、typed operands、axes、Encoding、use-def 与 target capabilities 提供合法 scalar/RVV/IME realization。两端之间的 engine、lane、register、fragment、local pack 和 local memory representation 由目标编译器决定。它们共同构成[非 SIMT 物理抽象机器](../compiler/physical-machine.md)；该机器是 lowering 的目标，不是新的源语言根类型。
+target profile 根据 canonical operation、typed operands、axes、Encoding、use-def 与 target capabilities 提供合法 realization。作者可在 contraction 上指定 `engine="vector"` 或 `engine="matrix"`；默认采用合法矩阵实现，否则采用向量实现，不进行跨路线成本竞选。目标编译器在该约束内选择指令、lane、register、fragment、local pack 和 local memory representation。它们共同构成[非 SIMT 物理抽象机器](../compiler/physical-machine.md)；该机器是 lowering 的目标，不是新的源语言根类型。
 
 源程序的组织骨架是：
 
@@ -147,7 +147,7 @@ target physical machine
     local schedule / spill / reload / rematerialize / intrinsic-asm
 ```
 
-core DSL 当前不定义 soft hint。若 build 要求必须使用 IME，使用 `require=uses_extension(IME)` 这类 physical-program predicate；它先过滤不满足要求的 physical structures，再验证 selected program，不满足即拒绝。requirement 不进入 canonical Value identity。source `auto` 仍是作者声明的有限程序参数域，不是 target hint。
+core DSL 当前不定义 soft hint。`engine` 是逐 contraction 的硬实现约束，保存在 Canonical operation 上，不改变数值 Value identity；显式矩阵要求没有合法实现时拒绝，不能静默换成向量。build 中的目标扩展要求进一步约束可用指令。source `auto` 是作者声明的有限程序参数域，不是 target hint。
 
 ## 6. 唯一职责判据
 

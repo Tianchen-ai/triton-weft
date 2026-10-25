@@ -171,7 +171,7 @@ private:
 
 enum class PassID {
   BindSource, Convert, PointerOffsets, EncodedValues, Reductions, GroupedArithmetic, NumericConversions, Atomics, Select, Layouts, LocalWindows, CanonicalizeLayouts, Memory,
-  PrepareComposites, DenseContractions, Composites, SelectPanelTransfers, PanelTransfers,
+  SharedSupply, PrepareComposites, DenseContractions, Composites, SelectPanelTransfers, PanelTransfers,
   DenseFragments, Values, LocalProjections, Programs, RecordLoops, NestedMemory, Bitplanes,
   Hoist, Schedule, Pipeline, SCCP, Control, Fragments, ShareWindows,
   PartialTopology, PartialAccumulators, Unroll, PartialExtractions,
@@ -205,6 +205,7 @@ constexpr Entry prefix[] = {
     {PassID::CanonicalizeLayouts, "representation"},
     {PassID::Memory, "representation"},
     {PassID::Select, "representation"},
+    {PassID::SharedSupply, "representation"},
     {PassID::PrepareComposites, "program-materialization"},
     {PassID::DenseContractions, "program-materialization"},
     {PassID::Composites, "program-materialization"},
@@ -325,6 +326,7 @@ std::unique_ptr<Pass> makePass(PassID id, const RISCVCompilerOptions &options,
   case PassID::LocalWindows: return createMaterializeRISCVLocalWindowsPass();
   case PassID::CanonicalizeLayouts: return createCanonicalizeRISCVLayoutsPass();
   case PassID::Memory: return createPlanRISCVMemoryPass();
+  case PassID::SharedSupply: return createSelectRISCVSharedSupplyPass();
   case PassID::PointerOffsets: return createSpecializeRISCVPointerOffsetsPass();
   case PassID::Composites: return createLowerRISCVCompositesPass(options.lmulEighths);
   case PassID::SelectPanelTransfers: return createSelectRISCVPanelTransfersPass();

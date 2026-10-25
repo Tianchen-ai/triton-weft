@@ -7,11 +7,17 @@ module 外的 assignment 表，也不构成新的 IR 层。
 整数范围、转换与乘积和溢出的证明由 `Weft/Analysis/IntegerFacts` 与 x86 共用。
 RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改变数值范围，
 窄化或潜在回绕不能继承未经证明的窄区间。查询只在单次有界遍历内保存 memo，
-不会跨 pass 保留随 SSA 改写失效的事实。未知 producer 和超出分析位宽的值不提供证明。
+不会跨 pass 保留随 SSA 改写失效的事实。边界使用任意精度整数，覆盖完整 signed/unsigned
+机器类型，包括 i64/u64；乘积、累加和 magnitude 查询先扩展分析位宽，避免分析自身回绕。
+普通 MLIR 操作复用 `InferIntRangeInterface` 的 signed/unsigned 与模运算合同，目标适配层
+只解释其局部操作。未知 producer 保留完整类型范围，不提供不存在的窄区间证明。
 
 `Analysis/PhysicalDependence` 与 x86 共用 SCF 的精确静态迭代数，包括空域、非单位步长和
 有符号/无符号比较。RISC-V 的循环不变量读取据此证明循环确实执行；未知边界不获得默认次数。
 驻留成本查询可以保留动态循环次数为符号因子，不给条件分支编造执行概率；这些查询在改写后重建。
+共享的 block-relative frequency 查询使用目标控制展开后的实际 SCF 边界；RISC-V Level 的
+同轴子域不会用名义 extent 代替父窗口的 active extent。未知计数按循环身份保留，不能把不同
+动态循环仅按嵌套深度合并。
 
 `Analysis/StorageBytes` 与 x86 共用 Encoding 字段到 bit span / byte fragment 的解释。
 RISC-V 的 `fieldFacts`、record-local bit projection 与 x86 的字段传输选择消费同一份
@@ -59,6 +65,7 @@ ConvertWeftToRISCV
 → CanonicalizeRISCVLayouts
 → PlanRISCVMemory
 → SelectRISCVOperations
+→ SelectRISCVSharedSupply
 → LowerRISCVComposites
 → RetainRISCVFragmentAccumulators
 → PropagateRISCVConsumerLayouts
@@ -608,6 +615,36 @@ slice、整除的 full lane/time 分片、同 element/axis/validity、无 replic
 PhysicalPoint 选择，time/local/fragment 均为 1，前后 element、domain 与 validity 相同，且
 每侧只有一个 lane 轴。仍要求 single-use、无 snapshot、同 block 无跨写入；后续 memory
 planner 根据新的 lane 轴选择 unit/strided 读取。该关系不依赖 consumer 是 RVV 还是 IME。
+
+### `SelectRISCVSharedSupply`
+
+在已有 layout 与 memory access 闭合之后、shared materialization 展开之前，对 dense
+数值 stage 比较保留完整寄存器值和按 consumer 的窗口重读。只穿过完整 domain 不变的
+representation alias；同形状的数值 projection 也不能被当作原 load 的坐标原点。
+所有用途必须有可实现的 Extract 读取，并证明原 load 到每个 consumer 没有别名写入；
+作者 snapshot、birth、owner、lifetime 和数值类型保持不变。
+
+每个候选复制当前 module，运行正式的 `PrepareRISCVComposites`，由同一
+`materializeRISCVSharedSupply` 生成 register 或 staged-view/read 图，并将 owning Level
+一同展开；不能验证只改写 stage 而保留旧 Level birth 计数的中间态。验证后重新计算整个
+kernel 的 SSA 寄存器峰值。
+未改变的独立活跃值、原 read 的其它用途都留在候选中，不用减去一个名义 buffer 的方式
+推定资源收益。早期必须 addressable 的表示仍由原合法性规划决定，这一 pass 不把其改回
+未实现的 register 路线。
+
+读取比较要求完整、静态窗口的字节数与实际 carrier transfer 数，unit、strided、indexed
+等访存类别分别比较，不用较少字节替代新增 gather 的成本；静态循环次数使用共享
+分析精确展开，动态次数保留独立符号。只有每个符号项的读取字节和 transfer 均不增加、
+至少一项下降，而且实际寄存器峰值不增加并可驻留，才选择重读。未知 active domain、
+条件执行或驻留信息不会获得虚构成本。该选择针对当前闭合的 dense-read 子图，不宣称
+覆盖 encoded packing、未知访问延迟或所有 layout 组合。后续 leaf/resource passes 仍
+负责最终临时寄存器、spill 与合法性收口。
+
+`weft.riscv.residency_choices` 保存候选的读取多项式、峰值与决定，供 IR 检查；它不是后续
+分析输入，所有分析在改写后重新建立。参考 Triton
+`ReorderInstructions.cpp:104-123` 将会增加寄存器压力的转换推近 consumer，以及
+`:164-170` 在移动读取前检查写入边界；这里增加了完整候选、复用频次与 SSA 驻留比较，
+不引入 GPU 的 shared-memory 或 thread ownership。
 
 ### `MaterializeRISCVLocalWindows`
 

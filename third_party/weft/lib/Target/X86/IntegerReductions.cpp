@@ -60,7 +60,7 @@ std::optional<weft::analysis::IntegerRange> numericRange(Value value, IntegerTyp
 uint64_t unsignedMaximum(Value value, unsigned width) {
   auto type = IntegerType::get(value.getContext(), width, IntegerType::Unsigned);
   auto range = numericRange(value, type);
-  return range ? static_cast<uint64_t>(range->maximum) : llvm::maskTrailingOnes<uint64_t>(width);
+  return range ? range->maximum.getZExtValue() : llvm::maskTrailingOnes<uint64_t>(width);
 }
 
 bool exactSaturatingPairs(Value lhs, Value rhs, IntegerType left, IntegerType right) {

@@ -89,9 +89,9 @@ core DSL 不提供只保持数值、shape、axes 与 Level 不变的 local-pack 
 
 ## 11. Source engine role 与 `stage_handoff`
 
-core DSL 不提供 `@wide`、`@matrix`、`@transfer` 或通用 `stage_handoff`。它们不改变 canonical operation/value/effect graph 或 Level 归属，只限制 target realization，因此属于 build config 和 physical machine。
+core DSL 不提供 `@wide`、`@matrix`、`@transfer` 作用域或通用 `stage_handoff`。逐 contraction 的 `engine="vector"|"matrix"` 是明确的实现约束；它不创建新的 Value、Level、workspace 或交接语义。默认矩阵优先仍受数值与目标合法性约束，显式要求不满足则拒绝。
 
-`scalar/wide/matrix/transfer` 仍是 target engine 类别。若 build 必须使用 IME，写 `require=uses_extension(IME)`，不满足则失败。若 IME 需要另一棵 materialization/Level tree，作者选择另一份 std 函数；跨 engine 的 register/fragment/local-storage 交接是 physical conversion。
+`scalar/wide/matrix/transfer` 是 target engine 类别。若 IME 需要另一棵 materialization/Level tree，作者选择另一份普通函数；跨 engine 的 register/fragment/local-storage 交接是 physical conversion。
 
 ## 12. Built-in whole-kernel matmul或quant op
 

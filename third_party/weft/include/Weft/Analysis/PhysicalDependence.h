@@ -41,5 +41,10 @@ struct ExecutionMultiplicity {
 // assigned fictitious probabilities. The query owns no persistent IR facts.
 std::optional<ExecutionMultiplicity> executionMultiplicity(
     mlir::Operation *operation, mlir::Operation *scope);
+// Frequency per execution of one enclosing block after target control lowering.
+// Unknown counts remain SSA symbols. Intervening non-SCF-loop regions make the
+// query unknown, rather than receiving a fictitious branch probability.
+std::optional<ExecutionMultiplicity> executionMultiplicityInBlock(
+    mlir::Operation *operation, mlir::Block *scope);
 } // namespace weft::analysis
 #endif

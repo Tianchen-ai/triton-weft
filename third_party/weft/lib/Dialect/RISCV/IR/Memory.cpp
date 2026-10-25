@@ -119,10 +119,6 @@ bool privateResource(SideEffects::Resource *resource) {
          resource == weft::kernel::LocalShapeResource::get();
 }
 
-bool coordinate(Operation *operation) {
-  return isa<RootPointOp, PhysicalPointOp, RecordCohortOp>(operation);
-}
-
 bool storageBarrier(Operation *operation) {
   return isa<LocalCapacityGuardOp, IndexMultipleGuardOp>(operation);
 }
@@ -146,7 +142,7 @@ bool originsMayAlias(const StorageOrigins &a, const StorageOrigins &b) {
 }
 
 bool writesOrigins(Operation *operation, const StorageOrigins &origins) {
-  if (coordinate(operation) || storageBarrier(operation)) return false;
+  if (isCoordinateIdentity(operation) || storageBarrier(operation)) return false;
   if (auto effects = dyn_cast<MemoryEffectOpInterface>(operation)) {
     SmallVector<MemoryEffects::EffectInstance> instances;
     effects.getEffects(instances);
@@ -171,7 +167,7 @@ bool writesOrigins(Operation *operation, const StorageOrigins &origins) {
 }
 
 bool onlyReads(Operation *operation, bool recursive) {
-  if (coordinate(operation)) return true;
+  if (isCoordinateIdentity(operation)) return true;
   if (storageBarrier(operation)) return false;
   if (operation->getNumRegions() && !recursive) return false;
   if (auto interface = dyn_cast<MemoryEffectOpInterface>(operation)) {
@@ -195,6 +191,10 @@ bool onlyReads(Operation *operation, bool recursive) {
 }
 
 } // namespace
+
+bool weft::riscv::isCoordinateIdentity(Operation *operation) {
+  return isa<RootPointOp, PhysicalPointOp, RecordCohortOp>(operation);
+}
 
 bool weft::riscv::isAddressableDenseDescriptor(Value source) {
   for (unsigned depth = 0; depth < 32; ++depth) {

@@ -2085,15 +2085,12 @@ riscv_internal::integerRange(mlir::Value value, unsigned depth) {
     auto source = stripRepresentationConversions(input);
     if (source != input) preserve(source);
     else if (auto constant = input.getDefiningOp<riscv::ConstantOp>()) {
-      auto integer = mlir::dyn_cast<mlir::IntegerAttr>(constant.getValue());
-      if (integer && analysis::integerTypeRange(type)) {
-        int64_t number = type.isSigned() ? integer.getValue().getSExtValue() : integer.getValue().getZExtValue();
-        result.kind = Kind::Known; result.known = IntegerRange{number, number};
-      }
+      result.kind = Kind::Known;
+      result.known = analysis::integerConstantRange(constant.getValue(), type);
     } else if (auto iota = input.getDefiningOp<riscv::IotaOp>()) {
-      if (iota.getEnd() > iota.getStart() && iota.getEnd() - 1 <= uint64_t(INT64_MAX)) {
+      if (iota.getEnd() > iota.getStart()) {
         result.kind = Kind::Known;
-        result.known = IntegerRange{static_cast<int64_t>(iota.getStart()), static_cast<int64_t>(iota.getEnd() - 1)};
+        result.known = IntegerRange{llvm::APSInt::getUnsigned(iota.getStart()), llvm::APSInt::getUnsigned(iota.getEnd() - 1)};
       }
     } else if (auto op = input.getDefiningOp<riscv::RVVAxisBroadcastOp>()) preserve(op.getInput());
     else if (auto op = input.getDefiningOp<riscv::WidenOp>()) preserve(op.getInput(), Kind::Cast);
@@ -2113,8 +2110,9 @@ riscv_internal::maximumMagnitude(mlir::Value value) {
   auto range = integerRange(value);
   if (!range)
     return std::nullopt;
-  return std::max(range->maximum,
-                  range->minimum < 0 ? -range->minimum : range->minimum);
+  auto magnitude = std::max(range->maximum,
+                            range->minimum < 0 ? -range->minimum : range->minimum);
+  return magnitude.tryExtValue();
 }
 
 riscv::FieldOp riscv_internal::sourceField(mlir::Value value) {

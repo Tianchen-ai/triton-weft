@@ -1,6 +1,7 @@
 #include "Weft/Target/RISCVPasses.h"
 
 #include "RISCVPhysicalSupport.h"
+#include "RISCVResidencyPlanning.h"
 #include "ContractionSupply.h"
 #include "DenseValuePrograms.h"
 #include "LocalMemory.h"
@@ -774,121 +775,7 @@ private:
         rewriter.replaceOp(operation, *binding);
         continue;
       }
-      if (operation.getPlacement() == "reload") {
-        if (auto load = sourceLoad(operation.getInput())) {
-          rewriter.setInsertionPoint(operation);
-          auto staged = riscv::StagedViewOp::create(rewriter,
-              operation.getLoc(), load.getRegion().getType(), load.getRegion(),
-              operation.getSchema(),
-              operation.getOwnerDomainId(), operation.getBirthId(),
-              operation.getLifetimeEndDomainId());
-          copyIdentity(operation, staged);
-          llvm::SmallVector<riscv::ExtractOp> extracts;
-          for (mlir::Operation *user : operation.getResult().getUsers())
-            if (auto extract = mlir::dyn_cast<riscv::ExtractOp>(user);
-                extract && extract.getInput() == operation.getResult())
-              extracts.push_back(extract);
-          for (riscv::ExtractOp extract : extracts) {
-            auto result = mlir::dyn_cast<riscv::ValueType>(
-                extract.getResult().getType());
-            auto source = load.getRegion().getType();
-            if (!result) {
-              extract.emitError(
-                  "reload projection requires one shaped physical result");
-              failed = true;
-              continue;
-            }
-            llvm::SmallVector<int64_t> strides;
-            llvm::SmallVector<int64_t> origins;
-            for (int64_t axis : result.getAxisIds().asArrayRef()) {
-              auto found = llvm::find(source.getAxisIds().asArrayRef(), axis);
-              if (found == source.getAxisIds().asArrayRef().end()) {
-                extract.emitError(
-                    "reload projection introduced an axis absent from its memory descriptor");
-                failed = true;
-                break;
-              }
-              size_t index = static_cast<size_t>(
-                  found - source.getAxisIds().asArrayRef().begin());
-              strides.push_back(source.getStrides()[index]);
-              origins.push_back(source.getOrigins()[index]);
-            }
-            if (failed)
-              continue;
-            auto descriptor = riscv::MemDescType::get(
-                rewriter.getContext(), source.getEncoding(), result.getShape(),
-                result.getAxisIds(), riscv_internal::integers(rewriter, strides),
-                riscv_internal::integers(rewriter, origins),
-                source.getAlignment(), "slice", source.getAccess(),
-                source.getAliasSet(), source.getLayoutIdentity(),
-                source.getStorageBits(), source.getElements(),
-                source.getInterleaveRows());
-            rewriter.setInsertionPoint(extract);
-            auto slice = riscv::SliceOp::create(rewriter,
-                extract.getLoc(), descriptor, staged.getResult(),
-                extract.getIndices(), extract.getSelectors());
-            copyIdentity(extract, slice);
-            llvm::StringRef form = extract.getAccess().getForm();
-            auto leaf = riscv_internal::leaf(
-                rewriter, "transfer", "load", ("rvv.load." + form).str(),
-                ("rvv.load." + form).str(), 0, 0);
-            auto projected = riscv::LoadOp::create(rewriter,
-                extract.getLoc(), result, slice.getResult(),
-                mlir::Value(), extract.getAccess(), leaf);
-            copyIdentity(extract, projected);
-            extract.getResult().replaceAllUsesWith(projected.getResult());
-            rewriter.eraseOp(extract);
-          }
-          if (failed)
-            continue;
-          llvm::SmallVector<mlir::OpOperand *> uses;
-          for (mlir::OpOperand &use : operation.getResult().getUses())
-            uses.push_back(&use);
-          for (mlir::OpOperand *use : uses) {
-            rewriter.setInsertionPoint(use->getOwner());
-            auto cloned = riscv::LoadOp::create(rewriter,
-                operation.getLoc(), operation.getResult().getType(),
-                staged.getResult(), mlir::Value(), load.getAccess(), load.getLeaf());
-            copyIdentity(load, cloned);
-            use->set(cloned.getResult());
-          }
-          rewriter.eraseOp(operation);
-          if (load.getResult().use_empty())
-            rewriter.eraseOp(load);
-          continue;
-        }
-        // A non-memory pure producer cannot be represented as a lazy view.
-        // Keep one explicit SSA value and let resource materialization decide
-        // whether that computed value must later spill.
-      }
-      rewriter.setInsertionPoint(operation);
-      mlir::Value input = operation.getInput();
-      if (input.getType() != operation.getResult().getType()) {
-        auto source = mlir::dyn_cast<riscv::ValueType>(input.getType());
-        auto target =
-            mlir::dyn_cast<riscv::ValueType>(operation.getResult().getType());
-        if (!source || !target) {
-          operation.emitError(
-              "register materialization cannot convert a non-shaped representation");
-          failed = true;
-          continue;
-        }
-        auto conversion = riscv::ConvertLayoutOp::create(rewriter,
-            operation.getLoc(), target, input,
-            riscv_internal::layoutConversion(rewriter, source.getLayout(),
-                                             target.getLayout()),
-            riscv::AccessAttr(),
-            riscv_internal::unselectedLeaf(rewriter));
-        copyIdentity(operation, conversion);
-        input = conversion.getResult();
-      }
-      auto materialized = riscv::RegisterMaterializeOp::create(rewriter,
-          operation.getLoc(), operation.getResult().getType(),
-          input, operation.getOwnerDomainId(),
-          operation.getBirthId(), operation.getLifetimeEndDomainId(), "share");
-      copyIdentity(operation, materialized);
-      operation.getResult().replaceAllUsesWith(materialized.getResult());
-      rewriter.eraseOp(operation);
+      failed |= mlir::failed(weft::materializeRISCVSharedSupply(operation, rewriter));
     }
   }
 

@@ -569,15 +569,10 @@ void selectReducedScalarScales(mlir::ModuleOp module) {
         source.getLayout().getFragmentFactors()[0] != 1 ||
         source.getLayout().getLocalFactors()[0] != 1 || !singleton || !scaleRange)
       continue;
-    const __int128 minimum = -(__int128{1} << 15) * *lanes;
-    const __int128 maximum = ((__int128{1} << 15) - 1) * *lanes;
-    const __int128 products[] = {
-        minimum * scaleRange->minimum, minimum * scaleRange->maximum,
-        maximum * scaleRange->minimum, maximum * scaleRange->maximum};
-    if (*std::min_element(std::begin(products), std::end(products)) <
-            -(__int128{1} << 31) ||
-        *std::max_element(std::begin(products), std::end(products)) >=
-            (__int128{1} << 31))
+    auto products = analysis::productSumRange(
+        {std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max()},
+        *scaleRange, *lanes);
+    if (!products || !products->fits(result))
       continue;
     // One reduced lane and one coefficient have no vector-chain reuse. The
     // checked i32 product can use the scalar ALU after the required extraction.

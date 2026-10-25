@@ -28,21 +28,27 @@ std::optional<uint64_t> weft::analysis::staticTripCount(Operation *operation) {
 
 std::optional<weft::analysis::ExecutionMultiplicity>
 weft::analysis::executionMultiplicity(Operation *operation, Operation *scope) {
-  ExecutionMultiplicity result;
-  if (operation == scope) return result;
+  if (operation == scope) return ExecutionMultiplicity{};
   if (!scope->isProperAncestor(operation)) return {};
-  for (Operation *parent = operation->getParentOp(); parent; parent = parent->getParentOp()) {
-    if (isa<scf::ForOp>(parent)) {
-      if (auto count = staticTripCount(parent)) {
-        if (!*count) { result.fixed = 0; result.dynamicLoops.clear(); return result; }
-        if (result.fixed > std::numeric_limits<uint64_t>::max() / *count) return {};
-        result.fixed *= *count;
-      } else result.dynamicLoops.push_back(parent);
-    } else return {};
-    if (parent == scope) {
+  return executionMultiplicityInBlock(operation, scope->getBlock());
+}
+
+std::optional<weft::analysis::ExecutionMultiplicity>
+weft::analysis::executionMultiplicityInBlock(Operation *operation, Block *scope) {
+  if (!scope || !scope->findAncestorOpInBlock(*operation)) return {};
+  ExecutionMultiplicity result;
+  for (Operation *current = operation; current; current = current->getParentOp()) {
+    if (current->getBlock() == scope) {
       std::reverse(result.dynamicLoops.begin(), result.dynamicLoops.end());
       return result;
     }
+    Operation *parent = current->getParentOp();
+    if (!parent || !isa<scf::ForOp>(parent)) return {};
+    if (auto count = staticTripCount(parent)) {
+      if (!*count) { result.fixed = 0; result.dynamicLoops.clear(); return result; }
+      if (result.fixed > std::numeric_limits<uint64_t>::max() / *count) return {};
+      result.fixed *= *count;
+    } else result.dynamicLoops.push_back(parent);
   }
   return {};
 }
