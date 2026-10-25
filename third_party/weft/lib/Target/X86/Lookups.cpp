@@ -240,13 +240,20 @@ Value weft::x86::registerLookup(ModuleOp module, OpBuilder &b, Location loc,
   // in each lane. PERMD instead addresses the entire 256/512-bit register.
   // Neither operation changes the bits of the selected finite-width value.
   unsigned carrierBits = bytes ? 8 : 32;
-  int64_t packet = bytes ? vectorBits / 8 : dwords;
   auto indexType = dyn_cast<VectorType>(indices.getType());
   bool scalarResult = !indexType;
   if (scalarResult)
     indices = vector::FromElementsOp::create(b, loc,
         VectorType::get({1}, indices.getType()), ValueRange{indices});
   int64_t count = cast<VectorType>(indices.getType()).getNumElements();
+  // A single narrower issue already covers this consumer and the complete
+  // table. Do not construct a 512-bit repeated table only to discard the upper
+  // half of the lookup result; native lowering can retain that unnecessary
+  // preparation even after narrowing the shuffle itself.
+  if (vectorBits == 512 && count <= 256 / carrierBits &&
+      (bytes || entries <= 8))
+    vectorBits = 256;
+  int64_t packet = vectorBits / carrierBits;
 
   if (element.isInteger(1)) {
     // Keep predicate lookup as integer arithmetic. An opaque byte-shuffle

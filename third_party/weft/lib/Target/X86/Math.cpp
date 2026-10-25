@@ -80,6 +80,16 @@ public:
     getOperation().walk([&](arith::ExtFOp op) { conversions.push_back(op); });
     IRRewriter b(&getContext());
     for (auto op : conversions) {
+      auto function = op->getParentOfType<func::FuncOp>();
+      auto cpu = function->getAttrOfType<StringAttr>("weft.x86.cpu");
+      weft::X86Target target;
+      std::string error;
+      if (!cpu || !weft::parseX86Target(cpu.str(), "sysv", 0, target, error)) continue;
+      if (op.getIn().getType().isF16() && op.getType().isF32() && target.hasFeature("avx512fp16")) {
+        b.setInsertionPoint(op);
+        b.replaceOp(op, weft::widenX86ScalarHalf(getOperation(), b, op.getLoc(), op.getIn(), target));
+        continue;
+      }
       auto input = dyn_cast<VectorType>(op.getIn().getType());
       if (!input || input.isScalable() || input.getRank() != 1 ||
           !input.getElementType().isF16() || input.getNumElements() != 2) continue;
@@ -95,11 +105,7 @@ public:
           !mask || mask.isSplat()) continue;
       Operation *a = singleReadOrigin(left.getSource()), *c = singleReadOrigin(right.getSource());
       if (!a || !c || a == c) continue;
-      auto function = op->getParentOfType<func::FuncOp>();
-      auto cpu = function->getAttrOfType<StringAttr>("weft.x86.cpu");
-      weft::X86Target target;
-      std::string error;
-      if (!cpu || !weft::parseX86Target(cpu.str(), "sysv", 0, target, error) || target.vectorBits != 512) continue;
+      if (target.vectorBits != 512) continue;
       b.setInsertionPoint(op);
       // Both constants occur in the mask, so both scalar conversions were
       // already demanded. Reads and explicit narrowing stay at their origins.
@@ -120,8 +126,9 @@ public:
         Value widened[2];
         for (auto [user, lane] : projections) {
           if (!widened[lane])
-            widened[lane] = arith::ExtFOp::create(
-                b, op.getLoc(), output.getElementType(), sources[lane]);
+            widened[lane] = output.getElementType().isF32()
+                ? weft::widenX86ScalarHalf(getOperation(), b, op.getLoc(), sources[lane], target)
+                : arith::ExtFOp::create(b, op.getLoc(), output.getElementType(), sources[lane]).getResult();
           b.replaceOp(user, widened[lane]);
         }
         b.eraseOp(op);
@@ -227,7 +234,30 @@ std::unique_ptr<Pass> weft::createX86HalfCarrierPass() { return std::make_unique
 
 Value weft::widenX86ScalarHalf(ModuleOp module, OpBuilder &b, Location loc,
                              Value input, const X86Target &target) {
-  if (target.hasFeature("avx512fp16")) return arith::ExtFOp::create(b, loc, b.getF32Type(), input);
+  if (target.hasFeature("avx512fp16")) {
+    auto fp = VectorType::get({4}, b.getF32Type());
+    auto hp = VectorType::get({8}, b.getF16Type());
+    Value zero = arith::ConstantOp::create(b, loc, fp, DenseElementsAttr::get(fp, b.getF32FloatAttr(0)));
+    Value source = arith::ConstantOp::create(b, loc, hp, DenseElementsAttr::get(hp, b.getFloatAttr(b.getF16Type(), 0)));
+    source = vector::InsertOp::create(b, loc, input, source, ArrayRef<int64_t>{0});
+    Value mask = arith::ConstantOp::create(b, loc, b.getI8Type(), b.getI8IntegerAttr(1));
+    Value rounding = arith::ConstantOp::create(b, loc, b.getI32Type(), b.getI32IntegerAttr(4));
+    StringRef name = "llvm.x86.avx512fp16.mask.vcvtsh2ss.round";
+    auto function = module.lookupSymbol<func::FuncOp>(name);
+    if (!function) {
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToEnd(module.getBody());
+      function = func::FuncOp::create(b, loc, name,
+          b.getFunctionType({fp, hp, fp, b.getI8Type(), b.getI32Type()}, {fp}));
+      function.setPrivate();
+    }
+    // Upper lanes are not part of the scalar value. Define their merge source
+    // independently so the saved half has one numeric use and a legal original
+    // load can fold into the scalar conversion's m16 operand.
+    Value result = func::CallOp::create(b, loc, function,
+        ValueRange{zero, source, zero, mask, rounding}).getResult(0);
+    return vector::ExtractOp::create(b, loc, result, ArrayRef<int64_t>{0});
+  }
   Value bits = arith::BitcastOp::create(b, loc, b.getI16Type(), input);
   Value carrier = vector::BroadcastOp::create(b, loc, VectorType::get({16}, b.getI16Type()), bits);
   auto fp = VectorType::get({16}, b.getF32Type());
