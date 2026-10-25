@@ -1567,13 +1567,16 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
     }
     if (isSameWidthIntegerCast(operation))
       return "rvv.reinterpret";
-    if (sourceInteger && targetInteger && (sourceInteger.isUnsigned() || sourceInteger.getWidth() == 1) &&
+    if (sourceInteger && targetInteger &&
+        (sourceInteger.isUnsigned() || sourceInteger.getWidth() == 1 ||
+         (sourceInteger.isSigned() && targetInteger.getWidth() == 8)) &&
         sourceInteger.getWidth() < targetInteger.getWidth() &&
         std::max<unsigned>(8, sourceInteger.getWidth()) ==
             std::max<unsigned>(8, targetInteger.getWidth())) {
-      // ui1 from an Encoding uses an unsigned byte carrier, whereas a
-      // signless Triton predicate uses a signed byte carrier. Logical width
-      // alone cannot decide whether the RVV C type actually changes.
+      // Finite signed values already have normalized sign-extended byte
+      // carriers, so widening si4 to si8 needs no machine extension. ui1 from
+      // an Encoding uses an unsigned carrier, while a Triton predicate uses a
+      // signed carrier. Changing signedness still requires reinterpretation.
       return sourceInteger.isUnsigned() == targetInteger.isUnsigned()
                  ? "rvv.identity" : "rvv.reinterpret";
     }

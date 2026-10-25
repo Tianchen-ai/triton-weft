@@ -404,6 +404,50 @@ class ValidityPropagation {
     b.replaceOp(op, reduced);
     return success();
   }
+  LogicalResult contract(Operation *op) {
+    Value left = op->getOperand(0), right = op->getOperand(1);
+    auto lhs = cast<riscv::ValueType>(left.getType());
+    auto rhs = cast<riscv::ValueType>(right.getType());
+    // Zero is absorbing for the declared integer product at every supported
+    // accumulator width. Keep the contraction (and its engine) intact; do not
+    // form a narrow input-width multiply followed by a separate reduction.
+    if (!isa<IntegerType>(lhs.getElementType()) || !isa<IntegerType>(rhs.getElementType()))
+      return op->emitError("masked floating contraction requires a neutral-product validity implementation");
+    SmallVector<int64_t> shape(lhs.getShape().asArrayRef()), axes(lhs.getAxisIds().asArrayRef());
+    for (auto [axis, extent] : llvm::zip(rhs.getAxisIds().asArrayRef(), rhs.getShape().asArrayRef()))
+      if (!llvm::is_contained(axes, axis)) { axes.push_back(axis); shape.push_back(extent); }
+    Location loc = op->getLoc();
+    auto domain = domainType(b, b.getI1Type(), shape, axes);
+    Value active = conjunction(knownOrFull(left, loc), knownOrFull(right, loc), domain, loc);
+    auto privateAxes = completeAxes(domain);
+    active = rename(active, domain, privateAxes, loc);
+    auto byte = IntegerType::get(b.getContext(), 8, IntegerType::Unsigned);
+    Value any = riscv::CastOp::create(b, loc, domainType(b, byte, shape, privateAxes), active, unselectedLeaf(b));
+    for (int64_t axis : op->getAttrOfType<DenseI64ArrayAttr>("over").asArrayRef()) {
+      auto position = llvm::find(axes, axis) - axes.begin();
+      shape.erase(shape.begin() + position);
+      axes.erase(axes.begin() + position);
+      privateAxes.erase(privateAxes.begin() + position);
+      Type result = shape.empty() ? Type(byte) : Type(domainType(b, byte, shape, privateAxes));
+      any = riscv::ReduceOp::create(b, loc, result, any, "max", position, unselectedLeaf(b), ValueRange{});
+    }
+    Value zero = riscv::ConstantOp::create(b, loc, byte, b.getIntegerAttr(byte, 0));
+    Type predicate = shape.empty() ? Type(b.getI1Type()) : Type(domainType(b, b.getI1Type(), shape, privateAxes));
+    active = riscv::CompareOp::create(b, loc, predicate, any, zero, "ne", unselectedLeaf(b));
+    if (auto output = dyn_cast<riscv::ValueType>(op->getResult(0).getType()))
+      active = restore(active, cast<riscv::ValueType>(predicateType(b, output)), loc);
+    for (unsigned index = 0; index < 2; ++index) {
+      Value input = op->getOperand(index);
+      if (Value mask = masks.lookup(input)) {
+        auto type = cast<riscv::ValueType>(input.getType());
+        Value identity = riscv::ConstantOp::create(b, loc, type.getElementType(),
+            b.getIntegerAttr(type.getElementType(), 0));
+        op->setOperand(index, choose(mask, input, identity, type, loc));
+      }
+    }
+    masks[op->getResult(0)] = active;
+    return success();
+  }
   LogicalResult store(riscv::StoreOp op) {
     auto valueType = dyn_cast<riscv::ValueType>(op.getValue().getType());
     Value active = combined(op, op.getValue().getType());
@@ -635,6 +679,8 @@ public:
         }
       } else if (auto reduction = dyn_cast<riscv::ReduceOp>(op)) {
         if (failed(reduce(reduction))) return failure();
+      } else if (isa<riscv::ContractOp, riscv::DotOp, riscv::OuterContractOp>(op)) {
+        if (failed(contract(op))) return failure();
       } else if (auto extract = dyn_cast<riscv::ExtractOp>(op)) {
         Value source = masks.lookup(extract.getInput());
         if (!source) return extract.emitError("numeric validity through an indexed operand requires a complete projection");
