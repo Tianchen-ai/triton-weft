@@ -4,6 +4,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
+#include <optional>
 
 namespace weft::analysis {
 // A flat read epoch permits reordering ordinary reads, not writes, allocation,
@@ -27,5 +28,18 @@ struct DependencyCost {
 // between different carries. The target owns instruction latency estimates.
 DependencyCost dependencyCost(mlir::Block &block, mlir::ValueRange carries,
                               llvm::function_ref<double(mlir::Operation *)> latency);
+
+// Exact cardinality when SCF bounds are constant, including empty loops and
+// signed/unsigned comparison. Unknown bounds never receive a guessed count.
+std::optional<uint64_t> staticTripCount(mlir::Operation *operation);
+struct ExecutionMultiplicity {
+  uint64_t fixed = 1;
+  llvm::SmallVector<mlir::Operation *> dynamicLoops;
+};
+// Frequency relative to one execution of the block containing scope. Unknown
+// loop counts remain independent symbols; conditional/opaque regions are not
+// assigned fictitious probabilities. The query owns no persistent IR facts.
+std::optional<ExecutionMultiplicity> executionMultiplicity(
+    mlir::Operation *operation, mlir::Operation *scope);
 } // namespace weft::analysis
 #endif

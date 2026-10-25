@@ -141,7 +141,7 @@ std::optional<double> outerWork(scf::ForOp outer, scf::ForOp reduction,
   return result;
 }
 double iterationCost(const weft::x86::LoopResources &resources) {
-  return std::max(resources.issueUnits, resources.carriedPath) + 3;
+  return weft::x86::loopExecutionCost(resources).period;
 }
 
 class ScheduleContractions : public PassWrapper<ScheduleContractions, OperationPass<ModuleOp>> {
@@ -193,7 +193,7 @@ public:
       double scalarCost = iterationCost(original);
       auto outer = dyn_cast<scf::ForOp>(source->getParentOp());
       auto sourceOuterCost = outerWork(outer, source, model);
-      double originalCost = known ? scalarCost * count.getLimitedValue() : scalarCost;
+      double originalCost = known ? weft::x86::loopExecutionCost(original).total(count.getLimitedValue()) : scalarCost;
       double bestCost = originalCost;
       scf::ForOp chosen;
       scf::ForOp chosenOuter;
@@ -220,7 +220,7 @@ public:
           if (!preparation) { b.eraseOp(candidate->outer); continue; }
           double cost = iterationCost(resources) / lanes;
           if (known) {
-            double packetCost = count.getLimitedValue() * iterationCost(resources) + *preparation;
+            double packetCost = weft::x86::loopExecutionCost(resources).total(count.getLimitedValue()) + *preparation;
             if (knownOutputs)
               cost = ((outputs.getLimitedValue() / lanes) * packetCost +
                   (outputs.getLimitedValue() % lanes) * (originalCost + *sourceOuterCost)) /
@@ -250,8 +250,8 @@ public:
         double finish = llvm::Log2_64(lanes) * source.getNumResults() *
             (isa<FloatType>(source.getResult(0).getType()) ? 3.0 : 1.0);
         double cost = iterationCost(resources) / lanes;
-        if (known) cost = double(count.getLimitedValue() / lanes) * iterationCost(resources) +
-            (count.getLimitedValue() % lanes) * scalarCost + finish;
+        if (known) cost = weft::x86::loopExecutionCost(resources).total(count.getLimitedValue() / lanes) +
+            weft::x86::loopExecutionCost(original).total(count.getLimitedValue() % lanes) + finish;
         records.push_back(b.getDictionaryAttr({
           b.getNamedAttr("packet_axis", b.getStringAttr("reduction")),
           b.getNamedAttr("lanes", b.getI64IntegerAttr(lanes)),

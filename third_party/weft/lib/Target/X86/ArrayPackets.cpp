@@ -71,48 +71,31 @@ public:
       if (!supported) continue;
       loop->setAttr("weft.x86.array_pointwise", b.getUnitAttr());
       auto model = weft::x86::ResourceModel::get(loop);
-      struct Candidate { int64_t lanes; double work; unsigned record; };
-      SmallVector<Candidate> candidates;
       SmallVector<Attribute> candidateRecords;
       APInt count;
       bool knownCount = matchPattern(loop.getUpperBound(), m_ConstantInt(&count)) && !count.isNegative();
-      auto scalarWork = weft::x86::analyzeLoop(loop, model).work;
+      auto original = weft::x86::analyzeLoop(loop, model);
+      auto scalarCost = weft::x86::loopExecutionCost(original);
+      // Cost selection uses completed physical bodies. A scalar-body estimate
+      // cannot predict which accesses become loads, gathers or broadcasts, nor
+      // the conversion scratch and constant packets those choices introduce.
+      double bestCost = knownCount ? scalarCost.total(count.getLimitedValue()) : scalarCost.period;
       unsigned rejected = 0;
+      scf::ForOp chosen;
+      weft::x86::LoopResources chosenResources;
+      int64_t chosenLanes = 1;
+      unsigned chosenRecord = 0;
       for (int64_t lanes = bits.getInt() / llvm::PowerOf2Ceil(elementBits); lanes >= 2; lanes /= 2) {
-        auto estimate = weft::x86::analyzeLoop(loop, model, lanes);
-        double work = double(estimate.work + 2) / lanes;
-        if (knownCount) {
-          uint64_t size = count.getLimitedValue();
-          work = double(size / lanes) * (estimate.work + 2) + double(size % lanes) * (scalarWork + 2);
-        }
-        unsigned record = candidateRecords.size();
-        candidateRecords.push_back(b.getDictionaryAttr({
-          b.getNamedAttr("lanes", b.getI64IntegerAttr(lanes)),
-          b.getNamedAttr("estimated_cost", b.getF64FloatAttr(work)),
-          b.getNamedAttr("resources", weft::x86::resourceAttributes(b, estimate)),
-          b.getNamedAttr("decision", b.getStringAttr(model.fits(estimate.peak) ? "legal-estimate" : "estimated-resource-limit"))}));
-        if (!model.fits(estimate.peak)) { ++rejected; continue; }
-        candidates.push_back({lanes, work, record});
-      }
-      llvm::sort(candidates, [](const auto &a, const auto &c) {
-        return a.work < c.work || (a.work == c.work && a.lanes > c.lanes);
-      });
-      unsigned candidateCount = candidates.size() + rejected;
-      Value originalStart = loop.getLowerBound();
-      bool committed = false;
-      for (auto candidate : candidates) {
-        int64_t lanes = candidate.lanes;
         Location loc = loop.getLoc();
         b.setInsertionPoint(loop);
         Value width = arith::ConstantIndexOp::create(b, loc, lanes);
-        Value remainder = arith::RemUIOp::create(b, loc, loop.getUpperBound(), width);
-        Value end = arith::SubIOp::create(b, loc, loop.getUpperBound(), remainder);
+        Value remainder = b.createOrFold<arith::RemUIOp>(loc, loop.getUpperBound(), width);
+        Value end = b.createOrFold<arith::SubIOp>(loc, loop.getUpperBound(), remainder);
         auto packet = scf::ForOp::create(b, loc, loop.getLowerBound(), end, width);
         packet->setAttr("weft.x86.array_pointwise", b.getUnitAttr());
         if (auto scope = loop->getAttr("weft.x86.array_scope"))
           packet->setAttr("weft.x86.array_scope", scope);
         packet->setAttr("weft.x86.packet_lanes", b.getI64IntegerAttr(lanes));
-        loop.setLowerBound(end);
         b.setInsertionPointToStart(packet.getBody());
         IRMapping mapping;
         auto vectorType = [&](Type type) { return VectorType::get({lanes}, type); };
@@ -159,35 +142,71 @@ public:
             mapping.map(op->getResults(), copy->getResults());
           }
         }
-        auto actual = weft::x86::analyzeLoop(packet, model);
-        NamedAttrList checked(cast<DictionaryAttr>(candidateRecords[candidate.record]));
-        checked.set("physical_resources", weft::x86::resourceAttributes(b, actual));
-        checked.set("decision", b.getStringAttr(model.fits(actual.peak) ? "selected" : "physical-resource-limit"));
-        candidateRecords[candidate.record] = checked.getDictionary(&getContext());
-        if (!model.fits(actual.peak)) {
-          loop.setLowerBound(originalStart); b.eraseOp(packet); ++rejected; continue;
+        for (Operation *op = packet.getBody()->getTerminator()->getPrevNode(); op;) {
+          Operation *previous = op->getPrevNode();
+          if (isOpTriviallyDead(op)) b.eraseOp(op);
+          op = previous;
         }
-        NamedAttrList entry(weft::x86::resourceAttributes(b, actual));
+        auto actual = weft::x86::analyzeLoop(packet, model);
+        auto execution = weft::x86::loopExecutionCost(actual);
+        double setup = 0;
+        // The packet endpoint is invariant over this traversal. Static endpoint
+        // arithmetic folds above; dynamic quotient/remainder preparation is
+        // charged once, not once per element.
+        for (Value value : {remainder, end})
+          if (Operation *op = value.getDefiningOp(); op && !isa<arith::ConstantOp>(op)) {
+            auto price = weft::x86::instructionCost(op, model);
+            if (price) setup += price->issues;
+            else ++actual.unpricedOperations;
+          }
+        double work = execution.period / lanes;
+        if (knownCount) {
+          uint64_t size = count.getLimitedValue();
+          work = setup + execution.total(size / lanes) + scalarCost.total(size % lanes);
+        }
+        bool complete = !actual.unpricedOperations && !original.unpricedOperations;
+        bool fits = model.fits(actual.peak);
+        unsigned record = candidateRecords.size();
+        candidateRecords.push_back(b.getDictionaryAttr({
+          b.getNamedAttr("lanes", b.getI64IntegerAttr(lanes)),
+          b.getNamedAttr("estimated_cost", b.getF64FloatAttr(work)),
+          b.getNamedAttr("setup_cost", b.getF64FloatAttr(setup)),
+          b.getNamedAttr("startup_cost", b.getF64FloatAttr(execution.startup)),
+          b.getNamedAttr("resources", weft::x86::resourceAttributes(b, actual)),
+          b.getNamedAttr("decision", b.getStringAttr(!complete ? "unpriced-operation" :
+              !fits ? "physical-resource-limit" : "legal"))}));
+        if (!fits) ++rejected;
+        if (complete && fits && work < bestCost) {
+          if (chosen) b.eraseOp(chosen);
+          chosen = packet; chosenResources = actual;
+          chosenLanes = lanes; chosenRecord = record; bestCost = work;
+        } else b.eraseOp(packet);
+      }
+      if (chosen) {
+        loop.setLowerBound(chosen.getUpperBound());
+        NamedAttrList checked(cast<DictionaryAttr>(candidateRecords[chosenRecord]));
+        checked.set("decision", b.getStringAttr("selected"));
+        candidateRecords[chosenRecord] = checked.getDictionary(&getContext());
+        NamedAttrList entry(weft::x86::resourceAttributes(b, chosenResources));
         entry.set("kind", b.getStringAttr("pointwise"));
-        entry.set("lanes", b.getI64IntegerAttr(lanes));
+        entry.set("lanes", b.getI64IntegerAttr(chosenLanes));
         entry.set("element_bits", b.getI64IntegerAttr(elementBits));
         entry.set("vector_register_capacity", registers);
         entry.set("predicate_register_capacity", b.getI64IntegerAttr(model.predicateRegisters));
         entry.set("rejected_resource_candidates", b.getI64IntegerAttr(rejected));
-        entry.set("candidate_count", b.getI64IntegerAttr(candidateCount));
-        entry.set("cost_basis", b.getStringAttr(knownCount ? "static-domain-work" : "steady-state-work-per-element"));
+        entry.set("candidate_count", b.getI64IntegerAttr(candidateRecords.size()));
+        entry.set("cost_basis", b.getStringAttr(knownCount ? "complete-physical-domain-with-tail-and-startup" : "physical-steady-state-per-element; startup-recorded-separately"));
         entry.set("candidates", b.getArrayAttr(candidateRecords));
-        entry.set("estimated_selected_cost", b.getF64FloatAttr(candidate.work));
+        entry.set("estimated_selected_cost", b.getF64FloatAttr(bestCost));
         unsigned schedule = recordSchedule(function, b, entry.getDictionary(&getContext()));
-        for (auto part : {loop, packet}) part->setAttr("weft.x86.array_schedule_id", b.getI32IntegerAttr(schedule));
-        committed = true;
-        break;
-      }
-      if (!committed) {
-        NamedAttrList entry(weft::x86::resourceAttributes(b, weft::x86::analyzeLoop(loop, model)));
+        for (auto part : {loop, chosen}) part->setAttr("weft.x86.array_schedule_id", b.getI32IntegerAttr(schedule));
+      } else {
+        NamedAttrList entry(weft::x86::resourceAttributes(b, original));
         entry.set("kind", b.getStringAttr("scalar-pointwise"));
         entry.set("lanes", b.getI64IntegerAttr(1));
-        entry.set("candidate_count", b.getI64IntegerAttr(candidateCount));
+        entry.set("candidate_count", b.getI64IntegerAttr(candidateRecords.size()));
+        entry.set("estimated_selected_cost", b.getF64FloatAttr(bestCost));
+        entry.set("cost_complete", b.getBoolAttr(!original.unpricedOperations));
         entry.set("rejected_resource_candidates", b.getI64IntegerAttr(rejected));
         entry.set("candidates", b.getArrayAttr(candidateRecords));
         unsigned schedule = recordSchedule(function, b, entry.getDictionary(&getContext()));

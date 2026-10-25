@@ -1,6 +1,7 @@
 #include "Weft/Target/RISCVPasses.h"
 
 #include "RISCVPhysicalSupport.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
 
@@ -33,17 +34,8 @@ bool dependsOnDeferredField(mlir::Value value,
 }
 
 bool hasAtLeastIterations(mlir::LoopLikeOpInterface loop, int64_t count) {
-  auto forLoop = mlir::dyn_cast<mlir::scf::ForOp>(loop.getOperation());
-  if (!forLoop)
-    return false;
-  auto lower =
-      forLoop.getLowerBound().getDefiningOp<mlir::arith::ConstantIndexOp>();
-  auto upper =
-      forLoop.getUpperBound().getDefiningOp<mlir::arith::ConstantIndexOp>();
-  auto step = forLoop.getStep().getDefiningOp<mlir::arith::ConstantIndexOp>();
-  if (!lower || !upper || !step || step.value() <= 0 ||
-      lower.value() < 0 || upper.value() <= lower.value()) return false;
-  return (upper.value() - lower.value() - 1) / step.value() + 1 >= count;
+  auto iterations = weft::analysis::staticTripCount(loop.getOperation());
+  return iterations && *iterations >= uint64_t(count);
 }
 
 void materializeDeferredScalarFieldsBeforeReadLoops(

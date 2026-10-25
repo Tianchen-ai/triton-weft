@@ -11,6 +11,7 @@
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallBitVector.h"
+#include <cmath>
 
 using namespace mlir;
 namespace {
@@ -309,6 +310,65 @@ std::optional<uint64_t> packingPeak(Packing &candidate, Operation *before,
   return peak;
 }
 
+weft::x86::RegisterUsage relocatedRegisters(Packing &packing, scf::ForOp destination,
+    ArrayRef<Operation *> producers, const weft::x86::ResourceModel &model) {
+  // Analyze the proposed SSA placement, including non-packing consumers of its
+  // producers. An isolated initializer estimate misses values now live across
+  // the consumer loop. The detached copy is physical IR, never a second plan.
+  auto function = packing.allocation->getParentOfType<func::FuncOp>();
+  IRMapping mapping;
+  OwningOpRef<func::FuncOp> copy = cast<func::FuncOp>(function->clone(mapping));
+  Operation *before = mapping.lookup(destination.getOperation());
+  for (Operation *producer : producers) mapping.lookup(producer)->moveBefore(before);
+  mapping.lookup(packing.allocation.getOperation())->moveBefore(before);
+  for (Operation *alias : packing.initializerAliases) mapping.lookup(alias)->moveBefore(before);
+  for (auto store : packing.stores) mapping.lookup(store.getOperation())->moveBefore(before);
+  return weft::x86::functionRegisterPeak(*copy, model);
+}
+
+// Candidate scopes lie on one ancestor-loop chain. Invariant integer producers
+// may start at different depths, so price each at its actual original frequency.
+// Unknown loop counts remain symbolic: compare the leading steady-state term,
+// retaining the constant startup term instead of inventing a runtime extent.
+std::optional<SmallVector<double>> preparationSavings(Packing &packing,
+    scf::ForOp destination, scf::ForOp scope, ArrayRef<Operation *> producers,
+    const weft::x86::ResourceModel &model, double spillIssues) {
+  auto after = weft::analysis::executionMultiplicity(destination, scope);
+  if (!after) return {};
+  SmallVector<Operation *> operations(producers);
+  for (auto store : packing.stores) operations.push_back(store);
+  SmallVector<double> savings;
+  auto add = [&](const weft::analysis::ExecutionMultiplicity &weight, double cost) {
+    if (!weight.fixed) return;
+    size_t degree = weight.dynamicLoops.size();
+    if (savings.size() <= degree) savings.resize(degree + 1, 0);
+    savings[degree] += double(weight.fixed) * cost;
+  };
+  for (Operation *op : operations) {
+    auto price = weft::x86::instructionCost(op, model);
+    auto before = weft::analysis::executionMultiplicity(op, scope);
+    if (!price || !before) return {};
+    add(*before, price->issues); add(*after, -price->issues);
+  }
+  // LLVM may repair extra SIMD/predicate pressure. Charge an incremental native
+  // spill/reload round trip per original preparation, rather than rejecting all
+  // useful motion of a program whose wide SSA values already require allocation.
+  auto preparation = weft::analysis::executionMultiplicity(packing.allocation, scope);
+  if (!preparation) return {};
+  add(*preparation, -spillIssues);
+  if (!llvm::all_of(savings, [](double value) { return std::isfinite(value); })) return {};
+  return savings;
+}
+
+int compareSavings(ArrayRef<double> left, ArrayRef<double> right) {
+  for (size_t degree = std::max(left.size(), right.size()); degree > 0; --degree) {
+    double a = degree <= left.size() ? left[degree - 1] : 0;
+    double b = degree <= right.size() ? right[degree - 1] : 0;
+    if (a != b) return a > b ? 1 : -1;
+  }
+  return 0;
+}
+
 // Packing a saved SSA snapshot is independent of a traversal that reuses that
 // snapshot. Move the private materialization as a unit, including its exact
 // integer/permutation producers, without moving or repeating the source read.
@@ -350,6 +410,9 @@ public:
   StringRef getArgument() const override { return "weft-x86-reuse-amx-packing"; }
   StringRef getDescription() const override { return "Reuse private tile packing within the original saved snapshot lifetime"; }
   void runOnOperation() override {
+    auto previous = getOperation()->getAttrOfType<IntegerAttr>("weft.x86.packing_passes");
+    int64_t invocation = previous ? previous.getInt() + 1 : 1;
+    getOperation()->setAttr("weft.x86.packing_passes", IntegerAttr::get(IntegerType::get(&getContext(),64),invocation));
     SmallVector<memref::AllocOp> allocations;
     llvm::SmallPtrSet<Operation *, 16> seenAllocations;
     getOperation().walk([&](vector::StoreOp store) {
@@ -364,14 +427,20 @@ public:
       auto packing = closedPacking(alloc);
       if (!packing) continue;
       auto &stores = packing->stores;
-      for (auto store : stores) store->removeAttr("weft.x86.amx_pack_resource_rejections");
+      for (auto store : stores)
+        for (StringRef name : {"weft.x86.amx_pack_resource_rejections", "weft.x86.amx_pack_candidates",
+                               "weft.x86.amx_pack_residency"}) store->removeAttr(name);
       alloc->setAttr("weft.x86.amx_pack_closed", UnitAttr::get(&getContext()));
-      scf::ForOp destination;
-      SmallVector<Operation *> producers;
-      uint64_t peakBytes = 0;
-      unsigned chosenDepth = 0, consideredDepth = 0, resourceRejected = 0;
+      struct Candidate {
+        scf::ForOp loop;
+        SmallVector<Operation *> producers;
+        uint64_t peakBytes;
+        unsigned depth;
+      };
+      SmallVector<Candidate> candidates;
+      unsigned consideredDepth = 0, resourceRejected = 0;
       for (auto loop = alloc->getParentOfType<scf::ForOp>(); loop; loop = loop->getParentOfType<scf::ForOp>()) {
-        ++consideredDepth;
+        if (++consideredDepth > 16) break;
         SmallVector<Value> roots(alloc.getDynamicSizes());
         for (auto store : stores) {
           roots.push_back(store.getValueToStore());
@@ -386,20 +455,88 @@ public:
           ++resourceRejected;
           break;
         }
-        destination = loop;
-        producers = std::move(*ordered);
-        peakBytes = *peak;
-        chosenDepth = consideredDepth;
+        // A conditional region has no assumed execution probability. Keep the
+        // packing in that region while still considering loops nested within it.
+        if (!weft::analysis::executionMultiplicity(alloc, loop)) break;
+        candidates.push_back({loop, std::move(*ordered), *peak, consideredDepth});
       }
       OpBuilder builder(&getContext());
-      if (!destination) {
+      if (candidates.empty()) {
         if (resourceRejected)
           stores.front()->setAttr("weft.x86.amx_pack_resource_rejections", builder.getI64IntegerAttr(resourceRejected));
         continue;
       }
+      auto model = weft::x86::ResourceModel::get(alloc);
+      auto originalRegisters = weft::x86::functionRegisterPeak(alloc->getParentOfType<func::FuncOp>(), model);
+      auto originalPeak = packingPeak(*packing, alloc);
+      if (!originalPeak) continue;
+      Candidate *chosen = nullptr;
+      auto chosenRegisters = originalRegisters;
+      uint64_t peakBytes = *originalPeak;
+      SmallVector<double> chosenSavings;
+      SmallVector<Attribute> records;
+      unsigned selectedRecord = 0;
+      for (auto &candidate : candidates) {
+        auto registers = relocatedRegisters(*packing, candidate.loop, candidate.producers, model);
+        auto incremental = [](uint64_t candidate, uint64_t original, uint64_t budget) {
+          uint64_t existing = std::max(original, budget);
+          return candidate > existing ? candidate - existing : uint64_t(0);
+        };
+        uint64_t vectorSpills = incremental(registers.vectors, originalRegisters.vectors, model.vectorRegisters);
+        uint64_t predicateSpills = incremental(registers.predicates, originalRegisters.predicates, model.predicateRegisters);
+        uint64_t spillBytes = vectorSpills * (model.vectorBits / 8) + predicateSpills * 8;
+        double spillIssues = 2.0 * (vectorSpills + predicateSpills);
+        auto saving = preparationSavings(*packing, candidate.loop, candidates.back().loop, candidate.producers, model, spillIssues);
+        bool fits = spillBytes <= weft::x86::privateStorageBudget - candidate.peakBytes;
+        if (!fits) ++resourceRejected;
+        SmallVector<Attribute> coefficients;
+        if (saving) for (double value : *saving) coefficients.push_back(builder.getF64FloatAttr(value));
+        records.push_back(builder.getDictionaryAttr({
+            builder.getNamedAttr("loops_crossed", builder.getI64IntegerAttr(candidate.depth)),
+            builder.getNamedAttr("saved_issue_coefficients", builder.getArrayAttr(coefficients)),
+            builder.getNamedAttr("packed_operand_peak_bytes", builder.getI64IntegerAttr(candidate.peakBytes)),
+            builder.getNamedAttr("vector_peak", builder.getI64IntegerAttr(registers.vectors)),
+            builder.getNamedAttr("predicate_peak", builder.getI64IntegerAttr(registers.predicates)),
+            builder.getNamedAttr("incremental_spill_bytes", builder.getI64IntegerAttr(spillBytes)),
+            builder.getNamedAttr("spill_reload_issue_units", builder.getF64FloatAttr(spillIssues)),
+            builder.getNamedAttr("decision", builder.getStringAttr(!saving ? "unpriced-execution-scope" : !fits ? "resource-limit" : "legal"))}));
+        if (!saving || !fits) continue;
+        int comparison = compareSavings(*saving, chosenSavings);
+        bool smaller = registers.vectors <= chosenRegisters.vectors && registers.predicates <= chosenRegisters.predicates &&
+            candidate.peakBytes <= peakBytes && (registers.vectors < chosenRegisters.vectors ||
+            registers.predicates < chosenRegisters.predicates || candidate.peakBytes < peakBytes);
+        if (comparison > 0 || (comparison == 0 && smaller)) {
+          chosen = &candidate; chosenSavings = *saving; chosenRegisters = registers;
+          peakBytes = candidate.peakBytes; selectedRecord = records.size() - 1;
+        }
+      }
+      if (chosen) {
+        NamedAttrList selected(cast<DictionaryAttr>(records[selectedRecord]));
+        selected.set("decision", builder.getStringAttr("selected"));
+        records[selectedRecord] = selected.getDictionary(&getContext());
+      }
+      stores.front()->setAttr("weft.x86.amx_pack_candidates", builder.getArrayAttr(records));
+      if (resourceRejected) stores.front()->setAttr("weft.x86.amx_pack_resource_rejections", builder.getI64IntegerAttr(resourceRejected));
+      // Later transfer forwarding can eliminate the initializer itself. Keep
+      // this pass-boundary decision alongside the other function schedules;
+      // it is not evidence that a removed packing still executes at runtime.
+      auto function = alloc->getParentOfType<func::FuncOp>();
+      SmallVector<Attribute> schedules;
+      if (auto prior = function->getAttrOfType<ArrayAttr>("weft.x86.packing_schedule")) llvm::append_range(schedules, prior);
+      schedules.push_back(builder.getDictionaryAttr({
+          builder.getNamedAttr("phase", builder.getStringAttr(getArgument())),
+          builder.getNamedAttr("phase_invocation", builder.getI64IntegerAttr(invocation)),
+          builder.getNamedAttr("candidates", builder.getArrayAttr(records)),
+          builder.getNamedAttr("selected_candidate", builder.getI64IntegerAttr(chosen ? int64_t(selectedRecord) : -1)),
+          builder.getNamedAttr("original_vector_peak", builder.getI64IntegerAttr(originalRegisters.vectors)),
+          builder.getNamedAttr("original_predicate_peak", builder.getI64IntegerAttr(originalRegisters.predicates)),
+          builder.getNamedAttr("packed_operand_bytes", builder.getI64IntegerAttr(packing->bytes))}));
+      function->setAttr("weft.x86.packing_schedule", builder.getArrayAttr(schedules));
+      if (!chosen) continue;
+      auto destination = chosen->loop;
+      auto &producers = chosen->producers;
       double preparationIssues = 0;
       unsigned unpriced = 0;
-      auto model = weft::x86::ResourceModel::get(alloc);
       for (Operation *producer : producers) {
         auto cost = weft::x86::instructionCost(producer, model);
         if (cost) preparationIssues += cost->issues;
@@ -414,7 +551,14 @@ public:
           builder.getNamedAttr("bytes", builder.getI64IntegerAttr(packing->bytes)),
           builder.getNamedAttr("packed_operand_peak_bytes", builder.getI64IntegerAttr(peakBytes)),
           builder.getNamedAttr("packed_operand_budget", builder.getI64IntegerAttr(weft::x86::privateStorageBudget)),
-          builder.getNamedAttr("loops_crossed", builder.getI64IntegerAttr(chosenDepth)),
+          builder.getNamedAttr("loops_crossed", builder.getI64IntegerAttr(chosen->depth)),
+          builder.getNamedAttr("vector_peak", builder.getI64IntegerAttr(chosenRegisters.vectors)),
+          builder.getNamedAttr("predicate_peak", builder.getI64IntegerAttr(chosenRegisters.predicates)),
+          builder.getNamedAttr("original_vector_peak", builder.getI64IntegerAttr(originalRegisters.vectors)),
+          builder.getNamedAttr("original_predicate_peak", builder.getI64IntegerAttr(originalRegisters.predicates)),
+          builder.getNamedAttr("vector_budget", builder.getI64IntegerAttr(model.vectorRegisters)),
+          builder.getNamedAttr("predicate_budget", builder.getI64IntegerAttr(model.predicateRegisters)),
+          builder.getNamedAttr("cost_basis", builder.getStringAttr("complete-preparation-work; dynamic-loop-terms-retained")),
           builder.getNamedAttr("resource_rejections", builder.getI64IntegerAttr(resourceRejected)),
           builder.getNamedAttr("preparation_issue_units", builder.getF64FloatAttr(preparationIssues)),
           builder.getNamedAttr("unpriced_operations", builder.getI64IntegerAttr(unpriced))});

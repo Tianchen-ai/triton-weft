@@ -9,6 +9,10 @@ RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改�
 窄化或潜在回绕不能继承未经证明的窄区间。查询只在单次有界遍历内保存 memo，
 不会跨 pass 保留随 SSA 改写失效的事实。未知 producer 和超出分析位宽的值不提供证明。
 
+`Analysis/PhysicalDependence` 与 x86 共用 SCF 的精确静态迭代数，包括空域、非单位步长和
+有符号/无符号比较。RISC-V 的循环不变量读取据此证明循环确实执行；未知边界不获得默认次数。
+驻留成本查询可以保留动态循环次数为符号因子，不给条件分支编造执行概率；这些查询在改写后重建。
+
 `Analysis/StorageBytes` 与 x86 共用 Encoding 字段到 bit span / byte fragment 的解释。
 RISC-V 的 `fieldFacts`、record-local bit projection 与 x86 的字段传输选择消费同一份
 natural、grouped/layered、joined 几何事实；byte/bit order 和 persistent interleave

@@ -409,6 +409,7 @@ void init_weft(py::module_ &&m) {
     }
     compilation["contractions"] = contractions;
     py::list schedules;
+    py::list packingSchedules;
     py::list localStorage;
     int64_t forwardedArrays = 0;
     int64_t uniformValidityArrays = 0;
@@ -434,8 +435,18 @@ void init_weft(py::module_ &&m) {
           schedules.append(schedule);
         }
       }
+      if (auto entries = function->getAttrOfType<mlir::ArrayAttr>("weft.x86.packing_schedule")) {
+        for (auto entry : entries) {
+          py::dict decision;
+          decision["function"] = function.getSymName().str();
+          for (auto attribute : mlir::cast<mlir::DictionaryAttr>(entry))
+            decision[py::str(attribute.getName().str())] = scheduleAttribute(attribute.getValue());
+          packingSchedules.append(decision);
+        }
+      }
     }
     compilation["array_schedules"] = schedules;
+    compilation["packing_schedules"] = packingSchedules;
     compilation["local_storage"] = localStorage;
     compilation["forwarded_arrays"] = forwardedArrays;
     compilation["uniform_validity_arrays"] = uniformValidityArrays;

@@ -19,8 +19,8 @@ ResourceModel ResourceModel::get(Operation *op) {
   unsigned registers = function->getAttrOfType<IntegerAttr>("weft.x86.vector_registers").getInt();
   return {bits, registers, bits == 512 ? 7u : 0u};
 }
-RegisterUsage ResourceModel::storage(Type type, unsigned scalarLanes) const {
-  uint64_t lanes = scalarLanes;
+RegisterUsage ResourceModel::storage(Type type) const {
+  uint64_t lanes = 0;
   if (auto vector = dyn_cast<VectorType>(type)) {
     lanes = vector.getNumElements(); type = vector.getElementType();
   }
@@ -34,7 +34,11 @@ static void maximize(RegisterUsage &a, RegisterUsage b) {
   a.vectors = std::max(a.vectors, b.vectors);
   a.predicates = std::max(a.predicates, b.predicates);
 }
-std::optional<InstructionCost> instructionCost(Operation *op, const ResourceModel &model) {
+LoopExecutionCost loopExecutionCost(const LoopResources &resources) {
+  double period = std::max(resources.issueUnits, resources.carriedPath) + 3;
+  return {period, std::max(0.0, resources.criticalPath - period)};
+}
+static std::optional<InstructionCost> operationCost(Operation *op, const ResourceModel &model) {
   auto bytes = [](Type type) -> uint64_t {
     uint64_t elements = 1;
     if (auto vector = dyn_cast<VectorType>(type)) {
@@ -73,8 +77,16 @@ std::optional<InstructionCost> instructionCost(Operation *op, const ResourceMode
   }
   if (isa<arith::DivSIOp, arith::DivUIOp, arith::RemSIOp, arith::RemUIOp>(op)) {
     APInt divisor;
+    Value denominator = op->getOperand(1);
+    while (auto broadcast = denominator.getDefiningOp<vector::BroadcastOp>()) denominator = broadcast.getSource();
+    bool constant = matchPattern(denominator, m_ConstantInt(&divisor));
+    DenseIntElementsAttr splat;
+    if (!constant && matchPattern(denominator, m_Constant(&splat)) && splat.isSplat()) {
+      divisor = splat.getSplatValue<APInt>();
+      constant = true;
+    }
     if (isa<arith::DivUIOp, arith::RemUIOp>(op) &&
-        matchPattern(op->getOperand(1), m_ConstantInt(&divisor)) && !divisor.isZero())
+        constant && !divisor.isZero())
       return divisor.isPowerOf2() ? cost(1, 1) : cost(4, 6);
     // There is no general SIMD integer divide. Charge its scalar lanes, rather
     // than pretending one wide IR operation is one machine instruction.
@@ -83,6 +95,9 @@ std::optional<InstructionCost> instructionCost(Operation *op, const ResourceMode
   }
   if (isa<arith::DivFOp>(op)) return cost(8, 12);
   if (isa<math::SqrtOp>(op)) return cost(8, 12);
+  if (isa<math::RsqrtOp>(op)) return cost(16, 24);
+  if (isa<math::FloorOp, math::CeilOp, math::TruncOp, math::RoundEvenOp>(op))
+    return cost(1, 3);
   if (isa<arith::MulIOp>(op)) return cost(1, 3);
   if (isa<arith::MulFOp, math::FmaOp>(op)) return cost(1, 4);
   if (isa<arith::AddFOp, arith::SubFOp>(op)) return cost(1, 3);
@@ -105,15 +120,27 @@ std::optional<InstructionCost> instructionCost(Operation *op, const ResourceMode
   }
   return std::nullopt;
 }
-LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned scalarLanes) {
+std::optional<InstructionCost> instructionCost(Operation *op, const ResourceModel &model) {
+  auto result = operationCost(op, model);
+  if (!result) return {};
+  llvm::SmallPtrSet<Value, 4> literals;
+  for (Value value : op->getOperands())
+    if (value.getDefiningOp<arith::ConstantOp>() && literals.insert(value).second) {
+      auto storage = model.storage(value.getType());
+      result->issues += storage.vectors + storage.predicates;
+    }
+  return result;
+}
+static LoopResources analyzeBlock(Block *body, Operation *scope,
+                                 const ResourceModel &model, Liveness &liveness,
+                                 ValueRange carries) {
   LoopResources result;
-  Block *body = loop.getBody();
   llvm::SetVector<Value> resident;
   // A value can remain resident in an enclosing loop without being captured by
   // this loop. Include these intervals as well as direct local captures.
-  auto function = loop->getParentOfType<func::FuncOp>();
-  Liveness liveness(function);
-  for (Operation *at = loop; at && at != function.getOperation(); at = at->getParentOp()) {
+  auto function = dyn_cast<func::FuncOp>(scope);
+  if (!function) function = scope->getParentOfType<func::FuncOp>();
+  for (Operation *at = scope; at && at != function.getOperation(); at = at->getParentOp()) {
     auto *info = liveness.getLiveness(at->getBlock());
     if (!info) continue;
     for (Value value : info->currentlyLiveValues(at)) {
@@ -155,10 +182,9 @@ LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned 
   for (auto [i, op] : llvm::enumerate(*body)) {
     uint64_t issues = 0;
     for (Value value : op.getResults()) {
-      // Poison is an abstract unspecified value, not a saved physical vector.
-      // A later operation that defines lanes (including a freeze or a carry)
-      // remains charged normally; only the poison producer has no residency.
-      auto cost = isa<ub::PoisonOp>(op) ? RegisterUsage{} : model.storage(value.getType(), scalarLanes);
+      // Poison owns no physical bits; constants are charged where rematerialized
+      // below. Values that define lanes, freezes and carries remain resident.
+      auto cost = isa<ub::PoisonOp, arith::ConstantOp>(op) ? RegisterUsage{} : model.storage(value.getType());
       costs[value] = cost; live += cost;
       issues = std::max(issues, cost.vectors + cost.predicates);
     }
@@ -179,11 +205,9 @@ LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned 
     // locally instead of retaining every differently shaped literal across loops.
     llvm::SmallPtrSet<Value, 4> literals;
     for (Value value : op.getOperands())
-      if (value.getParentBlock() != body && value.getDefiningOp<arith::ConstantOp>() && literals.insert(value).second) {
+      if (value.getDefiningOp<arith::ConstantOp>() && literals.insert(value).second) {
         scratch += model.storage(value.getType());
         result.work += model.storage(value.getType()).vectors;
-        auto literal = model.storage(value.getType());
-        result.issueUnits += literal.vectors + literal.predicates;
       }
     if (cast || isa<vector::GatherOp, vector::ScatterOp>(op)) ++scratch.vectors;
     if (isa<vector::GatherOp, vector::ScatterOp>(op)) {
@@ -194,19 +218,41 @@ LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model, unsigned 
     }
     maximize(result.scratch, scratch);
     auto at = live; at += scratch; maximize(result.peak, at);
-    for (Value value : op.getOperands())
-      if (lastUse.lookup(value) == i && costs.count(value)) {
-        live -= costs[value]; costs.erase(value);
-      }
+    // Captures may be used only inside a nested region, not listed among its
+    // parent operation's operands. Their actual final region use still retires
+    // them here; otherwise every sequential child falsely accumulates residency.
+    SmallVector<Value> retired;
+    for (auto [value, cost] : costs) {
+      auto last = lastUse.find(value);
+      if (last != lastUse.end() && last->second == i) retired.push_back(value);
+    }
+    for (Value value : retired) { live -= costs.lookup(value); costs.erase(value); }
     for (Value value : op.getResults())
       if (!lastUse.count(value)) { live -= costs[value]; costs.erase(value); }
   }
-  auto dependency = weft::analysis::dependencyCost(*body, loop.getRegionIterArgs(), [&](Operation *op) {
+  auto dependency = weft::analysis::dependencyCost(*body, carries, [&](Operation *op) {
     auto estimate = instructionCost(op, model);
     return estimate ? estimate->latency : 0;
   });
   result.criticalPath = dependency.criticalPath;
   result.carriedPath = dependency.carriedPath;
+  return result;
+}
+LoopResources analyzeLoop(scf::ForOp loop, const ResourceModel &model) {
+  Liveness liveness(loop->getParentOfType<func::FuncOp>());
+  return analyzeBlock(loop.getBody(), loop, model, liveness, loop.getRegionIterArgs());
+}
+RegisterUsage functionRegisterPeak(func::FuncOp function, const ResourceModel &model) {
+  Liveness liveness(function);
+  RegisterUsage result;
+  function.walk([&](Operation *scope) {
+    for (Region &region : scope->getRegions())
+      for (Block &body : region) {
+        ValueRange carries;
+        if (auto loop = dyn_cast<scf::ForOp>(scope)) carries = loop.getRegionIterArgs();
+        maximize(result, analyzeBlock(&body, scope, model, liveness, carries).peak);
+      }
+  });
   return result;
 }
 DictionaryAttr resourceAttributes(OpBuilder &b, const LoopResources &r) {
@@ -220,6 +266,8 @@ DictionaryAttr resourceAttributes(OpBuilder &b, const LoopResources &r) {
     b.getNamedAttr("issue_units", b.getF64FloatAttr(r.issueUnits)),
     b.getNamedAttr("critical_path", b.getF64FloatAttr(r.criticalPath)),
     b.getNamedAttr("carried_path", b.getF64FloatAttr(r.carriedPath)),
+    b.getNamedAttr("loop_period", b.getF64FloatAttr(loopExecutionCost(r).period)),
+    b.getNamedAttr("loop_startup", b.getF64FloatAttr(loopExecutionCost(r).startup)),
     b.getNamedAttr("read_bytes", b.getI64IntegerAttr(r.readBytes)),
     b.getNamedAttr("written_bytes", b.getI64IntegerAttr(r.writtenBytes)),
     b.getNamedAttr("permutations", b.getI64IntegerAttr(r.permutations)),

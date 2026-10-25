@@ -95,15 +95,32 @@ public:
       bool staticDomain = matchPattern(source.getLowerBound(), m_ConstantInt(&lower)) &&
           matchPattern(source.getUpperBound(), m_ConstantInt(&upper));
       uint64_t trips = staticDomain ? uint64_t(std::max(int64_t(0), upper.getSExtValue() - lower.getSExtValue())) / step : 0;
+      double mergeIssues = 0, mergeLatency = 0;
+      bool mergePriced = true;
+      for (auto [position, update] : llvm::enumerate(updates)) {
+        b.setInsertionPoint(source);
+        Value identity = source.getInitArgs()[position];
+        Value merged = combine(b, update, identity, identity);
+        auto estimate = weft::x86::instructionCost(merged.getDefiningOp(), model);
+        if (estimate) {
+          mergeIssues += estimate->issues;
+          mergeLatency = std::max(mergeLatency, estimate->latency);
+        } else mergePriced = false;
+        b.eraseOp(merged.getDefiningOp());
+      }
+      if (!mergePriced) continue;
+      auto finishCost = [&](unsigned copies) {
+        return std::max(double(copies - 1) * mergeIssues,
+                        double(llvm::Log2_64_Ceil(copies)) * mergeLatency);
+      };
       // Price the actual candidate, including its expanded address/conversion
       // work and SSA recurrence. Independent chains reduce dependency pressure
       // but still pay all supply work and the final combine within the primitive.
       auto cost = [&](unsigned copies, const weft::x86::LoopResources &resources) {
-        double iteration = std::max(resources.issueUnits, resources.carriedPath) + 3;
-        if (!staticDomain) return iteration / copies;
+        auto execution = weft::x86::loopExecutionCost(resources);
+        if (!staticDomain) return execution.period / copies;
         uint64_t full = trips / copies, rest = trips % copies;
-        double tail = std::max(original.issueUnits, original.carriedPath) + 3;
-        return full * iteration + rest * tail + double(copies - 1) * updates.size();
+        return execution.total(full) + weft::x86::loopExecutionCost(original).total(rest) + finishCost(copies);
       };
       unsigned selected = 1, visited = 1, rejected = 0;
       double best = cost(1, original);
@@ -114,7 +131,7 @@ public:
         candidates.push_back(b.getDictionaryAttr({
           b.getNamedAttr("partial_copies", b.getI64IntegerAttr(copies)),
           b.getNamedAttr("estimated_cost", b.getF64FloatAttr(cost(copies, resources))),
-          b.getNamedAttr("final_combine_cost", b.getI64IntegerAttr((copies - 1) * updates.size())),
+          b.getNamedAttr("final_combine_cost", b.getF64FloatAttr(finishCost(copies))),
           b.getNamedAttr("resources", weft::x86::resourceAttributes(b, resources)),
           b.getNamedAttr("decision", b.getStringAttr(decision))}));
       };

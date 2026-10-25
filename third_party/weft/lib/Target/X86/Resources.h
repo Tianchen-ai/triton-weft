@@ -4,6 +4,8 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include <optional>
 
+namespace mlir::func { class FuncOp; }
+
 namespace weft::x86 {
 struct RegisterUsage {
   uint64_t vectors = 0, predicates = 0;
@@ -17,7 +19,7 @@ struct RegisterUsage {
 struct ResourceModel {
   unsigned vectorBits, vectorRegisters, predicateRegisters;
   static ResourceModel get(mlir::Operation *op);
-  RegisterUsage storage(mlir::Type type, unsigned scalarLanes = 0) const;
+  RegisterUsage storage(mlir::Type type) const;
   bool fits(RegisterUsage usage) const {
     return usage.vectors <= vectorRegisters && usage.predicates <= predicateRegisters;
   }
@@ -32,14 +34,23 @@ struct InstructionCost {
   double issues = 0, latency = 0;
   uint64_t readBytes = 0, writtenBytes = 0;
 };
+struct LoopExecutionCost {
+  double period = 0, startup = 0;
+  double total(uint64_t iterations) const {
+    return iterations ? startup + period * iterations : 0;
+  }
+};
+// One physical period includes loop control and its recurrence. A short domain
+// additionally pays the initial dependency path; unknown domains retain both
+// terms instead of assuming an arbitrary runtime trip count.
+LoopExecutionCost loopExecutionCost(const LoopResources &resources);
 // Structural instruction classes and native packet widths, not CPU-cycle
 // predictions. An unknown operation makes the estimate incomplete.
 std::optional<InstructionCost> instructionCost(mlir::Operation *op,
                                               const ResourceModel &model);
 // Actual SSA residency, including values retained across enclosing regions.
-// scalarLanes describes a candidate packetization of a scalar pointwise body.
-LoopResources analyzeLoop(mlir::scf::ForOp loop, const ResourceModel &model,
-                          unsigned scalarLanes = 0);
+LoopResources analyzeLoop(mlir::scf::ForOp loop, const ResourceModel &model);
+RegisterUsage functionRegisterPeak(mlir::func::FuncOp function, const ResourceModel &model);
 mlir::DictionaryAttr resourceAttributes(mlir::OpBuilder &b, const LoopResources &resources);
 void updateArraySchedule(mlir::scf::ForOp loop, mlir::OpBuilder &b,
                          mlir::ArrayRef<mlir::NamedAttribute> fields);
