@@ -2,6 +2,7 @@
 #include "Weft/Dialect/RISCV/IR/FMAIssue.h"
 #include "Weft/Target/RISCVPasses.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseSet.h"
 
 using namespace mlir;
 using namespace weft;
@@ -55,6 +56,23 @@ public:
           instruction = riscv::pointwiseFMAInstruction(lhs.getType(), rhs.getType(), result, kind);
         }
         if (instruction.empty()) continue;
+        // Fusion makes all three inputs simultaneously necessary. The unfused
+        // pair can reload the addend after the multiply's inputs die. Preserve
+        // that legal schedule when even the fused input frontier exceeds the
+        // target; spilling one of these immediate operands cannot repair it.
+        llvm::DenseSet<Value> storage;
+        int64_t resident = 0;
+        bool known = true;
+        for (Value input : {lhs, rhs, accumulator}) {
+          if (!storage.insert(registerStorageIdentity(input)).second) continue;
+          auto groups = residentRegisterGroups(input);
+          if (!groups) { known = false; break; }
+          resident += *groups;
+        }
+        if (!known || resident > add->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters()) {
+          ++resourceFrontiersRetained;
+          continue;
+        }
         bool crossesEffect = false;
         for (Operation *op = product->getNextNode(); op != add; op = op->getNextNode())
           if (op->getNumRegions() || !riscv::hasOnlyReadEffects(op)) {
@@ -85,6 +103,8 @@ private:
   Statistic contracted{this, "weft-pointwise-fma", "Single-use floating multiply/add pairs contracted"};
   Statistic scalarAddendsRetained{this, "weft-fma-scalar-addends-retained",
                                   "Scalar addends retained after accounting for broadcast/copy issue work"};
+  Statistic resourceFrontiersRetained{this, "weft-fma-resource-frontiers-retained",
+                                      "Unfused schedules retained to keep simultaneous input residency legal"};
 };
 } // namespace
 

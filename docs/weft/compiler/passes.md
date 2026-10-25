@@ -1525,6 +1525,9 @@ validity 保持相同。不穿过改变类型的数值操作，不移动任何�
 减少 issue，且增加向量驻留；同成本保留原实现。不能把尚未物化的广播外提、不同的
 寄存器绑定或仅有语义复用次数，当作已经减少的物理工作。
 已有向量 accumulator 的融合继续进行；已经物化的 `fma` 不由这个隐式 pass 改写。
+选择还要核对三个输入的共同驻留前沿，沿共享 register identity 去重并计入完整 time parts。
+若这个必要输入集已经超过目标寄存器预算，保留原来的两条运算，使 addend 能在乘法输入死亡后
+再 reload；不能先生成所有输入同时需要、后续 spill 无法修复的 FMA。
 独立的 `fma` 保存 typed operands 和 exact leaf，资源 pass 重新核算实际活跃值；
 它沿用原 pointwise 的逐 part 活动长度，没有 closed FMA issue 的调度屏障或 loop-unroll 限制。
 
