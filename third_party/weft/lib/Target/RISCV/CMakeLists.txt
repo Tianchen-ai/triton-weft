@@ -31,6 +31,7 @@ add_library(WeftRISCVTarget STATIC
   ContractRISCVFloatingPoint.cpp
   SelectRISCVScalarPackets.cpp
   SimplifyRISCVControl.cpp
+  SeparateRISCVFullTiles.cpp
   PlanRISCVFieldStores.cpp
   PlanRISCVFieldReads.cpp
   MaterializeRISCVEncodedValues.cpp

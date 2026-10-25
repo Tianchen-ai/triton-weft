@@ -173,7 +173,7 @@ enum class PassID {
   BindSource, Convert, PointerOffsets, EncodedValues, Reductions, GroupedArithmetic, NumericConversions, Atomics, Select, Layouts, LocalWindows, CanonicalizeLayouts, Memory,
   SharedSupply, PrepareComposites, DenseContractions, Composites, SelectPanelTransfers, PanelTransfers,
   DenseFragments, Values, LocalProjections, Programs, RecordLoops, NestedMemory, Bitplanes,
-  Hoist, Schedule, Pipeline, SCCP, Control, Fragments, ShareWindows,
+  Hoist, FullTiles, Schedule, Pipeline, SCCP, Control, Fragments, ShareWindows,
   PartialTopology, PartialAccumulators, Unroll, PartialExtractions,
   DeadLayouts, ConsumerLayouts, ByteProjections, ReplicaLoads,
   SpecializeMemory, DenseTransfers, FMAIssues, PointwiseFMA, IntegerPointwise, IntegerMACs, ScalarPackets, Leaves, ScalarPrimes, Snapshots, ReductionBounds, LeafResources,
@@ -221,6 +221,7 @@ constexpr Entry prefix[] = {
     {PassID::NestedMemory, "program-materialization"},
     {PassID::Bitplanes, "program-materialization"},
     {PassID::Hoist, "scheduling"},
+    {PassID::FullTiles, "scheduling"},
     {PassID::SCCP, "scheduling"},
     {PassID::Fragments, "scheduling"},
     {PassID::Schedule, "scheduling"},
@@ -342,6 +343,7 @@ std::unique_ptr<Pass> makePass(PassID id, const RISCVCompilerOptions &options,
   case PassID::NestedMemory: return createPlanRISCVNestedMemoryPass();
   case PassID::Bitplanes: return createFuseRISCVBitplanesPass();
   case PassID::Hoist: return createHoistRISCVLoopInvariantsPass();
+  case PassID::FullTiles: return createSeparateRISCVFullTilesPass();
   case PassID::Schedule: return createScheduleRISCVLevelsPass();
   case PassID::Pipeline: return createPipelineRISCVLevelsPass();
   case PassID::SCCP: return createSCCPPass();

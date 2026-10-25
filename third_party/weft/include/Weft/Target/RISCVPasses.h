@@ -35,6 +35,7 @@ std::unique_ptr<mlir::Pass> createSelectRISCVDenseTransfersPass();
 std::unique_ptr<mlir::Pass> createSelectRISCVFMAIssuesPass();
 std::unique_ptr<mlir::Pass> createContractRISCVFloatingPointPass();
 std::unique_ptr<mlir::Pass> createSimplifyRISCVControlPass();
+std::unique_ptr<mlir::Pass> createSeparateRISCVFullTilesPass();
 std::unique_ptr<mlir::Pass> createSelectRISCVMemoryByteProjectionsPass();
 std::unique_ptr<mlir::Pass> createCanonicalizeRISCVLayoutsPass();
 std::unique_ptr<mlir::Pass> createPropagateRISCVConsumerLayoutsPass();

@@ -98,6 +98,7 @@ ConvertWeftToRISCV
 → PlanRISCVNestedMemory
 → FuseRISCVBitplanes
 → HoistRISCVLoopInvariants
+→ SeparateRISCVFullTiles
 → ScheduleRISCVLevels
 → PipelineRISCVLevels
 → SCCP
@@ -1008,6 +1009,18 @@ scale/reduction 的位置。`1-2*bit` 与 reduction 使用的 `2*bit-1` 分别�
 mask读取点、time/lane/replica、tail、下游原宽乘法均保持；取负对象只有常量±1，不将
 任意i8数据取负后再widen。一个选择展开成多个register replica时，所在物理loop保留
 已选unroll绑定，禁止系统编译器根据缩短的intrinsic表面再次展开该register cohort。
+
+### `SeparateRISCVFullTiles`
+
+RISC-V 与 x86 共用 `separateFullTiles`，在现有 SCF traversal 内分离完整 tile 与原始
+masked remainder。它只消除由该循环边界证明恒真的比较和 `min(remaining, tile)`；
+尾部沿原顺序消费完整循环的 carries，保留读取快照、作者 Level 和 state/stage 的归属。
+独立轴的边界在入口已可用时，可共享一个完整域分支，其条件同时检查所有参与轴的整除性。
+
+候选只来自原循环，新增副本不再次进入本 pass 的选择；按简化后的新增 operation 数扣除
+每个 kernel 的有限预算，并设置绝对代码增长上限。调度、buffer 版本和最终资源分析在
+变换后重新处理实际程序。RISC-V 物理 index 保留无符号范围，不用有符号负数裁剪它；
+无符号循环关系也不能被用来证明一个有符号比较。x86 保留原 signed SCF 空域规则。
 
 ### `ScheduleRISCVLevels` 与 `PipelineRISCVLevels`
 
