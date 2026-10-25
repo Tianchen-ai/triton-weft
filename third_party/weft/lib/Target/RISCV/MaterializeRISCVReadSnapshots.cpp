@@ -71,11 +71,24 @@ public:
         failed = true;
         return;
       }
+      int64_t bytes = -1;
+      auto bound = memory.getShape().size() == 1 ? riscv::denseDescriptorExtent(load.getRegion(), 0) : mlir::OpFoldResult();
+      auto fixed = mlir::dyn_cast_if_present<mlir::IntegerAttr>(bound.dyn_cast<mlir::Attribute>());
+      if (fixed && fixed.getInt() == extent && extent > 0 && extent % memory.getElements() == 0) {
+        if (extent / memory.getElements() > std::numeric_limits<int64_t>::max() / recordBytes) {
+          load.emitError("encoded read snapshot size overflows"); failed = true; return;
+        }
+        bytes = extent / memory.getElements() * recordBytes;
+      }
+      // Retain the bounded static snapshot when it already fits. A borrow
+      // check must not replace this known local transfer with a variable-size
+      // allocation, capacity check and conditional pointer on every record.
+      const bool fixedSnapshot = bytes > 0 && bytes <= kernel.getTarget().getMaxPrivateStackBytes();
       mlir::Value borrow;
       auto writes = riscv::snapshotInterferingStorage(load.getRegion(), load);
       mlir::Value source = riscv::fullArgumentView(load.getRegion());
       llvm::SmallVector<mlir::Value> destinations;
-      if (mlir::succeeded(writes) && source &&
+      if (!fixedSnapshot && mlir::succeeded(writes) && source &&
           riscv::storageAliasesRemainInScope(load.getResult(), load->getBlock())) {
         for (auto write : *writes) {
           auto full = riscv::fullArgumentView(write);
@@ -94,15 +107,7 @@ public:
         rewriter.setInsertionPoint(load);
         borrow = borrow ? mlir::Value(mlir::arith::AndIOp::create(rewriter, load.getLoc(), borrow, disjoint)) : disjoint;
       }
-      int64_t bytes = -1;
-      auto bound = memory.getShape().size() == 1 ? riscv::denseDescriptorExtent(load.getRegion(), 0) : mlir::OpFoldResult();
-      auto fixed = mlir::dyn_cast_if_present<mlir::IntegerAttr>(bound.dyn_cast<mlir::Attribute>());
-      if (!borrow && fixed && fixed.getInt() == extent && extent > 0 && extent % memory.getElements() == 0) {
-        if (extent / memory.getElements() > std::numeric_limits<int64_t>::max() / recordBytes) {
-          load.emitError("encoded read snapshot size overflows"); failed = true; return;
-        }
-        bytes = extent / memory.getElements() * recordBytes;
-      }
+      if (borrow) bytes = -1;
       if (bytes > kernel.getTarget().getMaxPrivateStackBytes()) {
         load.emitError("encoded read snapshot exceeds target local storage");
         failed = true;

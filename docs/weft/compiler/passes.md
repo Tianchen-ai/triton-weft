@@ -422,6 +422,9 @@ Encoded stage 同样遵守原读取快照。连续完整 record 区域可以具�
 这个选择不专门化调用地址、不改变参数的 alias 合同，也不生成另一份 kernel。
 borrow 条件必须覆盖该读取在原作用域内的全部可能写入，后置 verifier 重新检查。
 动态快照受现有聚合 local capacity 限制；无干扰路径不为整个逻辑 Value 分配或复制字节。
+已经具有精确静态容量、且符合私有存储预算的完整 record 快照保留固定 allocation 和已选 copy。
+不能仅将省掉的 payload copy 计为借用收益，却忽略每次迭代新增的动态 allocation、容量检查
+和条件地址；动态范围继续使用完整 ABI disjoint 证明及原读取点的容量保护。
 返回数值 SSA 的读取/转换结束原存储依赖，后续纯算术不因输入地址被改写而再次快照。
 通用字段字节解码也消费从保存的 Encoding Value 提取出的 record，不绕回原 View 重读。
 展开前的 point 有效长度查询在 Level 展开后折叠到对应 `PhysicalPoint.active`，因此字段
