@@ -1348,6 +1348,27 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
                   : llvm::StringRef("<block-argument>"));
       return mlir::failure();
     }
+    int64_t payloadExtent = load.getPayloadExtent();
+    if (axis == load.getPayloadAxis()) {
+      // A scalar entry address can supply a subwindow of its payload. Move
+      // its byte address together with the payload extent; keeping the old
+      // extent would make the projected result disagree with the real read.
+      if (mlir::isa<riscv::ValueType>((*offsets).getType()) ||
+          windowExtent <= 0 || payloadExtent % windowExtent != 0)
+        return mlir::failure();
+      const int64_t bits = riscv_internal::logicalBitWidth(resultType.getElementType());
+      if (bits <= 0 || bits % 8 ||
+          windowExtent > std::numeric_limits<int64_t>::max() / (bits / 8))
+        return mlir::failure();
+      mlir::Value base = *offsets;
+      if (!base.getType().isIndex())
+        base = riscv::CastOp::create(rewriter, load.getLoc(), rewriter.getIndexType(), base,
+                                    riscv_internal::unselectedLeaf(rewriter));
+      auto bytes = mlir::arith::ConstantIndexOp::create(rewriter, load.getLoc(), windowExtent * (bits / 8));
+      auto displacement = mlir::arith::MulIOp::create(rewriter, load.getLoc(), windowIndex, bytes);
+      *offsets = mlir::arith::AddIOp::create(rewriter, load.getLoc(), base, displacement);
+      payloadExtent = windowExtent;
+    }
     auto offsetType = mlir::dyn_cast<riscv::ValueType>((*offsets).getType());
     auto loadType = resultType;
     if (offsetType && offsetType.getLayout().getCarrier() == "scalar") {
@@ -1393,7 +1414,7 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
             : 0;
     auto cloned = riscv::RVVIndexedEntryLoadOp::create(rewriter,
         load.getLoc(), loadType, load.getSource(), *offsets,
-        load.getSourceAxis(), load.getPayloadAxis(), load.getPayloadExtent(),
+        load.getSourceAxis(), load.getPayloadAxis(), payloadExtent,
         load.getEntryByteStride(), load.getAccess(),
         riscv_internal::leaf(
             rewriter, selected.getEngine(), selected.getFamily(),
