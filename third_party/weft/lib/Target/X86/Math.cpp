@@ -50,6 +50,23 @@ Operation *singleReadOrigin(Value value) {
   return origin;
 }
 
+std::optional<unsigned> scalarProjectionLane(Operation *operation) {
+  if (auto extract = dyn_cast<LLVM::ExtractElementOp>(operation)) {
+    APInt position;
+    if (matchPattern(extract.getPosition(), m_ConstantInt(&position)) &&
+        position.getLimitedValue(2) < 2)
+      return position.getZExtValue();
+  }
+  if (auto extract = dyn_cast<vector::ExtractOp>(operation)) {
+    if (!extract.hasDynamicPosition() && extract.getStaticPosition().size() == 1 &&
+        !isa<VectorType>(extract.getType())) {
+      int64_t lane = extract.getStaticPosition().front();
+      if (lane >= 0 && lane < 2) return static_cast<unsigned>(lane);
+    }
+  }
+  return std::nullopt;
+}
+
 class LegalizeHalfCarriers : public PassWrapper<LegalizeHalfCarriers, OperationPass<ModuleOp>> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LegalizeHalfCarriers)
@@ -86,6 +103,30 @@ public:
       b.setInsertionPoint(op);
       // Both constants occur in the mask, so both scalar conversions were
       // already demanded. Reads and explicit narrowing stay at their origins.
+      SmallVector<std::pair<Operation *, unsigned>> projections;
+      bool scalarOnly = !op->use_empty();
+      for (Operation *user : op->getUsers()) {
+        auto lane = scalarProjectionLane(user);
+        if (!lane) { scalarOnly = false; break; }
+        projections.emplace_back(user, *lane);
+      }
+      if (target.hasFeature("avx512fp16") && scalarOnly) {
+        // No consumer needs a packed result. Two native scalar conversions
+        // keep independent load/conversion chains instead of serializing an
+        // insert, packed conversion and extraction on one XMM carrier.
+        SmallVector<Value, 2> sources;
+        for (APInt enabled : mask.getValues<APInt>())
+          sources.push_back(enabled.isZero() ? right.getSource() : left.getSource());
+        Value widened[2];
+        for (auto [user, lane] : projections) {
+          if (!widened[lane])
+            widened[lane] = arith::ExtFOp::create(
+                b, op.getLoc(), output.getElementType(), sources[lane]);
+          b.replaceOp(user, widened[lane]);
+        }
+        b.eraseOp(op);
+        continue;
+      }
       if (target.hasFeature("f16c")) {
         // Define the complete machine input through integer bits. The two
         // independent scalar snapshots must not share undefined XMM lanes,
