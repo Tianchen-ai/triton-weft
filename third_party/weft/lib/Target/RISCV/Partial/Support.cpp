@@ -4096,7 +4096,7 @@ std::optional<riscv::NestedPartialPlanAttr> planNestedPartialCarrier(
 
 std::optional<SourceLanePlan>
 planScaledSourceLanes(mlir::Builder &builder, riscv::RVVWidenDotOp dot,
-                      const ScaledTopologyFacts &facts) {
+                      const ScaledTopologyFacts &facts, bool reduceBeforeScale) {
   auto result = mlir::dyn_cast<riscv::ValueType>(dot.getResult().getType());
   auto kernel = dot->getParentOfType<riscv::KernelOp>();
   if (!result || !kernel || facts.partialSlots <= 1 ||
@@ -4203,19 +4203,37 @@ planScaledSourceLanes(mlir::Builder &builder, riscv::RVVWidenDotOp dot,
                               builder, dot, *lhsSource, *rhsSource,
                               facts.partialSlots, sourceSlots, split)
                         : std::optional<ScaledSourceLaneGeometry>();
-    // This source-lane realization materializes its complete product set.
-    // Leave oversized sets to the chunked reduced topology; accepting them
-    // here prevents that planner from selecting its legal bounded issue sets.
-    auto sourceGroups = geometry
-        ? checkedProduct({sourceSlots, geometry->sourceSlot.getLayout().getRegisterGroups()})
-        : std::optional<int64_t>();
-    if (geometry && sourceGroups &&
-        *sourceGroups <= kernel.getTarget().getVectorRegisters() - 2)
+    if (!geometry) continue;
+    // Each set may fit by itself while its producer/consumer pair does not.
+    // Close the complete repack/reduce/scale chain before selecting the source
+    // layout. Otherwise it can prevent the bounded direct-set candidate from
+    // being considered and fail only after the pipeline has already expanded.
+    auto repackedGroups = checkedProduct({facts.partialSlots,
+        geometry->partialSlot.getLayout().getRegisterGroups()});
+    auto combinedGroups = checkedProduct({sourceSlots,
+        geometry->reducedSlot.getLayout().getRegisterGroups()});
+    auto widened = widenPartialSlotType(builder, geometry->partialSlot);
+    if (!repackedGroups || !combinedGroups || !widened) continue;
+    const int64_t budget = kernel.getTarget().getVectorRegisters();
+    int64_t peak = 0;
+    auto admit = [&](int64_t input, int64_t output) {
+      if (input > budget - 2 || output > budget - 2 - input) return false;
+      peak = std::max(peak, input + output + 2);
+      return true;
+    };
+    bool fits = admit(geometry->sourceSetGroups, *repackedGroups);
+    if (reduceBeforeScale)
+      fits &= admit(*repackedGroups, geometry->reducedGroups) &&
+              admit(geometry->reducedGroups, *combinedGroups);
+    else
+      fits &= admit(*repackedGroups, widened.getLayout().getRegisterGroups());
+    if (fits)
       return SourceLanePlan{sourceSlots,
                             split,
                             *lhsSource,
                             *rhsSource,
                             *geometry,
+                            peak,
                             std::move(sourceLhsParts),
                             std::move(sourceRhsParts),
                             std::move(sourceLhsOffsets),

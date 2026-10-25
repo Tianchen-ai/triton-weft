@@ -348,7 +348,10 @@ class CanonicalSemantic(TritonSemantic):
         if any(tuple(v.shape) != tuple(inputs[0].shape) for v in inputs):
             raise ValueError("reduction inputs must have the same shape")
         if axis is None:
-            inputs = tuple(self.reshape(v, [v.numel.value], False) for v in inputs)
+            # A one-dimensional logical domain is already flat. Its runtime
+            # extent has no constexpr numel; preserve that domain and its mask.
+            if len(inputs[0].shape) != 1:
+                inputs = tuple(self.reshape(v, [v.numel.value], False) for v in inputs)
             axis = 0
         # Triton's tuple reduction zips positions, including indices created by
         # its standard argmax helper. Keep the first operand's logical domain

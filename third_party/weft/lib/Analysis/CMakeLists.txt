@@ -1,3 +1,3 @@
-add_library(WeftAnalysis STATIC IntegerFacts.cpp LogicalAxes.cpp PhysicalDependence.cpp StorageBytes.cpp)
+add_library(WeftAnalysis STATIC IntegerFacts.cpp LogicalAxes.cpp PhysicalDependence.cpp StorageBytes.cpp StorageLifetime.cpp)
 target_link_libraries(WeftAnalysis PUBLIC WeftKernelDialect
-  MLIRArithDialect MLIRVectorDialect MLIRIR MLIRSideEffectInterfaces)
+  MLIRArithDialect MLIRSCFDialect MLIRVectorDialect MLIRIR MLIRSideEffectInterfaces)

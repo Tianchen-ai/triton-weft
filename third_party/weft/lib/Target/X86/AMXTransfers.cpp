@@ -1,4 +1,6 @@
 #include "AMXContractions.h"
+#include "StorageAnalysis.h"
+#include "Resources.h"
 #include "Weft/Analysis/PhysicalDependence.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -6,6 +8,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallBitVector.h"
 
@@ -134,22 +137,7 @@ Linear linear(Value value, unsigned depth = 0) {
 
 // The proof permits writes only to fresh, nonescaping private allocations.
 bool privateBuffer(Value value) {
-  value = allocation(value);
-  if (!value) return false;
-  SmallVector<Value> pending{value};
-  while (!pending.empty()) {
-    Value current = pending.pop_back_val();
-    for (Operation *user : current.getUsers()) {
-      if (auto cast = dyn_cast<memref::CastOp>(user)) { pending.push_back(cast.getResult()); continue; }
-      if (isa<vector::LoadOp, vector::StoreOp, memref::LoadOp, memref::StoreOp, memref::DimOp>(user)) continue;
-      if (auto call = dyn_cast<func::CallOp>(user)) {
-        auto function = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(call, call.getCalleeAttr());
-        if (function && function->hasAttr("weft.x86.amx_transfer")) continue;
-      }
-      return false;
-    }
-  }
-  return true;
+  return weft::x86::isPrivateStorage(value);
 }
 bool preservesExternalMemory(Operation *op) {
   if (isMemoryEffectFree(op) || isa<memref::AllocOp, memref::AllocaOp, LLVM::MaskedLoadOp>(op)) return true;
@@ -170,23 +158,155 @@ bool preservesExternalMemory(Operation *op) {
   return false;
 }
 bool canDelay(Operation *load, Operation *use) {
-  Operation *cursor = use;
-  while (cursor->getBlock() != load->getBlock()) {
-    for (Operation &op : *cursor->getBlock()) {
-      if (&op == cursor) break;
-      if (!preservesExternalMemory(&op)) return false;
-    }
-    cursor = cursor->getParentOp();
-    if (!cursor) return false;
-    if (auto loop = dyn_cast<scf::ForOp>(cursor)) {
-      if (!loop->hasAttr("weft.x86.amx_contraction") ||
-          !llvm::all_of(*loop.getBody(), [](Operation &op) { return preservesExternalMemory(&op); })) return false;
-    } else if (!isa<scf::IfOp>(cursor)) return false;
+  return weft::analysis::storagePreservedBetween(load, use,
+      preservesExternalMemory, [](Operation *op) {
+        using weft::analysis::StorageControl;
+        if (isa<scf::IfOp>(op)) return StorageControl::Branch;
+        if (isa<scf::ForOp>(op) && op->hasAttr("weft.x86.amx_contraction"))
+          return StorageControl::Repeated;
+        return StorageControl::Opaque;
+      });
+}
+
+struct Packing {
+  memref::AllocOp allocation;
+  SmallVector<vector::StoreOp> stores;
+  SmallVector<Operation *> initializerAliases;
+  weft::analysis::StorageUses uses;
+  uint64_t bytes;
+};
+
+std::optional<uint64_t> allocationBytes(memref::AllocOp alloc) {
+  auto type = alloc.getType();
+  if (type.getRank() != 1 || !type.getElementType().isIntOrFloat()) return {};
+  int64_t count = type.hasStaticShape() ? type.getNumElements() : -1;
+  APInt dynamic;
+  if (count < 0 && alloc.getDynamicSizes().size() == 1 &&
+      matchPattern(alloc.getDynamicSizes().front(), m_ConstantInt(&dynamic)))
+    count = dynamic.getSExtValue();
+  uint64_t elementBytes = llvm::divideCeil(type.getElementTypeBitWidth(), 8u);
+  if (count <= 0 || uint64_t(count) > weft::x86::privateStorageBudget / elementBytes)
+    return {};
+  return uint64_t(count) * elementBytes;
+}
+
+// Address aliases may cross structured control, but every byte must still have
+// exactly one initializer before all reads. Never infer a write coordinate from
+// its allocation origin: only identity casts are admitted on initializer bases.
+std::optional<Packing> closedPacking(memref::AllocOp alloc) {
+  auto bytes = allocationBytes(alloc);
+  auto uses = weft::x86::privateStorageUses(alloc);
+  if (!bytes || failed(uses)) return {};
+  Packing result{alloc, {}, {}, std::move(*uses), *bytes};
+  SmallVector<Operation *> readers;
+  llvm::SmallPtrSet<Operation *, 16> aliases;
+  for (Operation *user : result.uses.users) {
+    if (auto store = dyn_cast<vector::StoreOp>(user)) {
+      if (!store->hasAttr("weft.x86.amx_pack") ||
+          store->getBlock() != alloc->getBlock() || allocation(store.getBase()) != alloc)
+        return {};
+      result.stores.push_back(store);
+      Value base = store.getBase();
+      while (auto cast = base.getDefiningOp<memref::CastOp>()) {
+        if (cast->getBlock() != alloc->getBlock()) return {};
+        if (aliases.insert(cast).second) result.initializerAliases.push_back(cast);
+        base = cast.getSource();
+      }
+    } else if (auto call = dyn_cast<func::CallOp>(user)) {
+      if (!call->hasAttr("weft.x86.amx_load")) return {};
+      readers.push_back(call);
+    } else if (isa<memref::CastOp, ViewLikeOpInterface, scf::ForOp,
+                   scf::WhileOp, scf::IfOp, scf::ConditionOp, scf::YieldOp,
+                   arith::SelectOp>(user)) {
+      // Their outgoing aliases were exhaustively visited by the shared query.
+    } else if (auto memory = dyn_cast<MemoryEffectOpInterface>(user)) {
+      SmallVector<MemoryEffects::EffectInstance> effects;
+      memory.getEffects(effects);
+      if (!llvm::all_of(effects, [](auto &effect) {
+            return isa<MemoryEffects::Read>(effect.getEffect());
+          })) return {};
+      readers.push_back(user);
+    } else return {};
   }
-  if (!load->isBeforeInBlock(cursor)) return false;
-  for (Operation *op = load->getNextNode(); op != cursor; op = op->getNextNode())
-    if (!preservesExternalMemory(op)) return false;
-  return true;
+  if (result.stores.empty() || readers.empty()) return {};
+  llvm::sort(result.stores, [](auto a, auto b) { return a->isBeforeInBlock(b); });
+  llvm::sort(result.initializerAliases, [](auto a, auto b) { return a->isBeforeInBlock(b); });
+  DominanceInfo dominance;
+  for (Operation *reader : readers)
+    if (!dominance.dominates(result.stores.back(), reader)) return {};
+  uint64_t count = *bytes / llvm::divideCeil(alloc.getType().getElementTypeBitWidth(), 8u);
+  llvm::SmallBitVector written(count, false);
+  for (auto store : result.stores) {
+    APInt offset;
+    auto vector = store.getVectorType();
+    if (store.getIndices().size() != 1 ||
+        !matchPattern(store.getIndices()[0], m_ConstantInt(&offset)) || offset.isNegative() ||
+        offset.getZExtValue() > count || uint64_t(vector.getNumElements()) > count - offset.getZExtValue())
+      return {};
+    for (int64_t i = 0; i < vector.getNumElements(); ++i) {
+      uint64_t index = offset.getZExtValue() + i;
+      if (written.test(index)) return {};
+      written.set(index);
+    }
+  }
+  if (!written.all()) return {};
+  return result;
+}
+
+// Recompute after each move/merge. Extending one packing's lifetime is compared
+// with all other packed operands in the function, including other contractions.
+// Structured branches are conservatively linearized; nested users occupy their
+// entire parent operation. Unknown or escaping storage never grants free space.
+std::optional<uint64_t> packingPeak(Packing &candidate, Operation *before,
+                                    Packing *replaces = nullptr) {
+  auto function = candidate.allocation->getParentOfType<func::FuncOp>();
+  DenseMap<Operation *, unsigned> begin, end;
+  unsigned position = 0;
+  function.walk<WalkOrder::PreOrder>([&](Operation *op) { begin[op] = position++; });
+  function.walk<WalkOrder::PostOrder>([&](Operation *op) {
+    end[op] = begin.lookup(op);
+    for (Region &region : op->getRegions())
+      for (Block &block : region)
+        for (Operation &nested : block) end[op] = std::max(end[op], end.lookup(&nested));
+  });
+  SmallVector<int64_t> changes(position + 1, 0);
+  bool complete = true;
+  llvm::SmallPtrSet<Operation *, 16> packedAllocations;
+  function.walk([&](vector::StoreOp store) {
+    if (!store->hasAttr("weft.x86.amx_pack")) return;
+    Value root = allocation(store.getBase());
+    auto alloc = root ? root.getDefiningOp<memref::AllocOp>() : memref::AllocOp();
+    if (!alloc) { complete = false; return; }
+    packedAllocations.insert(alloc);
+  });
+  if (!packedAllocations.contains(candidate.allocation)) return {};
+  for (Operation *operation : packedAllocations) {
+    auto alloc = cast<memref::AllocOp>(operation);
+    if (replaces && alloc == replaces->allocation) continue;
+    auto bytes = allocationBytes(alloc);
+    auto uses = weft::x86::privateStorageUses(alloc);
+    if (!bytes || failed(uses)) return {};
+    unsigned first = begin.lookup(alloc), last = first;
+    SmallVector<Operation *> users(uses->users);
+    if (alloc == candidate.allocation && replaces)
+      llvm::append_range(users, replaces->uses.users);
+    for (Operation *user : users) {
+      Operation *anchor = alloc->getBlock()->findAncestorOpInBlock(*user);
+      if (!anchor) return {};
+      last = std::max(last, end.lookup(anchor));
+    }
+    if (alloc == candidate.allocation) first = begin.lookup(before);
+    changes[first] += *bytes;
+    changes[last + 1] -= *bytes;
+  }
+  if (!complete) return {};
+  uint64_t peak = 0;
+  int64_t live = 0;
+  for (int64_t change : changes) {
+    live += change;
+    peak = std::max(peak, uint64_t(live));
+  }
+  return peak;
 }
 
 // Packing a saved SSA snapshot is independent of a traversal that reuses that
@@ -194,10 +314,6 @@ bool canDelay(Operation *load, Operation *use) {
 // integer/permutation producers, without moving or repeating the source read.
 class ReuseAMXPacking : public PassWrapper<ReuseAMXPacking, OperationPass<ModuleOp>> {
   int64_t deduplicate() {
-    struct Packing {
-      memref::AllocOp allocation;
-      SmallVector<vector::StoreOp> stores;
-    };
     SmallVector<memref::AllocOp> roots;
     llvm::SmallPtrSet<Operation *, 16> seen;
     getOperation().walk([&](vector::StoreOp store) {
@@ -206,29 +322,21 @@ class ReuseAMXPacking : public PassWrapper<ReuseAMXPacking, OperationPass<Module
       auto alloc = root ? root.getDefiningOp<memref::AllocOp>() : memref::AllocOp();
       if (alloc && alloc->hasAttr("weft.x86.amx_pack_closed") && seen.insert(alloc).second) roots.push_back(alloc);
     });
-    SmallVector<Packing> retained;
+    SmallVector<Packing, 4> retained;
+    DominanceInfo dominance;
     int64_t merged = 0;
     for (auto alloc : roots) {
-      Packing current{alloc, {}};
-      SmallVector<Value> pending{alloc.getResult()};
-      bool safe = true;
-      while (!pending.empty() && safe)
-        for (Operation *user : pending.pop_back_val().getUsers()) {
-          if (auto cast = dyn_cast<memref::CastOp>(user)) pending.push_back(cast.getResult());
-          else if (auto store = dyn_cast<vector::StoreOp>(user)) {
-            if (!store->hasAttr("weft.x86.amx_pack") || store->getBlock() != alloc->getBlock()) { safe = false; break; }
-            current.stores.push_back(store);
-          } else if (!isa<func::CallOp>(user) || !user->hasAttr("weft.x86.amx_load")) { safe = false; break; }
-        }
-      if (!safe || current.stores.empty()) continue;
-      llvm::sort(current.stores, [](auto lhs, auto rhs) { return lhs->isBeforeInBlock(rhs); });
+      auto closed = closedPacking(alloc);
+      if (!closed) continue;
+      auto &current = *closed;
       auto match = llvm::find_if(retained, [&](Packing &prior) {
-        if (prior.allocation.getType() != alloc.getType() || prior.allocation->getBlock() != alloc->getBlock() ||
-            !prior.stores.back()->isBeforeInBlock(alloc) || prior.stores.size() != current.stores.size() ||
+        if (prior.allocation.getType() != alloc.getType() ||
+            !dominance.dominates(prior.stores.back(), alloc) || prior.stores.size() != current.stores.size() ||
             prior.allocation.getDynamicSizes() != alloc.getDynamicSizes()) return false;
         for (auto [a, c] : llvm::zip(prior.stores, current.stores))
           if (a.getValueToStore() != c.getValueToStore() || a.getIndices() != c.getIndices()) return false;
-        return true;
+        auto peak = packingPeak(prior, prior.allocation, &current);
+        return peak && *peak <= weft::x86::privateStorageBudget;
       });
       if (match == retained.end()) { retained.push_back(std::move(current)); continue; }
       for (auto store : current.stores) store.erase();
@@ -253,44 +361,17 @@ public:
     int64_t reused = 0;
     for (auto alloc : allocations) {
       alloc->removeAttr("weft.x86.amx_pack_closed");
-      SmallVector<Value> pending{alloc.getResult()};
-      SmallVector<Operation *> aliases;
-      SmallVector<vector::StoreOp> stores;
-      bool safe = true;
-      while (!pending.empty() && safe)
-        for (Operation *user : pending.pop_back_val().getUsers()) {
-          if (auto cast = dyn_cast<memref::CastOp>(user)) { aliases.push_back(cast); pending.push_back(cast.getResult()); }
-          else if (auto store = dyn_cast<vector::StoreOp>(user)) stores.push_back(store);
-          else if (!isa<func::CallOp>(user) || !user->hasAttr("weft.x86.amx_load")) { safe = false; break; }
-        }
-      if (!safe || stores.empty()) continue;
-      // The target materializer emits a complete set of constant-index stores.
-      // Require every write to stay in the same birth block, with no other
-      // writer or escaping use, before extending its physical residency.
-      if (!llvm::all_of(stores, [&](auto store) { return store->getBlock() == alloc->getBlock(); })) continue;
-      auto type = alloc.getType();
-      int64_t count = type.hasStaticShape() ? type.getNumElements() : -1;
-      APInt dynamic;
-      if (count < 0 && alloc.getDynamicSizes().size() == 1 &&
-          matchPattern(alloc.getDynamicSizes().front(), m_ConstantInt(&dynamic))) count = dynamic.getSExtValue();
-      if (count <= 0 || count > 65536 / (type.getElementTypeBitWidth() / 8)) continue;
-      llvm::SmallBitVector written(count, false);
-      for (auto store : stores) {
-        APInt offset;
-        auto vector = store.getVectorType();
-        if (store.getIndices().size() != 1 || !matchPattern(store.getIndices()[0], m_ConstantInt(&offset)) ||
-            offset.isNegative() || offset.getZExtValue() + vector.getNumElements() > uint64_t(count)) { safe = false; break; }
-        for (int64_t i = 0; i < vector.getNumElements(); ++i) {
-          int64_t index = offset.getZExtValue() + i;
-          if (written.test(index)) { safe = false; break; }
-          written.set(index);
-        }
-      }
-      if (!safe || !written.all()) continue;
+      auto packing = closedPacking(alloc);
+      if (!packing) continue;
+      auto &stores = packing->stores;
+      for (auto store : stores) store->removeAttr("weft.x86.amx_pack_resource_rejections");
       alloc->setAttr("weft.x86.amx_pack_closed", UnitAttr::get(&getContext()));
       scf::ForOp destination;
       SmallVector<Operation *> producers;
+      uint64_t peakBytes = 0;
+      unsigned chosenDepth = 0, consideredDepth = 0, resourceRejected = 0;
       for (auto loop = alloc->getParentOfType<scf::ForOp>(); loop; loop = loop->getParentOfType<scf::ForOp>()) {
+        ++consideredDepth;
         SmallVector<Value> roots(alloc.getDynamicSizes());
         for (auto store : stores) {
           roots.push_back(store.getValueToStore());
@@ -300,13 +381,48 @@ public:
           return llvm::all_of(op->getResultTypes(), [](Type type) { return getElementTypeOrSelf(type).isIntOrIndex(); });
         }, 4096);
         if (failed(ordered)) break;
+        auto peak = packingPeak(*packing, loop);
+        if (!peak || *peak > weft::x86::privateStorageBudget) {
+          ++resourceRejected;
+          break;
+        }
         destination = loop;
         producers = std::move(*ordered);
+        peakBytes = *peak;
+        chosenDepth = consideredDepth;
       }
-      if (!destination) continue;
+      OpBuilder builder(&getContext());
+      if (!destination) {
+        if (resourceRejected)
+          stores.front()->setAttr("weft.x86.amx_pack_resource_rejections", builder.getI64IntegerAttr(resourceRejected));
+        continue;
+      }
+      double preparationIssues = 0;
+      unsigned unpriced = 0;
+      auto model = weft::x86::ResourceModel::get(alloc);
+      for (Operation *producer : producers) {
+        auto cost = weft::x86::instructionCost(producer, model);
+        if (cost) preparationIssues += cost->issues;
+        else ++unpriced;
+      }
+      for (auto store : stores) {
+        auto cost = weft::x86::instructionCost(store, model);
+        if (cost) preparationIssues += cost->issues;
+        else ++unpriced;
+      }
+      auto residency = builder.getDictionaryAttr({
+          builder.getNamedAttr("bytes", builder.getI64IntegerAttr(packing->bytes)),
+          builder.getNamedAttr("packed_operand_peak_bytes", builder.getI64IntegerAttr(peakBytes)),
+          builder.getNamedAttr("packed_operand_budget", builder.getI64IntegerAttr(weft::x86::privateStorageBudget)),
+          builder.getNamedAttr("loops_crossed", builder.getI64IntegerAttr(chosenDepth)),
+          builder.getNamedAttr("resource_rejections", builder.getI64IntegerAttr(resourceRejected)),
+          builder.getNamedAttr("preparation_issue_units", builder.getF64FloatAttr(preparationIssues)),
+          builder.getNamedAttr("unpriced_operations", builder.getI64IntegerAttr(unpriced))});
+      // The first initializer survives allocation-to-stack-slot materialization.
+      stores.front()->setAttr("weft.x86.amx_pack_residency", residency);
       for (Operation *producer : producers) producer->moveBefore(destination);
       alloc->moveBefore(destination);
-      for (Operation *alias : aliases) alias->moveBefore(destination);
+      for (Operation *alias : packing->initializerAliases) alias->moveBefore(destination);
       for (auto store : stores) store->moveBefore(destination);
       ++reused;
     }

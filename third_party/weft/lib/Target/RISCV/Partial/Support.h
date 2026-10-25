@@ -367,6 +367,7 @@ struct SourceLanePlan {
   riscv::ValueType lhsType;
   riscv::ValueType rhsType;
   ScaledSourceLaneGeometry geometry;
+  int64_t resourceGroups = 0;
   llvm::SmallVector<int64_t> lhsParts;
   llvm::SmallVector<int64_t> rhsParts;
   llvm::SmallVector<int64_t> lhsOffsets;
@@ -409,7 +410,7 @@ std::optional<riscv::NestedPartialPlanAttr> planNestedPartialCarrier(
 
 std::optional<SourceLanePlan>
 planScaledSourceLanes(mlir::Builder &builder, riscv::RVVWidenDotOp dot,
-                      const ScaledTopologyFacts &facts);
+                      const ScaledTopologyFacts &facts, bool reduceBeforeScale);
 
 } // namespace weft::riscv_partial
 

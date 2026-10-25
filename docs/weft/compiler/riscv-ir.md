@@ -88,6 +88,11 @@ pinned 参数还是私有 allocation。参数 alias set 只在所属 kernel 内�
 原 allocation，分支及循环 carry 合并所有可能来源。数值寄存器快照不继续借用原输入 bytes。
 未知来源或未知 effect 不能作为不别名证明，最终验证拒绝没有存储对象的普通 memory effect。
 
+控制流地址传播、alias-use 闭包和 read epoch 遍历使用跨目标的 StorageLifetime 分析；
+RISC-V 仍定义 descriptor、snapshot、local storage、alias set 与私有 resource 的语义。
+普通循环同时追踪初值和回边，延迟读进入循环必须证明整个重复区域不修改来源；
+进入分支只检查到实际 consumer 的前缀。分析结果只适用于当前 IR，变换后重新查询。
+
 普通指针的入口使用 `addressClass="pointer"`、无隐式 extent 的 dense MemDesc；同样经
 `memory_view` 进入程序。`pointer_load/store` 显式消费 element offsets、i1 mask 与
 fill/value。已证明的一维仿射访问可用 scalar i64 offset 和非零 `element_stride` 保存

@@ -400,26 +400,26 @@ public:
           combineArity = partialSlots;
           resources =
               std::max<int64_t>(1, partialSlots * partialGroups + 2);
-          if (auto source = dot.getReductionStreams() == 1
-                                ? planScaledSourceLanes(builder, dot, found->second)
-                                : std::optional<SourceLanePlan>()) {
-            if (!reduceBeforeScale)
-              kind = "scaled";
+          auto source = dot.getReductionStreams() == 1
+              ? planScaledSourceLanes(builder, dot, found->second, reduceBeforeScale)
+              : std::optional<SourceLanePlan>();
+          if (!source && !reduceBeforeScale && dot.getReductionStreams() == 1) {
+            source = planScaledSourceLanes(builder, dot, found->second, true);
+            if (source) kind = "reduced_scaled";
+          }
+          if (source) {
             sourceSlots = source->sourceSlots;
             laneSplit = source->laneSplit;
-            auto widened = widenPartialSlotType(builder, source->geometry.partialSlot);
-            const int64_t laneScaleGroups = widened
-                ? sourceSlots * source->geometry.sourceSlot.getLayout().getRegisterGroups() +
-                      partialSlots * source->geometry.partialSlot.getLayout().getRegisterGroups() +
-                      widened.getLayout().getRegisterGroups() + 2
-                : kernel.getTarget().getVectorRegisters() + 1;
-            if (kind == "scaled" && laneScaleGroups > kernel.getTarget().getVectorRegisters())
-              kind = "reduced_scaled";
+            resources = source->resourceGroups;
             // One wide source partial owns every lane slice produced by its
             // repack.  Keep those slices in one scale-combine chain instead
             // of rebuilding one scalar chain per reduced slot.
             combineArity = sourceSlots;
             sourcePlan = std::move(*source);
+          } else if (resources > kernel.getTarget().getVectorRegisters()) {
+            // A smaller direct/reduced set is selected below, before writing
+            // any concrete partial-set operations or changing the dot inputs.
+            kind = "reduced_scaled";
           }
         }
       auto levelScaledPartialGroups = checkedProduct(
@@ -872,10 +872,9 @@ public:
           // not require reducing those lanes. Keep the exact i16 products in
           // registers, widen while applying their exact scalar scale, and
           // converge once after the complete scale-combine operation.
-          plannedResources = std::max<int64_t>(
-              plannedResources, sourceSetType.getResourceGroups() +
-                  repackedSetType.getResourceGroups() +
-                  fullScaledSetType.getResourceGroups() + 2);
+          plannedResources = std::max({plannedResources,
+              sourceSetType.getResourceGroups() + repackedSetType.getResourceGroups() + 2,
+              repackedSetType.getResourceGroups() + fullScaledSetType.getResourceGroups() + 2});
         }
         if (kind == "scaled" && laneSplit == 1 && partialSetType &&
             scaledSetType && combineArity > 0 &&

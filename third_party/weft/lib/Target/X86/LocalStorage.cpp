@@ -1,4 +1,5 @@
 #include "Weft/Target/X86Compiler.h"
+#include "StorageAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -15,7 +16,7 @@ using namespace mlir;
 namespace {
 // This is a compiler allocation policy, not a claim about hardware capacity.
 // Sum the reserved slots, rather than treating every allocation independently.
-constexpr uint64_t stackBudget = 64 * 1024;
+constexpr uint64_t stackBudget = weft::x86::privateStorageBudget;
 constexpr uint64_t slotAlignment = 64;
 
 Type storageBits(Type type) {
@@ -118,35 +119,6 @@ std::optional<uint64_t> upperBound(Value value, unsigned depth = 0) {
   return {};
 }
 
-bool privateStorage(Value value, llvm::SmallPtrSetImpl<Operation *> &seen) {
-  for (OpOperand &use : value.getUses()) {
-    Operation *user = use.getOwner();
-    // Check every operand, even when the same buffer is passed twice. Only a
-    // compiler-owned, defined helper can declare a non-retaining argument.
-    if (auto call = dyn_cast<func::CallOp>(user)) {
-      auto module = call->getParentOfType<ModuleOp>();
-      auto function = module.lookupSymbol<func::FuncOp>(call.getCallee());
-      if (!function || !function.isPrivate() || function.isExternal() ||
-          !function.getArgAttr(use.getOperandNumber(), "weft.borrowed")) return false;
-      seen.insert(user);
-      continue;
-    }
-    if (!seen.insert(user).second) continue;
-    // Descriptors must never cross an unproved call, return, loop carry or unknown op.
-    // A source snapshot retained in a different iteration needs distinct storage.
-    if (auto op = dyn_cast<memref::CastOp>(user)) {
-      if (!privateStorage(op.getResult(), seen)) return false;
-    } else if (auto op = dyn_cast<memref::SubViewOp>(user)) {
-      if (!privateStorage(op.getResult(), seen)) return false;
-    } else if (!isa<memref::LoadOp, memref::StoreOp, memref::DimOp,
-                    vector::LoadOp, vector::StoreOp, vector::GatherOp,
-                    vector::ScatterOp, vector::MaskedLoadOp, vector::MaskedStoreOp>(user)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 struct Candidate {
   memref::AllocOp alloc;
   int64_t elements;
@@ -214,10 +186,10 @@ public:
             ? std::optional<uint64_t>(type.getNumElements()) : upperBound(alloc.getDynamicSizes().front());
         uint64_t elementBytes = llvm::divideCeil(type.getElementTypeBitWidth(), 8u);
         if (!count || *count > stackBudget / elementBytes) return;
-        llvm::SmallPtrSet<Operation *, 32> users;
-        if (!privateStorage(alloc, users)) return;
+        auto uses = weft::x86::privateStorageUses(alloc);
+        if (failed(uses)) return;
         unsigned first = positions.lookup(alloc), last = first;
-        for (Operation *user : users) {
+        for (Operation *user : uses->users) {
           // A nested use occupies its complete parent region. Do not infer
           // disjoint lifetimes between allocations in different source blocks.
           while (user && user->getBlock() != alloc->getBlock()) user = user->getParentOp();

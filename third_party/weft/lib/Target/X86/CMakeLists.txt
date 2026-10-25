@@ -21,6 +21,7 @@ add_library(WeftX86Target STATIC
   IntegerReductions.cpp
   Lookups.cpp
   LocalStorage.cpp
+  StorageAnalysis.cpp
   SnapshotLoads.cpp)
 target_link_libraries(WeftX86Target PUBLIC WeftKernelDialect WeftX86Platform WeftSourceSpecialization WeftAnalysis
   LLVMTargetParser
@@ -29,4 +30,4 @@ target_link_libraries(WeftX86Target PUBLIC WeftKernelDialect WeftX86Platform Wef
   MLIRFuncToLLVM MLIRControlFlowToLLVM MLIRSCFToControlFlow MLIRLLVMCommonConversion
   MLIRLLVMToLLVMIRTranslation MLIRTargetLLVMIRExport MLIRUBToLLVM MLIRMathTransforms MLIRVectorTransforms
   MLIRMemRefDialect MLIRMemRefToLLVM MLIRBufferizationPipelines MLIRBufferizationTransforms
-  MLIRSCFTransforms MLIRControlFlowTransforms MLIRArithTransforms)
+  MLIRSCFTransforms MLIRControlFlowTransforms MLIRArithTransforms MLIRViewLikeInterface)

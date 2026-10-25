@@ -1029,8 +1029,10 @@ plan 保存完整 slot 集合与 scale/combine 资源，两者分别验证，不
 
 单 issue 的 reduced-scaled 集合超过寄存器预算时，planner 在原 slot 顺序上选择可整除的
 有界 chunk，把 direct/reduced/scale-combined set 类型与单 issue operand projection 一起冻结。
-候选 source-lane 合并若要求完整 product set 加 reduction 临时量超过预算，不得提前选定；
-该约束在候选阶段检查，让已有 chunk 路线继续形成合法的有界集合。
+候选 source-lane 合并按实际 producer/consumer 边界计算 product→repack、repack→reduce、
+reduce→scale-combine 的同时存活资源，不能仅确认每个集合单独可容纳；直接 scale 路线则计算
+repack→widen-scale。每个边界保留其局部临时量，已经死亡的前一集合不重复计入后续峰值。
+超限候选在 source-lane 枚举阶段排除，让已有 chunk 路线继续形成合法的有界集合。
 materializer 按这些类型逐块生成 issue slice、widen product、reduction、scale combine，再以
 同宽 i32 merge 汇合完成的块；不要求所有宽乘积同时存活。slice 显式标出实际消费的 source part，
 资源 pass 可只 reload 需要的片段。整数尺度不跨浮点更新边界，完整 SSA 活跃集仍须通过最终预算检查。

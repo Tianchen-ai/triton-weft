@@ -1,4 +1,5 @@
 #include "Weft/Dialect/RISCV/IR/Memory.h"
+#include "Weft/Analysis/StorageLifetime.h"
 #include "Weft/Dialect/RISCV/IR/DenseRelations.h"
 #include "Weft/Dialect/RISCV/IR/MemoryEffects.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
@@ -53,25 +54,10 @@ void appendUnique(llvm::SmallVectorImpl<Value> &values, Value value) {
 // Both the initial edge and the back edge contribute to a loop carry's
 // provenance. The visited set closes cycles without assuming loop invariance.
 bool incomingStorage(Value value, llvm::SmallVectorImpl<Value> &pending) {
+  if (weft::analysis::incomingControlValues(value, pending)) return true;
   if (auto argument = dyn_cast<BlockArgument>(value)) {
     Operation *owner = argument.getOwner()->getParentOp();
     unsigned position = argument.getArgNumber();
-    if (auto loop = dyn_cast<scf::ForOp>(owner)) {
-      if (position == 0) return false;
-      --position;
-      pending.push_back(loop.getInitArgs()[position]);
-      pending.push_back(loop.getBody()->getTerminator()->getOperand(position));
-      return true;
-    }
-    if (auto loop = dyn_cast<scf::WhileOp>(owner)) {
-      if (argument.getOwner() == loop.getBeforeBody()) {
-        pending.push_back(loop.getInits()[position]);
-        pending.push_back(loop.getAfterBody()->getTerminator()->getOperand(position));
-      } else if (argument.getOwner() == loop.getAfterBody()) {
-        pending.push_back(loop.getConditionOp().getArgs()[position]);
-      } else return false;
-      return true;
-    }
     if (auto loop = dyn_cast<LoopOp>(owner)) {
       if (position == 0) return false;
       --position;
@@ -85,18 +71,7 @@ bool incomingStorage(Value value, llvm::SmallVectorImpl<Value> &pending) {
   if (!result) return false;
   Operation *owner = result.getOwner();
   unsigned position = result.getResultNumber();
-  if (auto loop = dyn_cast<scf::ForOp>(owner)) {
-    pending.push_back(loop.getInitArgs()[position]);
-    pending.push_back(loop.getBody()->getTerminator()->getOperand(position));
-  } else if (auto loop = dyn_cast<scf::WhileOp>(owner)) {
-    pending.push_back(loop.getConditionOp().getArgs()[position]);
-  } else if (auto branch = dyn_cast<scf::IfOp>(owner)) {
-    pending.push_back(branch.thenYield().getOperand(position));
-    pending.push_back(branch.elseYield().getOperand(position));
-  } else if (auto select = dyn_cast<arith::SelectOp>(owner)) {
-    pending.push_back(select.getTrueValue());
-    pending.push_back(select.getFalseValue());
-  } else if (auto loop = dyn_cast<LoopOp>(owner)) {
+  if (auto loop = dyn_cast<LoopOp>(owner)) {
     pending.push_back(loop.getCarried()[position]);
     pending.push_back(loop.getBody().front().getTerminator()->getOperand(position));
   } else return false;
@@ -216,27 +191,6 @@ bool onlyReads(Operation *operation, bool recursive) {
         for (Operation &nested : block)
           if (!onlyReads(&nested, true)) return false;
   }
-  return true;
-}
-
-bool prefixWrites(Block &block, Operation *consumer,
-                  const StorageOrigins &origins) {
-  Operation *anchor = block.findAncestorOpInBlock(*consumer);
-  if (!anchor) return true;
-  for (Operation &operation : block) {
-    if (&operation == anchor) break;
-    if (writesOrigins(&operation, origins)) return true;
-  }
-  if (anchor == consumer) return false;
-  if (isa<scf::ForOp, scf::WhileOp, LoopOp>(anchor))
-    return writesOrigins(anchor, origins);
-  if (auto branch = dyn_cast<scf::IfOp>(anchor)) {
-    for (Region &region : branch->getRegions())
-      for (Block &nested : region)
-        if (nested.findAncestorOpInBlock(*consumer))
-          return prefixWrites(nested, consumer, origins);
-  }
-  // Unknown control may execute a prefix repeatedly or have its own effects.
   return true;
 }
 
@@ -631,31 +585,9 @@ void weft::riscv::appendStorageAliases(OpOperand &use,
   auto append = [&](Value value) {
     if (addressable(value.getType())) appendUnique(aliases, value);
   };
-  if (auto loop = dyn_cast<scf::ForOp>(user)) {
-    unsigned start = loop.getInitArgs().getBeginOperandIndex();
-    if (use.getOperandNumber() >= start) {
-      unsigned index = use.getOperandNumber() - start;
-      append(loop.getRegionIterArgs()[index]);
-      append(loop.getResult(index));
-    }
-  } else if (auto loop = dyn_cast<scf::WhileOp>(user)) {
-    append(loop.getBeforeBody()->getArgument(use.getOperandNumber()));
-  } else if (auto condition = dyn_cast<scf::ConditionOp>(user)) {
-    if (use.getOperandNumber()) {
-      auto loop = cast<scf::WhileOp>(condition->getParentOp());
-      unsigned index = use.getOperandNumber() - 1;
-      append(loop.getAfterBody()->getArgument(index));
-      append(loop.getResult(index));
-    }
-  } else if (auto yield = dyn_cast<scf::YieldOp>(user)) {
-    auto *parent = yield->getParentOp();
-    unsigned index = use.getOperandNumber();
-    if (auto loop = dyn_cast<scf::WhileOp>(parent))
-      append(loop.getBeforeBody()->getArgument(index));
-    else if (auto loop = dyn_cast<scf::ForOp>(parent)) {
-      append(loop.getRegionIterArgs()[index]);
-      append(loop.getResult(index));
-    } else if (isa<scf::IfOp>(parent)) append(parent->getResult(index));
+  SmallVector<Value> controlAliases;
+  if (weft::analysis::outgoingControlAliases(use, controlAliases)) {
+    for (Value value : controlAliases) append(value);
   } else if (auto loop = dyn_cast<LoopOp>(user)) {
     unsigned start = loop.getCarried().getBeginOperandIndex();
     if (use.getOperandNumber() >= start) {
@@ -672,8 +604,6 @@ void weft::riscv::appendStorageAliases(OpOperand &use,
   } else {
     for (Value result : user->getResults()) {
       if (borrowedStorage(result) == use.get()) append(result);
-      else if (isa<arith::SelectOp>(user) && use.getOperandNumber() > 0)
-        append(result);
       else if (addressable(result.getType()) &&
                mayAliasStorage(result, use.get())) append(result);
     }
@@ -693,23 +623,17 @@ bool weft::riscv::storageAliasesRemainInScope(Value root, Block *scope) {
     }
     return owner && scope->findAncestorOpInBlock(*owner);
   };
-  SmallVector<Value> pending{root};
-  llvm::DenseSet<Value> visited;
-  for (size_t i = 0; i < pending.size(); ++i) {
-    Value value = pending[i];
-    if (!visited.insert(value).second || value.use_empty()) continue;
-    if (!inside(value)) return false;
-    for (OpOperand &use : value.getUses()) {
+  return succeeded(weft::analysis::collectStorageUses(root, inside,
+    [&](OpOperand &use, SmallVectorImpl<Value> &aliases) {
       Operation *user = use.getOwner();
       const bool control = isa<scf::ForOp, scf::WhileOp, scf::IfOp,
           scf::ConditionOp, scf::YieldOp, LoopOp, YieldOp>(user);
       if (!control && (user->getNumRegions() ||
           (!isMemoryEffectFree(user) && !isa<MemoryEffectOpInterface>(user))))
         return false;
-      appendStorageAliases(use, pending);
-    }
-  }
-  return true;
+      appendStorageAliases(use, aliases);
+      return true;
+    }));
 }
 
 bool weft::riscv::hasOnlyReadEffects(Operation *operation, bool recursive) {
@@ -722,25 +646,13 @@ bool weft::riscv::mayWriteStorage(Operation *operation, Value storage) {
 
 bool weft::riscv::storageWrittenBetween(Value storage, Operation *read,
                                       Operation *consumer) {
-  if (read == consumer) return false;
-  Block *block = read->getBlock();
-  Operation *anchor = block->findAncestorOpInBlock(*consumer);
-  if (!anchor || anchor == read || !read->isBeforeInBlock(anchor)) return true;
   auto origins = storageOrigins(storage);
-  // Structural region traversal is finite, including the body of a loop.
-  // Its instruction count is not a write to an unrelated private snapshot.
-  for (Operation *cursor = read->getNextNode(); cursor != anchor;
-       cursor = cursor->getNextNode())
-    if (writesOrigins(cursor, origins)) return true;
-  if (anchor == consumer) return false;
-  if (isa<scf::ForOp, scf::WhileOp, LoopOp>(anchor))
-    return writesOrigins(anchor, origins);
-  if (auto branch = dyn_cast<scf::IfOp>(anchor))
-    for (Region &region : branch->getRegions())
-      for (Block &nested : region)
-        if (nested.findAncestorOpInBlock(*consumer))
-          return prefixWrites(nested, consumer, origins);
-  return true;
+  return !weft::analysis::storagePreservedBetween(read, consumer,
+      [&](Operation *op) { return !writesOrigins(op, origins); },
+      [](Operation *op) {
+        if (isa<LoopOp>(op)) return weft::analysis::StorageControl::Repeated;
+        return weft::analysis::structuredStorageControl(op);
+      });
 }
 
 bool weft::riscv::readCrossesWrite(Operation *read, Operation *consumer) {
