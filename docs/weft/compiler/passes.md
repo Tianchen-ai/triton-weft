@@ -634,13 +634,17 @@ kernel 的 SSA 寄存器峰值。
 
 读取比较要求完整、静态窗口的字节数与实际 carrier transfer 数，unit、strided、indexed
 等访存类别分别比较，不用较少字节替代新增 gather 的成本；静态循环次数使用共享
-分析精确展开，动态次数保留独立符号。只有每个符号项的读取字节和 transfer 均不增加、
-至少一项下降，而且实际寄存器峰值不增加并可驻留，才选择重读。未知 active domain、
+分析精确展开，动态次数以真实 bounds/step 表达式为符号，不能用克隆后的 loop 序号代替。
+准备后的完整候选还记录地址计算、数值 carrier、控制与转换；未定价的 operation 保留
+类型、参数、常量与频次，不能按零消除。每个候选只评估一次。只有每个符号项的读取字节
+和 transfer 均不增加、至少一项下降，已计价的结构工作不增加，未定价项没有新增，
+而且实际寄存器峰值不增加并可驻留，才选择重读。未知 active domain、
 条件执行或驻留信息不会获得虚构成本。该选择针对当前闭合的 dense-read 子图，不宣称
 覆盖 encoded packing、未知访问延迟或所有 layout 组合。后续 leaf/resource passes 仍
 负责最终临时寄存器、spill 与合法性收口。
 
-`weft.riscv.residency_choices` 保存候选的读取多项式、峰值与决定，供 IR 检查；它不是后续
+`weft.riscv.residency_choices` 保存候选的读取多项式、完整结构工作、未定价项、峰值与决定，
+其工作量是指令类别估计，不是 CPU 周期预测。它不是后续
 分析输入，所有分析在改写后重新建立。参考 Triton
 `ReorderInstructions.cpp:104-123` 将会增加寄存器压力的转换推近 consumer，以及
 `:164-170` 在移动读取前检查写入边界；这里增加了完整候选、复用频次与 SSA 驻留比较，

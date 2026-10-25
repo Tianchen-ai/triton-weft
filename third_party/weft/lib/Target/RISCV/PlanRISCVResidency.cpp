@@ -10,6 +10,7 @@
 #include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -314,25 +315,192 @@ mlir::LogicalResult weft::planRISCVResidency(mlir::ModuleOp module) {
 namespace {
 using namespace mlir;
 
-bool orderedLoop(Operation *operation) {
-  return isa<scf::ForOp>(operation);
-}
-
 struct ReadWork { uint64_t bytes = 0, transfers = 0; };
-using ReadKey = std::pair<SmallVector<unsigned>, std::string>;
+using FrequencyKey = SmallVector<std::string>;
+using ReadKey = std::pair<FrequencyKey, std::string>;
 using ReadPolynomial = std::map<ReadKey, ReadWork>;
+using WorkPolynomial = std::map<FrequencyKey, uint64_t>;
+using OpaqueWork = std::map<ReadKey, uint64_t>;
+struct ProgramWork {
+  WorkPolynomial instructions;
+  OpaqueWork opaque;
+};
 struct SupplyEstimate {
   ReadPolynomial work;
+  ProgramWork program;
   int64_t registerPeak;
 };
 
-// Only changed transfers are ranked. Other arithmetic is identical between the
-// candidates. Unknown trip counts stay independent symbols; no "inner loop is
-// large" assumption can amortize a preparation or justify an extra read.
+// A frequency symbol names the actual SCF bounds, not the loop's position in
+// a clone. Adding a preparation loop cannot accidentally rename another loop
+// to the baseline symbol. No guessed trip counts or branch probabilities.
+std::optional<std::string> indexIdentity(Value value, unsigned &budget) {
+  if (!budget) return std::nullopt;
+  --budget;
+  std::string text;
+  llvm::raw_string_ostream out(text);
+  out << value.getType() << ':';
+  if (auto argument = dyn_cast<BlockArgument>(value)) {
+    if (!isa<riscv::KernelOp>(argument.getOwner()->getParentOp())) return std::nullopt;
+    out << "argument" << argument.getArgNumber();
+    return text;
+  }
+  Operation *operation = value.getDefiningOp();
+  if (!operation || operation->getNumRegions() || operation->getNumResults() != 1 ||
+      !isMemoryEffectFree(operation)) return std::nullopt;
+  out << operation->getName();
+  if (auto properties = operation->getPropertiesAsAttribute()) out << properties;
+  out << '(';
+  for (Value input : operation->getOperands()) {
+    auto identity = indexIdentity(input, budget);
+    if (!identity) return std::nullopt;
+    out << *identity << ';';
+  }
+  out << ')';
+  return text;
+}
+
+std::optional<FrequencyKey> frequencyKey(const analysis::ExecutionMultiplicity &frequency) {
+  FrequencyKey key;
+  for (Operation *operation : frequency.dynamicLoops) {
+    auto loop = dyn_cast<scf::ForOp>(operation);
+    if (!loop) return std::nullopt;
+    unsigned budget = 128;
+    auto lower = indexIdentity(loop.getLowerBound(), budget);
+    auto upper = indexIdentity(loop.getUpperBound(), budget);
+    auto step = indexIdentity(loop.getStep(), budget);
+    if (!lower || !upper || !step) return std::nullopt;
+    key.push_back((loop.getUnsignedCmp() ? "unsigned(" : "signed(") +
+        *lower + ";" + *upper + ";" + *step + ")");
+  }
+  llvm::sort(key);
+  return key;
+}
+
+ArrayAttr frequencyAttributes(Builder &b, ArrayRef<std::string> symbols) {
+  SmallVector<Attribute> names;
+  for (const auto &symbol : symbols) names.push_back(b.getStringAttr(symbol));
+  return b.getArrayAttr(names);
+}
+
+// Structural work, not a CPU-cycle prediction. Unpriced operations retain their
+// full typed signature and frequency. They may cancel only against the same
+// physical work; a new opaque operation never receives a zero cost.
+std::optional<uint64_t> instructionWork(Operation *operation) {
+  if (operation->hasTrait<OpTrait::IsTerminator>() || riscv::isCoordinateIdentity(operation) ||
+      isa<arith::ConstantOp, riscv::ConstantOp, riscv::SymbolOp, riscv::MemoryViewOp,
+          riscv::LocalViewOp, riscv::LocalBindOp, riscv::StagedViewOp>(operation)) return 0;
+  if (isa<riscv::ExtentOp, riscv::ReaxisOp>(operation)) return 0;
+  // Slice offsets are ordinary scalar address arithmetic. Index/domain values
+  // are already explicit SSA; charge each nontrivial axis translation here.
+  if (auto slice = dyn_cast<riscv::SliceOp>(operation)) return 2 * slice.getIndices().size();
+  if (auto view = dyn_cast<riscv::SubviewOp>(operation)) return 2 * view.getOffsets().size();
+  if (operation->getName().getDialectNamespace() == "arith" &&
+      llvm::all_of(operation->getResultTypes(), [](Type type) { return type.isIntOrIndexOrFloat(); })) return 1;
+  if (auto materialize = dyn_cast<riscv::RegisterMaterializeOp>(operation)) {
+    auto type = dyn_cast<riscv::ValueType>(materialize.getInput().getType());
+    if (type && type.getElementType().isIntOrFloat() && type.getLayout().getCarrier() == "rvv") return 0;
+  }
+  bool simple = isa<riscv::LoadOp, riscv::StoreOp, riscv::BinaryOp, riscv::CompareOp,
+                    riscv::SelectOp, riscv::CastOp, riscv::BitcastOp,
+                    riscv::WidenOp, riscv::NarrowOp, riscv::RegisterMaterializeOp>(operation);
+  if (!simple) return std::nullopt;
+  // Each selected numeric carrier is at least one issue; wider LMULs carry
+  // proportionally more physical work. Compound/decode/packing operations are
+  // opaque until their actual instruction relation is known, never guessed.
+  Value value = operation->getNumResults() ? operation->getResult(0) : operation->getOperand(0);
+  auto type = dyn_cast<riscv::ValueType>(value.getType());
+  if (!type) return value.getType().isIntOrIndexOrFloat() ? std::optional<uint64_t>(1) : std::nullopt;
+  if (!type.getElementType().isIntOrFloat()) return std::nullopt;
+  auto coordinates = riscv::RegisterCoordinates::get(type.getLayout());
+  if (!coordinates || coordinates->parts() < 0) return std::nullopt;
+  uint64_t parts = coordinates->parts();
+  uint64_t width = std::max<int64_t>(1, type.getLayout().getRegisterGroups());
+  if (parts > uint64_t(std::numeric_limits<int64_t>::max()) / width) return std::nullopt;
+  return parts * width;
+}
+
+std::string physicalWorkSignature(Operation *operation) {
+  std::string text;
+  llvm::raw_string_ostream out(text);
+  out << operation->getName() << '(';
+  for (Type type : operation->getOperandTypes()) out << type << ';';
+  out << ")->(";
+  for (Type type : operation->getResultTypes()) out << type << ';';
+  out << ')';
+  for (Value operand : operation->getOperands()) {
+    Attribute constant;
+    if (matchPattern(operand, m_Constant(&constant))) out << "constant:" << constant;
+    else out << "variable";
+  }
+  if (auto properties = operation->getPropertiesAsAttribute()) out << properties;
+  // Leaf/implementation/layout/effect attributes determine real work. Source
+  // locations are provenance, and cannot establish an instruction equivalence.
+  for (NamedAttribute attribute : operation->getAttrs())
+    if (attribute.getName() != "source_origin" && attribute.getName() != "canonical_op")
+      out << attribute.getName() << '=' << attribute.getValue();
+  return text;
+}
+
+std::optional<ProgramWork> programWork(Block *scope, std::string &rejection) {
+  ProgramWork result;
+  auto add = [&](uint64_t &total, uint64_t work, uint64_t frequency) {
+    const uint64_t limit = std::numeric_limits<int64_t>::max();
+    if (work && frequency > (limit - total) / work) return false;
+    total += work * frequency;
+    return true;
+  };
+  bool complete = true;
+  scope->walk([&](Operation *operation) {
+    if (!complete) return;
+    auto frequency = analysis::executionMultiplicityInBlock(operation, scope);
+    if (!frequency) {
+      rejection = "physical work has conditional or opaque execution frequency";
+      complete = false;
+      return;
+    }
+    auto symbols = frequencyKey(*frequency);
+    if (!symbols) {
+      complete = false; rejection = "physical work has an unrepresentable symbolic frequency"; return;
+    }
+    auto key = *symbols;
+    if (auto loop = dyn_cast<scf::ForOp>(operation)) {
+      // Setup is per loop invocation; compare/advance are per real iteration.
+      complete = add(result.instructions[key], 1, frequency->fixed);
+      if (auto trips = analysis::staticTripCount(loop)) {
+        if (*trips > uint64_t(std::numeric_limits<int64_t>::max()) / 2) complete = false;
+        else complete &= add(result.instructions[key], 2 * *trips, frequency->fixed);
+      } else {
+        auto iterations = *frequency;
+        iterations.dynamicLoops.push_back(loop);
+        auto symbol = frequencyKey(iterations);
+        if (!symbol) complete = false;
+        else complete &= add(result.instructions[*symbol], 2, frequency->fixed);
+      }
+    } else if (auto work = instructionWork(operation)) {
+      complete = add(result.instructions[key], *work, frequency->fixed);
+    } else {
+      complete = add(result.opaque[{key, physicalWorkSignature(operation)}], 1, frequency->fixed);
+    }
+    if (!complete) rejection = "physical work exceeds its bounded coefficient representation";
+  });
+  return complete ? std::optional<ProgramWork>(result) : std::nullopt;
+}
+
+template <typename Key>
+bool noAdditionalWork(const std::map<Key, uint64_t> &after,
+                      const std::map<Key, uint64_t> &before) {
+  for (const auto &[key, amount] : after) {
+    auto found = before.find(key);
+    if (amount > (found == before.end() ? 0 : found->second)) return false;
+  }
+  return true;
+}
+
+// Unknown trip counts stay independent symbols; no "inner loop is large"
+// assumption can amortize preparation or justify an extra read. The separate
+// whole-program ledger below proves whether non-read work can be cancelled.
 std::optional<ReadPolynomial> readWork(Block *scope, std::string &rejection) {
-  DenseMap<Operation *, unsigned> loopIds;
-  unsigned next = 0;
-  scope->walk([&](Operation *operation) { if (orderedLoop(operation)) loopIds[operation] = next++; });
   ReadPolynomial result;
   bool complete = true;
   auto reject = [&](Operation *operation, StringRef reason) {
@@ -371,8 +539,8 @@ std::optional<ReadPolynomial> readWork(Block *scope, std::string &rejection) {
     if (!elements || !carriers || !frequency || *elements < 0 || *carriers < 0) {
       reject(load, "read has no bounded carrier or execution frequency"); return;
     }
-    SmallVector<unsigned> key;
-    for (Operation *loop : frequency->dynamicLoops) key.push_back(loopIds.lookup(loop));
+    auto key = frequencyKey(*frequency);
+    if (!key) { reject(load, "read has an unrepresentable symbolic frequency"); return; }
     auto access = load.getAccess();
     if (!access || access.getForm() == "unassigned") {
       reject(load, "read has no selected memory form"); return;
@@ -380,7 +548,7 @@ std::optional<ReadPolynomial> readWork(Block *scope, std::string &rejection) {
     // A strided/indexed issue cannot borrow the cost of a contiguous load.
     // Compare each access class independently until a target model can price
     // their relative costs; fewer bytes alone cannot justify a new gather.
-    auto &term = result[{key, access.getForm().str()}];
+    auto &term = result[{*key, access.getForm().str()}];
     const unsigned width = (type.getElementType().getIntOrFloatBitWidth() + 7) / 8;
     const uint64_t limit = std::numeric_limits<int64_t>::max();
     if (uint64_t(*elements) > limit / width) {
@@ -450,24 +618,41 @@ std::optional<SupplyEstimate> estimateSupply(riscv::MaterializeOp source, bool r
   if (failed(verify(*trial))) { invalid = true; return {}; }
   auto pressure = riscv_internal::physicalRegisterPressure(trialKernel);
   auto work = readWork(scope, rejection);
-  if (!pressure || !work) {
+  auto program = programWork(scope, rejection);
+  if (!pressure || !work || !program) {
     if (!pressure) rejection = "unknown register residency";
     return {};
   }
-  return SupplyEstimate{*work, pressure->total()};
+  return SupplyEstimate{*work, *program, pressure->total()};
 }
 
 ArrayAttr workAttributes(Builder &b, const ReadPolynomial &work) {
   SmallVector<Attribute> terms;
   for (const auto &[key, term] : work) {
-    SmallVector<int64_t> symbols(key.first.begin(), key.first.end());
     terms.push_back(b.getDictionaryAttr({
-        b.getNamedAttr("dynamic_loops", b.getDenseI64ArrayAttr(symbols)),
+        b.getNamedAttr("dynamic_loops", frequencyAttributes(b, key.first)),
         b.getNamedAttr("memory_form", b.getStringAttr(key.second)),
         b.getNamedAttr("read_bytes", b.getI64IntegerAttr(term.bytes)),
         b.getNamedAttr("transfers", b.getI64IntegerAttr(term.transfers))}));
   }
   return b.getArrayAttr(terms);
+}
+
+DictionaryAttr programAttributes(Builder &b, const ProgramWork &work) {
+  SmallVector<Attribute> instructions, opaque;
+  for (const auto &[key, amount] : work.instructions) {
+    instructions.push_back(b.getDictionaryAttr({
+        b.getNamedAttr("dynamic_loops", frequencyAttributes(b, key)),
+        b.getNamedAttr("instruction_work", b.getI64IntegerAttr(amount))}));
+  }
+  for (const auto &[key, amount] : work.opaque) {
+    opaque.push_back(b.getDictionaryAttr({
+        b.getNamedAttr("dynamic_loops", frequencyAttributes(b, key.first)),
+        b.getNamedAttr("physical_work", b.getStringAttr(key.second)),
+        b.getNamedAttr("instances", b.getI64IntegerAttr(amount))}));
+  }
+  return b.getDictionaryAttr({b.getNamedAttr("instructions", b.getArrayAttr(instructions)),
+                              b.getNamedAttr("unpriced", b.getArrayAttr(opaque))});
 }
 
 class SelectSharedSupply : public PassWrapper<SelectSharedSupply, OperationPass<ModuleOp>> {
@@ -514,22 +699,27 @@ public:
         }
         bool selected = before && after && after->registerPeak <= before->registerPeak &&
             after->registerPeak <= kernel.getTarget().getVectorRegisters() &&
+            noAdditionalWork(after->program.instructions, before->program.instructions) &&
+            noAdditionalWork(after->program.opaque, before->program.opaque) &&
             reducesTransfers(after->work, before->work);
         NamedAttrList record;
         record.set("birth", b.getI64IntegerAttr(materialize.getBirthId()));
         record.set("selected", b.getStringAttr(selected ? "reload" : "register"));
-        record.set("cost_basis", b.getStringAttr("actual-full-domain-transfers-by-loop-identity"));
+        record.set("evaluated_candidates", b.getI64IntegerAttr(2));
+        record.set("cost_basis", b.getStringAttr("physical-program-work-with-symbolic-frequency-and-opaque-terms"));
         record.set("decision", b.getStringAttr(!before || !after ? "incomplete-domain-or-residency" :
-            selected ? "no-more-transfers-and-residency" : "retain-shared-value"));
+            selected ? "no-additional-physical-work-and-residency" : "retain-shared-value"));
         if (!beforeFailure.empty()) record.set("register_unavailable", b.getStringAttr(beforeFailure));
         if (!afterFailure.empty()) record.set("reload_unavailable", b.getStringAttr(afterFailure));
         if (before) {
           record.set("register_read_work", workAttributes(b, before->work));
           record.set("register_peak", b.getI64IntegerAttr(before->registerPeak));
+          record.set("register_program_work", programAttributes(b, before->program));
         }
         if (after) {
           record.set("reload_read_work", workAttributes(b, after->work));
           record.set("reload_peak", b.getI64IntegerAttr(after->registerPeak));
+          record.set("reload_program_work", programAttributes(b, after->program));
         }
         decisions.push_back(record.getDictionary(&getContext()));
         if (selected) materialize.setPlacementAttr(b.getStringAttr("reload"));
