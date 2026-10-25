@@ -92,9 +92,10 @@ system C compiler继续负责最终register allocation、machine scheduling、pe
 folding与machine code。生成C中的局部pragma可以阻止system compiler破坏已选physical形态，
 但不能要求它重新发现SIMD、microkernel或pipeline。
 
-RISC-V native 编译默认关闭 Clang SLP vectorizer：已选 scalar replica 不再被重新
-合并成未计入物理资源分析的 RVV value。显式 RVV/IME intrinsic、常量折叠、机器调度
-与最终寄存器分配继续由工具链处理；实际 native 命令随编译 metadata 保存。
+RISC-V native 编译保留 Clang 的常规局部优化。SLP 能合并独立标量运算，也可能扩大
+已选 RVV 程序的最终寄存器压力；不能因某个程序的 spill 就对所有程序禁用它。
+显式 `toolchain.cflags` 可在既有调优配置中约束这类机器优化，实际 native 命令随编译
+metadata 保存。它不改变作者的数值程序，不能代替 Weft 对布局、流水和显式临时存储的选择。
 
 已选循环对齐使用 `[[clang::code_align(N)]]`，与禁止展开的 pragma 一起保留到 LLVM
 loop metadata。GNU statement attribute 的拼写在这项组合中会丢失对齐，不能只凭 C 中

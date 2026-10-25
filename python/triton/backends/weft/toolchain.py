@@ -182,12 +182,6 @@ class Toolchain:
             command = [self.cc, f"--target={self.target}", f"-march={march}", *target_flags,
                        "-O3", "-ffp-contract=fast", "-std=gnu11", "-fPIC", "-shared", "-fopenmp",
                        "-Wl,-Bsymbolic-functions"]
-            if not x86:
-                # RVV packets and scalar replicas already have a selected
-                # physical layout and resource budget. SLP can merge the
-                # replicas back into extra RVV values, introducing register
-                # pressure and spills after that budget has been checked.
-                command.append("-fno-slp-vectorize")
             if self.sysroot:
                 command += [f"--sysroot={self.sysroot}"]
             # resolve() has already checked redundant ISA flags against the
