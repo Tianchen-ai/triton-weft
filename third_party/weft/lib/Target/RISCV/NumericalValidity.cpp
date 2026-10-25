@@ -118,18 +118,26 @@ public:
         result.push_back(bound);
       }
     } else if (auto field = dyn_cast<riscv::FieldOp>(op)) {
-      auto ownerAxes = logicalAxes(field.getOwner().getType());
-      SmallVector<Value> ownerBounds;
-      if (!ownerAxes.empty()) {
-        auto bounds = get(field.getOwner());
-        if (failed(bounds)) return failure();
-        ownerBounds = *bounds;
-      }
-      for (auto [extent, axis] : llvm::zip(type.getShape().asArrayRef(), type.getAxisIds().asArrayRef())) {
-        auto owner = llvm::find(ownerAxes, axis);
-        if (owner != ownerAxes.end()) result.push_back(ownerBounds[owner - ownerAxes.begin()]);
-        else if (extent > 0) result.push_back(arith::ConstantIndexOp::create(b, op->getLoc(), extent));
+      auto owner = dyn_cast<riscv::ValueType>(field.getOwner().getType());
+      if (!owner || owner.getShape().empty() || owner.getShape().asArrayRef().back() <= 0)
+        return failure();
+      auto bounds = get(field.getOwner());
+      if (failed(bounds)) return failure();
+      // FieldOp replaces the complete record coordinate with the declared
+      // field shape. Its final axis may keep the record's identity while its
+      // extent changes (e.g. 256 numeric elements contain 16 group sums).
+      // Only the outer record coordinates are inherited unchanged.
+      size_t outer = owner.getShape().size() - 1;
+      auto loc = op->getLoc();
+      Value capacity = arith::ConstantIndexOp::create(b, loc, owner.getShape().asArrayRef().back());
+      Value complete = b.createOrFold<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, bounds->back(), capacity);
+      Value zero = arith::ConstantIndexOp::create(b, loc, 0);
+      for (auto [position, extent] : llvm::enumerate(type.getShape().asArrayRef())) {
+        Value bound;
+        if (position < outer) bound = (*bounds)[position];
+        else if (extent > 0) bound = arith::ConstantIndexOp::create(b, loc, extent);
         else return failure();
+        result.push_back(b.createOrFold<arith::SelectOp>(loc, complete, bound, zero));
       }
     } else if (isa<riscv::FieldReadOp, riscv::ConvertLayoutOp,
                    riscv::RegisterMaterializeOp, riscv::MaterializeOp>(op)) {
