@@ -144,6 +144,81 @@ public:
 class LegalizeSubbyteProjections
     : public PassWrapper<LegalizeSubbyteProjections, OperationPass<ModuleOp>> {
   bool selectedConsumersOnly;
+  void materializeInterleavedFields(IRRewriter &b) {
+    SmallVector<arith::AndIOp> roots;
+    getOperation().walk([&](arith::AndIOp op) { roots.push_back(op); });
+    int64_t selected = 0;
+    for (auto root : roots) {
+      auto type = dyn_cast<VectorType>(root.getType());
+      if (!type || type.isScalable() || type.getRank() != 1 ||
+          !type.getElementType().isInteger(8) || type.getNumElements() % 8) continue;
+      Value shifted;
+      DenseIntElementsAttr mask;
+      for (unsigned side = 0; side < 2; ++side) {
+        DenseIntElementsAttr literal;
+        if (matchPattern(root->getOperand(side), m_Constant(&literal)) && literal.isSplat()) {
+          mask = literal; shifted = root->getOperand(1 - side); break;
+        }
+      }
+      if (!mask || !shifted.hasOneUse()) continue;
+      if (auto narrow = shifted.getDefiningOp<arith::TruncIOp>()) {
+        shifted = narrow.getIn();
+        if (!shifted.hasOneUse()) continue;
+      }
+      auto shift = shifted.getDefiningOp<arith::ShRUIOp>();
+      if (!shift) continue;
+      Value bytes = shift.getLhs();
+      if (auto widen = bytes.getDefiningOp<arith::ExtUIOp>()) bytes = widen.getIn();
+      auto duplicate = bytes.getDefiningOp<vector::ShuffleOp>();
+      if (!duplicate || duplicate.getType() != type || !bytes.hasOneUse()) continue;
+      const int64_t half = type.getNumElements() / 2;
+      auto inputType = dyn_cast<VectorType>(duplicate.getV1().getType());
+      auto function = root->getParentOfType<func::FuncOp>();
+      auto bits = function ? function->getAttrOfType<IntegerAttr>("weft.x86.vector_bits") : IntegerAttr();
+      if (!inputType || !bits || inputType.getRank() != 1 || inputType.isScalable() ||
+          !inputType.getElementType().isInteger(8) || inputType.getNumElements() != half ||
+          half * 8 > bits.getInt()) continue;
+      auto indices = duplicate.getMask();
+      bool second = indices.front() == half;
+      bool identity = true;
+      for (int64_t lane = 0; lane < type.getNumElements(); ++lane)
+        identity &= indices[lane] == (second ? half : 0) + lane / 2;
+      DenseIntElementsAttr shifts;
+      if (!identity || !matchPattern(shift.getRhs(), m_Constant(&shifts))) continue;
+      SmallVector<APInt> amounts(shifts.getValues<APInt>());
+      const uint64_t first = amounts[0].getLimitedValue(), next = amounts[1].getLimitedValue();
+      if (first == next || first >= 8 || next >= 8) continue;
+      bool alternating = true;
+      for (int64_t lane = 0; lane < type.getNumElements(); ++lane)
+        alternating &= amounts[lane].getLimitedValue() == (lane % 2 ? next : first);
+      const uint64_t observed = mask.getSplatValue<APInt>().getZExtValue();
+      // A packed word shift can bring in the next byte's high bits. The
+      // original field mask must exclude every such cross-byte contribution.
+      if (!alternating || (observed >> (8 - std::max(first, next)))) continue;
+      b.setInsertionPoint(root);
+      Location loc = root.getLoc();
+      auto wordType = VectorType::get({half / 4}, b.getI32Type());
+      Value source = second ? duplicate.getV2() : duplicate.getV1();
+      Value words = vector::BitCastOp::create(b, loc, wordType, source);
+      auto plane = [&](uint64_t amount) -> Value {
+        if (!amount) return source;
+        auto constant = arith::ConstantOp::create(b, loc, wordType,
+            DenseElementsAttr::get(wordType, b.getI32IntegerAttr(amount)));
+        Value shiftedWords = arith::ShRUIOp::create(b, loc, words, constant);
+        return vector::BitCastOp::create(b, loc, inputType, shiftedWords);
+      };
+      SmallVector<int64_t> interleave;
+      for (int64_t lane = 0; lane < half; ++lane) {
+        interleave.push_back(lane); interleave.push_back(half + lane);
+      }
+      Value joined = vector::ShuffleOp::create(b, loc, plane(first), plane(next), interleave);
+      auto observedMask = arith::ConstantOp::create(b, loc, type, mask);
+      b.replaceOpWithNewOp<arith::AndIOp>(root, joined, observedMask);
+      ++selected;
+    }
+    if (selected) getOperation()->setAttr("weft.x86.interleaved_byte_fields",
+        b.getI64IntegerAttr(selected));
+  }
   void materializeBytePlanes(IRRewriter &b) {
     SmallVector<arith::ShLIOp> shifts;
     getOperation().walk([&](arith::ShLIOp shift) { shifts.push_back(shift); });
@@ -276,6 +351,7 @@ public:
       b.replaceOp(extension, value);
     }
     materializeBytePlanes(b);
+    materializeInterleavedFields(b);
   }
 };
 
