@@ -1,6 +1,8 @@
 #include "NumericalValidity.h"
 #include "LocalMemory.h"
 #include "Weft/Analysis/ReductionIdentity.h"
+#include "Weft/Analysis/LogicalAxes.h"
+#include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "RISCVPhysicalSupport.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -27,6 +29,25 @@ class ActiveExtents {
   IRRewriter &b;
   unsigned remaining = 256;
   DenseMap<Value, SmallVector<Value>> known;
+  DenseMap<std::pair<Value, int64_t>, bool> completeness;
+  bool completeOrEmpty(Value bound, int64_t capacity, unsigned depth = 0) {
+    auto key = std::make_pair(bound, capacity);
+    if (auto found = completeness.find(key); found != completeness.end()) return found->second;
+    if (depth > 16 || !remaining) return false;
+    --remaining;
+    completeness[key] = false;
+    bool result = false;
+    if (auto fixed = riscv::denseConstantIndex(bound))
+      result = *fixed == 0 || *fixed == capacity;
+    else if (auto select = bound.getDefiningOp<arith::SelectOp>())
+      result = completeOrEmpty(select.getTrueValue(), capacity, depth + 1) &&
+               completeOrEmpty(select.getFalseValue(), capacity, depth + 1);
+    else if (auto minimum = bound.getDefiningOp<arith::MinUIOp>())
+      result = completeOrEmpty(minimum.getLhs(), capacity, depth + 1) &&
+               completeOrEmpty(minimum.getRhs(), capacity, depth + 1);
+    completeness[key] = result;
+    return result;
+  }
 public:
   explicit ActiveExtents(IRRewriter &b) : b(b) {}
   FailureOr<SmallVector<Value>> get(Value value) {
@@ -63,19 +84,26 @@ public:
         if (kind == "gather") {
           auto indexType = dyn_cast<riscv::ValueType>(coordinate.getType());
           auto range = riscv_internal::integerRange(coordinate);
-          APInt extent;
+          auto extent = riscv::denseConstantIndex((*incoming)[axis]);
+          int64_t capacity = extent.value_or(input.getShape()[axis]);
+          bool guarded = !extent && capacity > 0 && completeOrEmpty((*incoming)[axis], capacity);
           // Arbitrary gather holes cannot be represented by rectangular bounds.
           // Preserve the index domain only when every index is in the saved
           // source domain, not merely in its nominal storage capacity.
-          if (!indexType || !range || range->minimum.isNegative() ||
-              !matchPattern((*incoming)[axis], m_ConstantInt(&extent)) ||
-              extent.isNegative() ||
-              llvm::APSInt::compareValues(range->maximum, llvm::APSInt(extent, true)) >= 0)
+          if (!indexType || (guarded && indexType.getShape().empty()) || !range || range->minimum.isNegative() ||
+              (!extent && !guarded) || capacity <= 0 ||
+              llvm::APSInt::compareValues(range->maximum, llvm::APSInt(APInt(64, capacity), true)) >= 0)
             return failure();
           auto indices = get(coordinate);
           if (failed(indices)) return failure();
+          Value nonempty, zero;
+          if (guarded) {
+            zero = arith::ConstantIndexOp::create(b, op->getLoc(), 0);
+            nonempty = b.createOrFold<arith::CmpIOp>(op->getLoc(), arith::CmpIPredicate::ne,
+                                                   (*incoming)[axis], zero);
+          }
           for (auto [id, bound] : llvm::zip(indexType.getAxisIds().asArrayRef(), *indices))
-            retain(id, bound);
+            retain(id, guarded ? b.createOrFold<arith::SelectOp>(op->getLoc(), nonempty, bound, zero) : bound);
           continue;
         }
         if (kind != "domain" || !isa<riscv::PointType>(coordinate.getType())) return failure();
@@ -144,6 +172,44 @@ public:
       auto extents = get(op->getOperand(0));
       if (failed(extents)) return failure();
       result = *extents;
+    } else if (auto reshape = dyn_cast<riscv::ReshapeOp>(op)) {
+      auto input = reshape.getInput().getType();
+      auto incoming = get(reshape.getInput());
+      auto order = analysis::axisPermutation(input.getAxisIds().asArrayRef(), reshape.getOrder());
+      if (failed(incoming) || !order) return failure();
+      // A pure permutation/rename retains rectangular bounds positionally.
+      bool sameShape = order->size() == type.getShape().size();
+      if (sameShape)
+        for (auto [position, source] : llvm::enumerate(*order))
+          sameShape &= input.getShape()[source] == type.getShape()[position];
+      if (sameShape) {
+        for (unsigned source : *order) result.push_back((*incoming)[source]);
+      } else {
+        // An arbitrary partial rectangle need not remain rectangular after a
+        // reshape. Complete or empty snapshots do, including guarded encoded
+        // records; keep their guard instead of promoting capacity to validity.
+        unsigned prefix = 0;
+        while (prefix < order->size() && prefix < type.getShape().size() &&
+               input.getShape()[(*order)[prefix]] == type.getShape()[prefix]) {
+          result.push_back((*incoming)[(*order)[prefix]]);
+          ++prefix;
+        }
+        Value full = arith::ConstantIntOp::create(b, op->getLoc(), 1, 1);
+        Value zero = arith::ConstantIndexOp::create(b, op->getLoc(), 0);
+        for (unsigned source : ArrayRef<unsigned>(*order).drop_front(prefix)) {
+          Value bound = (*incoming)[source];
+          int64_t capacity = input.getShape()[source];
+          if (capacity <= 0 || !completeOrEmpty(bound, capacity)) return failure();
+          Value maximum = arith::ConstantIndexOp::create(b, op->getLoc(), capacity);
+          Value present = b.createOrFold<arith::CmpIOp>(op->getLoc(), arith::CmpIPredicate::eq, bound, maximum);
+          full = b.createOrFold<arith::AndIOp>(op->getLoc(), full, present);
+        }
+        for (int64_t capacity : type.getShape().asArrayRef().drop_front(prefix)) {
+          if (capacity <= 0) return failure();
+          Value maximum = arith::ConstantIndexOp::create(b, op->getLoc(), capacity);
+          result.push_back(b.createOrFold<arith::SelectOp>(op->getLoc(), full, maximum, zero));
+        }
+      }
     } else if (isa<riscv::ReduceOp, riscv::RVVStreamFinalizeOp>(op)) {
       // Reduction removes its contracted axes; every surviving coordinate
       // retains the producer's domain. Stream accumulators are fully defined
@@ -168,8 +234,8 @@ public:
         auto tableExtents = get(lookup.getTable());
         if (failed(tableExtents)) return failure();
         for (auto [bound, expected] : llvm::zip(*tableExtents, table.getShape().asArrayRef())) {
-          APInt actual;
-          if (!matchPattern(bound, m_ConstantInt(&actual)) || actual.getSExtValue() != expected) return failure();
+          auto actual = riscv::denseConstantIndex(bound);
+          if (!actual || *actual != expected) return failure();
         }
       } else if (!isa<riscv::MemDescType>(lookup.getTable().getType())) {
         return failure();

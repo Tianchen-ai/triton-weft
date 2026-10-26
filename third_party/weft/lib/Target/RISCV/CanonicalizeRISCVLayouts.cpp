@@ -688,6 +688,12 @@ public:
               legalRematerialization = false;
               break;
             }
+            if (required.getCarrier() == "rvv" &&
+                !riscv::hasLegalRVVIndexedEMUL(required, targetType.getLayout().getSew(),
+                                              targetType.getLayout().getLmulEighths())) {
+              legalRematerialization = false;
+              break;
+            }
             // An index made from pure iota/pointwise values can be rebuilt in
             // the consumer layout even when concatenating its old parts would
             // change axis order. The same bounded path must close every input.

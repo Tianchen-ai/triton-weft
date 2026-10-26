@@ -473,29 +473,6 @@ bool sameAxisMapping(ValueType lhs, size_t lhsIndex, ValueType rhs,
          left.getLocalFactors()[lhsIndex] == right.getLocalFactors()[rhsIndex];
 }
 
-bool hasLegalRVVIndexedEMUL(LayoutAttr indexLayout, int64_t dataSEW,
-                            int64_t dataLMULEighths) {
-  if (!indexLayout || indexLayout.getCarrier() != "rvv" ||
-      indexLayout.getSew() <= 0 || indexLayout.getLmulEighths() <= 0 ||
-      dataSEW <= 0 || dataLMULEighths <= 0 ||
-      indexLayout.getLmulEighths() >
-          std::numeric_limits<int64_t>::max() / dataSEW ||
-      dataLMULEighths >
-          std::numeric_limits<int64_t>::max() / indexLayout.getSew())
-    return false;
-  // RVV indexed memory operations use the data LMUL and index EEW to
-  // determine the index EMUL.  The selected index value must carry exactly
-  // that EMUL; spelling an arbitrary index/result pair is not a legal leaf.
-  return indexLayout.getLmulEighths() * dataSEW ==
-         dataLMULEighths * indexLayout.getSew();
-}
-
-bool hasLegalRVVIndexedEMUL(ValueType indices, ValueType result) {
-  return indices && result && result.getLayout().getCarrier() == "rvv" &&
-         hasLegalRVVIndexedEMUL(indices.getLayout(), result.getLayout().getSew(),
-                                result.getLayout().getLmulEighths());
-}
-
 std::optional<int64_t> physicalPartCount(ValueType value) {
   auto time =
       checkedPositiveProduct(value.getLayout().getTimeFactors().asArrayRef());

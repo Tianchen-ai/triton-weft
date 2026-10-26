@@ -231,6 +231,9 @@ free-axis 对齐和完整分组范围，再展开为闭合 primitive 内的 type
 `NumericalValidity` 沿提取、转换、pointwise、普通 `for/while/if`、Level 和 helper 返回传递对应的
 物理 SSA 谓词，最终作用于 memory effect。谓词随实际执行的控制路径传递，不重新读取
 原输入来重建快照。尚无闭合传播规则的消费者明确拒绝，不能默认为完整有效。
+整数分组输入的有效范围沿 lookup、字段 gather 和 reshape 保留。索引已证明落在容量内、
+而原字段只可能完整或为空时，gather 仍携带原字段的非空条件。reshape 保留未改变的
+前缀维度及其尾部；只对完整或空的后缀重排矩形范围，不把任意部分矩形当作完整数据。
 谓词的逻辑域覆盖整个容量，非活动位置明确为 false。谓词合取与选择使用私有坐标
 别名完成，再投影回原数值轴，避免外层数值 tail 的 VL 截短谓词本身；同域的单一
 谓词直接复用，不为窄化后再扩宽额外生成向量合取。
@@ -360,10 +363,11 @@ target 合法性判据，memory reads 和外层 traversal 不变；其 window pr
 或完整 lane 范围不能约束 consumer 新增的轴；同名 singleton 被扩展时也不是相同坐标表示。
 完整同域 control/cast 仍传递完整约束，目标端必要的表示转换保持显式。
 
-静态 full RVV 值的行主序 reshape 可保留由 time、replica 与 lane 共同形成的 register tuple。
+静态容量的 RVV 值在行主序 reshape 后可保留由 time、replica 与 lane 共同形成的 register tuple。
 pass 将已有 physical radices 分配到结果各轴，并用 `RegisterCoordinates` 逐项核对
 每个 `(part, lane)` 的线性元素序号；只相等的总元素数不足以通过。reshape 本身保持
-SEW、LMUL、VL 与驻留数，consumer 需要其它分布时插入显式 `convert_layout`。
+SEW、LMUL、VL、原有效域标签与驻留数，consumer 需要其它分布时插入显式 `convert_layout`。
+尾部不妨碍相同 carrier 的坐标重命名；有效范围继续由数值有效域传播处理，不能因 reshape 变成 full。
 该规则支持标准 `tl.sum` 的展平路径，不将 replica 数据误当成一个更宽 vector 的已有 lanes。
 完整轴置换在 lane radices 和顺序相同时，以代数证明 lane 映射，只枚举 register parts
 的置换；不因完整 tile 超过小型逐元素分析上限而拒绝可表示的转置。其余 lane 重排仍
@@ -371,6 +375,9 @@ SEW、LMUL、VL 与驻留数，consumer 需要其它分布时插入显式 `conve
 
 control carry 的最终 type 必须先确定，再闭合其下游 reshape，避免后续循环结果调整
 使已经验证的 reshape 映射失效。
+被消除的轴若只占 issue time、而其它 SIMD 轴仍存活，composite pass 将其完整 time 域
+转换为现有 register replicas，再由相同的 add/max/min 归约实现消费；不能因为初始
+replica factor 为 1 而遗漏该数值域。转换后的完整驻留重新进入资源分析。
 
 完整 numeric lookup table 可以由纯计算产生。若其完整坐标域能放入消费者的 register
 group，而两端 LMUL 不同，使用该 lookup edge 上的显式 conversion 适配寄存器容量；
@@ -684,13 +691,19 @@ conversion 的同 block 区间没有写入或未知 effect，允许移除这条�
 同位宽 integer Cast 可随 conversion 重物化，但其 input/result 必须采用完全相同的
 目标 layout，不能在 reinterpret intrinsic 内隐式改变 LMUL 或 logical mapping。
 indexed Extract 的 index 投影可以沿单 use 纯 pointwise 链和 iota 重物化；预检查至多访问
-32 个索引节点，并逐输入核对可执行的 layout projection。不能直接拼接旧 lane parts，
+32 个索引节点，并逐输入核对可执行的 layout projection 和与 verifier 共用的 index EMUL 合同。
+投影去掉部分 lane 轴时不能只比较元素数而忽略 index EEW/data SEW 所要求的寄存器比例。
+不能直接拼接旧 lane parts，
 不等于该纯 index 程序不能在目标 layout 中重新形成；memory producer 不由这条规则复制。
+内存规划同样使用这条 EMUL 合同。索引在自由轴上广播时，先以索引所承载的 lane 域完成
+读取，再由显式 conversion 形成消费者的合并 lane 布局；不能只扩大数据 LMUL 而沿用窄索引。
 若 Extract 仍投影 grouped/layered storage，不能把超过对应 storage layer 的 SIMD lane
 span 向读取侧重物化；保留合法窗口读取后的显式 numeric pack，而不是制造未闭合的跨层读取。
 若最小合法 LMUL 使 source part 留有空余 capacity，part-to-lane pack 仍按 pieces 倍率
 使用闭合的中间 carrier，再显式缩到 consumer LMUL；pure conversion 合成不得消除这个
 必需中间表示。两条边保持完整逻辑坐标、VL 与读取点，资源按实际 carrier 重新闭合。
+局部多轴读取展平时，仍在活动 Level 中的尾部轴不能复用为合并后的线性轴，否则行数会被
+误当成元素数。局部 gather 的寄存器坐标相对于已建立的私有 Value，不再加外层 Level 起点。
 
 单 use memory lookup 接 scalar conversion 时，在同 block 无跨写入的条件下，可以将
 indices 投影为 consumer 的 scalar time/replica mapping 并直接 scalar lookup。新的 memory

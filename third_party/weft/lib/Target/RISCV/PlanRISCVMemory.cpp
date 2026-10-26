@@ -3270,11 +3270,15 @@ std::optional<riscv::ValueType> linearLocalCarrier(
   // Preserve every active prefix axis. Only complete fixed-index suffixes can
   // be merged: a Level point on a merged axis would need a different bound.
   if (layout.getValidity() == "tail")
-    for (mlir::Operation *scope = access; scope && scope->getBlock(); scope = scope->getParentOp())
+    for (mlir::Operation *scope = access; scope && scope->getBlock(); scope = scope->getParentOp()) {
+      if (auto loop = mlir::dyn_cast<riscv::LoopOp>(scope);
+          loop && llvm::is_contained(suffix, loop.getDomain().getType().getAxisId()))
+        return std::nullopt;
       for (mlir::Operation *previous = scope->getPrevNode(); previous; previous = previous->getPrevNode())
         if (auto point = mlir::dyn_cast<riscv::PhysicalPointOp>(previous);
             point && llvm::is_contained(suffix, point.getType().getDomain().getAxisId()))
           return std::nullopt;
+    }
   if (llvm::any_of(layout.getReplicaFactors().asArrayRef().drop_front(first),
                    [](int64_t n) { return n != 1; })) return std::nullopt;
   auto extent = riscv_internal::staticProduct(type.getShape().asArrayRef().drop_front(first));
@@ -3873,6 +3877,33 @@ public:
             builder, "rvv", "extract", "rvv.extract.vrgather",
             "rvv.extract.vrgather", 0, 0));
         return;
+      }
+      if (indexValue && resultValue && indexValue.getLayout().getCarrier() == "rvv" &&
+          resultValue.getLayout().getCarrier() == "rvv" &&
+          !riscv::hasLegalRVVIndexedEMUL(indexValue, resultValue)) {
+        // The index can broadcast over free axes, but those axes cannot enlarge
+        // the indexed load's data LMUL without enlarging its index EMUL too.
+        // Read in the index coordinate domain and represent the consumer's
+        // coalesced carrier on a separate, ordinary layout-conversion edge.
+        auto target = operation->getParentOfType<riscv::KernelOp>().getTarget();
+        auto layout = riscv_internal::projectLayout(builder, resultValue,
+                                                     indexValue.getLayout(), target);
+        auto supplied = layout ? mlir::cast<riscv::ValueType>(
+            riscv_internal::withLayout(resultValue, layout)) : riscv::ValueType();
+        if (!supplied || !riscv::hasLegalRVVIndexedEMUL(indexValue, supplied)) {
+          operation.emitError("indexed gather has no legal data carrier for its index EEW and domain");
+          failed = true;
+          return;
+        }
+        rewriter.setInsertionPointAfter(operation);
+        operation.getResult().setType(supplied);
+        auto conversion = riscv::ConvertLayoutOp::create(rewriter, operation.getLoc(),
+            resultValue, operation.getResult(),
+            riscv_internal::layoutConversion(builder, layout, resultValue.getLayout()),
+            riscv::AccessAttr(), riscv_internal::unselectedLeaf(builder));
+        riscv_internal::copyOrigin(operation, conversion);
+        operation.getResult().replaceAllUsesExcept(conversion.getResult(), conversion);
+        resultValue = supplied;
       }
       // Encoded fields use the local carrier because their bytes are not yet a
       // numerical register value.  They nevertheless retain an encoded memory

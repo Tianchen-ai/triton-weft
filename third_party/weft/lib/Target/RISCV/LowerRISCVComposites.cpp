@@ -912,7 +912,7 @@ private:
       const int64_t axis = reduce.getAxis();
       if (axis < 0 || axis >= static_cast<int64_t>(input.getShape().size()) ||
           layout.getReplicaGroup() != 1 || layout.getTimeFactors()[axis] <= 1 ||
-          layout.getReplicaFactors()[axis] <= 1 || layout.getLaneFactors()[axis] != 1 ||
+          layout.getLaneFactors()[axis] != 1 ||
           layout.getFragmentFactors()[axis] != 1 || layout.getLocalFactors()[axis] != 1)
         continue;
       llvm::SmallVector<int64_t> time(layout.getTimeFactors().asArrayRef());

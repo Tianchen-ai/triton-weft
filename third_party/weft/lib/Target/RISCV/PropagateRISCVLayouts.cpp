@@ -1840,7 +1840,7 @@ riscv::LayoutAttr reshapeCarrierLayout(mlir::Builder &builder,
   // preserve one vector. Distribute the existing physical radices over the
   // result axes, then prove every (part, lane) still names the same element.
   // Counts alone are insufficient for interleaved or padded distributions.
-  if (layout.getReplicaGroup() == 1 && layout.getValidity() == "full" &&
+  if (layout.getReplicaGroup() == 1 &&
       llvm::all_of(result.getShape().asArrayRef(), [](int64_t n) { return n > 0; }) &&
       llvm::all_of(layout.getFragmentFactors().asArrayRef(), [](int64_t n) { return n == 1; }) &&
       llvm::all_of(layout.getLocalFactors().asArrayRef(), [](int64_t n) { return n == 1; })) {

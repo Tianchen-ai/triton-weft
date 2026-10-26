@@ -68,6 +68,10 @@ bool hasIdenticalReshapeCarrier(ValueType input, ValueType result,
                                llvm::ArrayRef<int64_t> order);
 // Row-major reassociation that preserves the physical part and lane address.
 bool hasIdenticalLinearCarrier(ValueType input, ValueType result);
+// Indexed memory uses the data LMUL and index EEW to determine index EMUL.
+bool hasLegalRVVIndexedEMUL(LayoutAttr indices, int64_t dataSEW,
+                            int64_t dataLMULEighths);
+bool hasLegalRVVIndexedEMUL(ValueType indices, ValueType result);
 // Whole-register renaming only: every destination lane keeps its source lane.
 std::optional<llvm::SmallVector<int64_t>> reshapeCarrierParts(
     ValueType input, ValueType result, llvm::ArrayRef<int64_t> order);

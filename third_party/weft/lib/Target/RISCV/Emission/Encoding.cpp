@@ -502,10 +502,8 @@ mlir::LogicalResult Emitter::compileExtract(riscv::ExtractOp operation) {
           if (registerAxis != registerAxes.end())
             coordinate = std::to_string(
                 (*coordinates)[registerAxis - registerAxes.begin()]);
-          auto scope = axisScopes.find(axis);
-          if (scope != axisScopes.end() && !scope->second.empty())
-            coordinate = "(" + scope->second.back().base + " + " +
-                         coordinate + ")";
+          // LocalBind stores this Value's private coordinates. Its enclosing
+          // Level origin has already been applied by the snapshot producer.
           baseElements = "(" + baseElements + " + (" + coordinate +
                          ") * (" + elementStrides[dimension] + "))";
         }

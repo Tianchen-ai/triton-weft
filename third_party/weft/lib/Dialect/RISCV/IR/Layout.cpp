@@ -8,6 +8,23 @@
 
 using namespace weft::riscv;
 
+bool weft::riscv::hasLegalRVVIndexedEMUL(LayoutAttr indices, int64_t dataSEW,
+                                       int64_t dataLMULEighths) {
+  if (!indices || indices.getCarrier() != "rvv" ||
+      indices.getSew() <= 0 || indices.getLmulEighths() <= 0 ||
+      dataSEW <= 0 || dataLMULEighths <= 0 ||
+      indices.getLmulEighths() > std::numeric_limits<int64_t>::max() / dataSEW ||
+      dataLMULEighths > std::numeric_limits<int64_t>::max() / indices.getSew())
+    return false;
+  return indices.getLmulEighths() * dataSEW == dataLMULEighths * indices.getSew();
+}
+
+bool weft::riscv::hasLegalRVVIndexedEMUL(ValueType indices, ValueType result) {
+  return indices && result && result.getLayout().getCarrier() == "rvv" &&
+         hasLegalRVVIndexedEMUL(indices.getLayout(), result.getLayout().getSew(),
+                               result.getLayout().getLmulEighths());
+}
+
 std::optional<llvm::SmallVector<unsigned>>
 weft::riscv::regularRepeatRecordPositions(ValueType field, ValueType result,
                                         int64_t sourceAxis, int64_t reductionAxis) {
