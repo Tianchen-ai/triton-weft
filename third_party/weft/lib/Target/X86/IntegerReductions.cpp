@@ -847,6 +847,81 @@ std::optional<weft::IntegerPairResult> weft::selectX86IntegerQuads(
   return IntegerPairResult{sum, active};
 }
 
+std::optional<weft::IntegerPairResult> weft::selectX86IntegerGroups(
+    ModuleOp module, OpBuilder &b, Location loc, Value lhs, Value rhs,
+    Value lhsValid, Value rhsValid, IntegerType lhsElement,
+    IntegerType rhsElement, int64_t group, unsigned resultBits,
+    const X86Target &target) {
+  auto input = dyn_cast<VectorType>(lhs.getType());
+  if (!input || input.getRank() != 1 || input.isScalable() || group <= 4 ||
+      group % 2 || !resultBits || resultBits > 32 ||
+      input.getNumElements() % group)
+    return {};
+  const int64_t quantum = group % 4 == 0 ? 4 : 2;
+  auto selected = quantum == 4
+      ? selectX86IntegerQuads(module, b, loc, lhs, rhs, lhsValid, rhsValid,
+                             lhsElement, rhsElement, target)
+      : selectX86IntegerPairs(module, b, loc, lhs, rhs, lhsValid, rhsValid,
+                             lhsElement, rhsElement, 32, target.vectorBits);
+  if (!selected) return {};
+  const int64_t outputs = input.getNumElements() / group;
+  const int64_t partials = group / quantum;
+  if (outputs >= 4 && outputs <= 64 && llvm::isPowerOf2_64(outputs) &&
+      partials <= 32 && llvm::isPowerOf2_64(partials)) {
+    // Expose the same independent reductions consumed by the existing
+    // PHADDD grouping pass. Keeping its native lane topology avoids a
+    // whole-vector interleave permutation at every group-tree level.
+    SmallVector<Value> sums, activity;
+    for (int64_t output = 0; output < outputs; ++output) {
+      SmallVector<int64_t> indices;
+      for (int64_t term = 0; term < partials; ++term)
+        indices.push_back(output * partials + term);
+      Value values = vector::ShuffleOp::create(b, loc, selected->value, selected->value, indices);
+      Value valid = vector::ShuffleOp::create(b, loc, selected->valid, selected->valid, indices);
+      sums.push_back(vector::ReductionOp::create(b, loc, vector::CombiningKind::ADD, values));
+      activity.push_back(vector::ReductionOp::create(b, loc, vector::CombiningKind::OR, valid));
+    }
+    selected->value = vector::FromElementsOp::create(b, loc,
+        VectorType::get({outputs}, b.getI32Type()), sums);
+    selected->valid = vector::FromElementsOp::create(b, loc,
+        VectorType::get({outputs}, b.getI1Type()), activity);
+  } else for (int64_t terms = partials; terms > 1;
+              terms = llvm::divideCeil(terms, int64_t{2})) {
+    SmallVector<int64_t> even, odd;
+    SmallVector<bool> hasSecond;
+    for (int64_t output = 0; output < outputs; ++output) {
+      for (int64_t term = 0; term < terms; term += 2) {
+        even.push_back(output * terms + term);
+        odd.push_back(output * terms + std::min(term + 1, terms - 1));
+        hasSecond.push_back(term + 1 < terms);
+      }
+    }
+    auto project = [&](Value value, ArrayRef<int64_t> indices) -> Value {
+      return vector::ShuffleOp::create(b, loc, value, value, indices);
+    };
+    Value left = project(selected->value, even), right = project(selected->value, odd);
+    Value leftValid = project(selected->valid, even), rightValid = project(selected->valid, odd);
+    if (terms % 2) {
+      auto maskType = cast<VectorType>(rightValid.getType());
+      auto keep = arith::ConstantOp::create(b, loc, maskType,
+          DenseElementsAttr::get(maskType, ArrayRef<bool>(hasSecond)));
+      auto zeros = arith::ConstantOp::create(b, loc, right.getType(),
+          DenseElementsAttr::get(cast<VectorType>(right.getType()), b.getI32IntegerAttr(0)));
+      right = arith::SelectOp::create(b, loc, keep, right, zeros);
+      rightValid = arith::AndIOp::create(b, loc, keep, rightValid);
+    }
+    selected->value = arith::AddIOp::create(b, loc, left, right);
+    selected->valid = arith::OrIOp::create(b, loc, leftValid, rightValid);
+  }
+  // Modular reassociation is confined to one author group; narrowing stays
+  // before the next source operation, including a subsequent explicit widen.
+  if (resultBits < 32)
+    selected->value = arith::TruncIOp::create(b, loc,
+        cast<VectorType>(selected->value.getType()).clone(b.getIntegerType(resultBits)),
+        selected->value);
+  return selected;
+}
+
 std::unique_ptr<Pass> weft::createX86IntegerReductionPass() {
   return std::make_unique<SelectIntegerReductions>();
 }

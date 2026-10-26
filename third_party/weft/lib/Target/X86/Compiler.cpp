@@ -2320,6 +2320,11 @@ private:
     }
     auto domain = weft::analysis::groupedAxes(inputDomains, {outputShape, outputAxes}, group);
     if (!domain) return op.emitError("grouped arithmetic has no complete logical axis/group relation");
+    if (group > 1048576 / volume(outputShape)) {
+      auto diagnostic = op.emitError("x86 static grouped operation exceeds the 1048576 element-issue budget; use source tiles");
+      diagnostic.getUnderlyingDiagnostic()->getMetadata().emplace_back(StringRef("weft.candidate.resource-limit"));
+      return failure();
+    }
     if (group == 2 && sources.size() == 1 && element(result).isInteger(32)) {
       auto input = dyn_cast<IntegerType>(element(sources.front().getType()));
       if (input && input.getWidth() <= (input.isUnsigned() ? 15u : 16u)) {
@@ -2334,7 +2339,7 @@ private:
         }
       }
     }
-    if ((group == 2 || group == 4) && sources.size() == 2 &&
+    if (group % 2 == 0 && sources.size() == 2 &&
         shape(sources[0].getType()).back() == outputShape.back() * group &&
         shape(sources[1].getType()).back() == outputShape.back() * group) {
       auto lhsElement = dyn_cast<IntegerType>(element(sources[0].getType()));
@@ -2351,6 +2356,9 @@ private:
         Value lhsValid = broadcast(loc, valid(sources[0], loc), maskType(sources[0].getType()), maskType(lhsType));
         Value rhsValid = broadcast(loc, valid(sources[1], loc), maskType(sources[1].getType()), maskType(rhsType));
         std::optional<weft::IntegerPairResult> selected;
+        if (group > 4)
+          selected = weft::selectX86IntegerGroups(module, b, loc, lhs, rhs, lhsValid, rhsValid,
+              lhsElement, rhsElement, group, resultElement.getWidth(), target);
         if (group == 4 && resultElement.getWidth() <= 32) {
           selected = weft::selectX86IntegerQuads(module, b, loc, lhs, rhs, lhsValid, rhsValid,
               lhsElement, rhsElement, target);
@@ -2370,11 +2378,6 @@ private:
           return success();
         }
       }
-    }
-    if (group > 1048576 / volume(outputShape)) {
-      auto diagnostic = op.emitError("x86 static grouped operation exceeds the 1048576 element-issue budget; use source tiles");
-      diagnostic.getUnderlyingDiagnostic()->getMetadata().emplace_back(StringRef("weft.candidate.resource-limit"));
-      return failure();
     }
     Type physical = physicalType(result), maskPhysical = physicalType(maskType(result));
     Value accumulator = zero(loc, physical), active = zero(loc, maskPhysical);
