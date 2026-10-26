@@ -33,7 +33,10 @@ std::optional<weft::analysis::IntegerRange> numericRange(Value value, IntegerTyp
     weft::analysis::IntegerExpression result{signedType(element.getWidth())};
     if (call.getCallee() == "llvm.x86.avx2.pshuf.b" || call.getCallee() == "llvm.x86.avx512.pshuf.b.512") {
       result.type = unsignedType(element.getWidth()); result.kind = Kind::ZeroOr;
-      result.inputs = {call.getOperand(0)}; result.interpretations = {result.type};
+      // Byte permutation preserves bits, including signed values. Interpret
+      // the selected table in the caller's numerical context, not as an
+      // unsigned arithmetic operation that discards a signed range proof.
+      result.inputs = {call.getOperand(0)};
     } else if (call.getCallee() == "llvm.x86.avx512.vpdpbusd.128" ||
                call.getCallee() == "llvm.x86.avx512.vpdpbusd.256" ||
                call.getCallee() == "llvm.x86.avx512.vpdpbusd.512") {
