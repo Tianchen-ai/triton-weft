@@ -310,6 +310,25 @@ std::optional<uint64_t> packingPeak(Packing &candidate, Operation *before,
   return peak;
 }
 
+void relocatePacking(Packing &packing, Operation *destination,
+                     ArrayRef<Operation *> producers,
+                     const IRMapping *mapping = nullptr) {
+  // Move one closed initializer in its original physical order. Grouping all
+  // producers before all stores needlessly keeps every packet alive at once.
+  // Preorder also preserves dependencies coming from enclosing blocks; the
+  // movable-slice proof admits only pure operations without nested regions.
+  llvm::SmallPtrSet<Operation *, 32> selected(producers.begin(), producers.end());
+  selected.insert(packing.allocation);
+  selected.insert(packing.initializerAliases.begin(), packing.initializerAliases.end());
+  for (auto store : packing.stores) selected.insert(store);
+  SmallVector<Operation *> ordered;
+  packing.allocation->getParentOfType<func::FuncOp>().walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (selected.contains(op)) ordered.push_back(op);
+  });
+  for (Operation *op : ordered)
+    (mapping ? mapping->lookup(op) : op)->moveBefore(destination);
+}
+
 weft::x86::RegisterUsage relocatedRegisters(Packing &packing, scf::ForOp destination,
     ArrayRef<Operation *> producers, const weft::x86::ResourceModel &model) {
   // Analyze the proposed SSA placement, including non-packing consumers of its
@@ -319,10 +338,7 @@ weft::x86::RegisterUsage relocatedRegisters(Packing &packing, scf::ForOp destina
   IRMapping mapping;
   OwningOpRef<func::FuncOp> copy = cast<func::FuncOp>(function->clone(mapping));
   Operation *before = mapping.lookup(destination.getOperation());
-  for (Operation *producer : producers) mapping.lookup(producer)->moveBefore(before);
-  mapping.lookup(packing.allocation.getOperation())->moveBefore(before);
-  for (Operation *alias : packing.initializerAliases) mapping.lookup(alias)->moveBefore(before);
-  for (auto store : packing.stores) mapping.lookup(store.getOperation())->moveBefore(before);
+  relocatePacking(packing, before, producers, &mapping);
   return weft::x86::functionRegisterPeak(*copy, model);
 }
 
@@ -564,10 +580,7 @@ public:
           builder.getNamedAttr("unpriced_operations", builder.getI64IntegerAttr(unpriced))});
       // The first initializer survives allocation-to-stack-slot materialization.
       stores.front()->setAttr("weft.x86.amx_pack_residency", residency);
-      for (Operation *producer : producers) producer->moveBefore(destination);
-      alloc->moveBefore(destination);
-      for (Operation *alias : packing->initializerAliases) alias->moveBefore(destination);
-      for (auto store : stores) store->moveBefore(destination);
+      relocatePacking(*packing, destination, producers);
       ++reused;
     }
     if (reused) getOperation()->setAttr("weft.x86.reused_amx_packings", IntegerAttr::get(IntegerType::get(&getContext(), 64), reused));
