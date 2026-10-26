@@ -322,11 +322,12 @@ Canonical domain、遍历顺序与 runtime 维度不变；无法证明时保留�
 写入一个 `ImplementationAttr`：scalar、RVV 或 IME 的局部结构 family。它不选择 memory
 form。没有合法局部结构时当前 module 失败。
 
-对已经物化、尚未资源冻结的局部 target op，也可选择合同等价的基本操作：full-valid、
-逐轴同形的 byte 乘积、多项 i16 累加链，其编译期整数零初值可由一个 widening multiply
-起链，后续 accumulate 和最终 reduction 不变。signedness 来自 typed operands，继承完整
-carrier/坐标，不重选 partial plan；新 leaf 及资源由原有 verifier/materializer 重新检查。
-该规则不处理独立乘积、tail carrier 或更宽的 partial，不将代数上少一项运算当作其成本结论。
+对已经物化、尚未资源冻结的局部 target op，也可选择合同等价的基本操作：逐轴同形、
+有效域一致的 byte 乘积，其 i16 编译期整数零初值可由一个 widening multiply 替代。
+独立乘积及累加链的首项使用同一规则，后续 accumulate 和最终 reduction 不变。
+signedness 来自 typed operands，继承完整 carrier、坐标及尾部，不重选 partial plan；
+显式 active-length 的 undisturbed partial 和更宽 partial 不适用。
+新 leaf 与资源仍由原 verifier/materializer 检查，不能从代数简化直接推断性能收益。
 
 完整 f32 stream accumulator 的最终 add 归约可选择 `rvv.stream-finalize.m1`：
 按已选 m2/m4/m8 carrier 的完整寄存器分段构造平衡加法，再对一个 m1 归约。

@@ -252,8 +252,8 @@ void selectLoopCarriedWidenProducts(mlir::ModuleOp module,
 
 void selectZeroSeedProducts(mlir::ModuleOp module,
                             mlir::IRRewriter &rewriter) {
-  // Seed a full byte-product chain without keeping a zero vector live.
-  // Other partial representations retain their selected accumulator form.
+  // A zero-seeded byte product needs no accumulator register. Keep the same
+  // active domain; explicit-length undisturbed partials are a different form.
   llvm::SmallVector<riscv::RVVWidenAccumulateOp> accumulates;
   module.walk([&](riscv::RVVWidenAccumulateOp accumulate) {
     accumulates.push_back(accumulate);
@@ -276,19 +276,12 @@ void selectZeroSeedProducts(mlir::ModuleOp module,
     auto rhsElement = mlir::dyn_cast<mlir::IntegerType>(rhs.getElementType());
     auto narrow = lhs.getLayout();
     auto wide = result.getLayout();
-    auto next = accumulate.getResult().hasOneUse()
-        ? mlir::dyn_cast<riscv::RVVWidenAccumulateOp>(
-              *accumulate.getResult().getUsers().begin())
-        : riscv::RVVWidenAccumulateOp();
     if (!lhsElement || !rhsElement || lhsElement.isSignless() ||
         rhsElement.isSignless() ||
         (!lhsElement.isSigned() && !rhsElement.isSigned()) ||
         lhsElement.getWidth() > 8 || rhsElement.getWidth() > 8 ||
         narrow.getSew() != 8 || wide.getSew() != 16 ||
-        narrow.getValidity() != "full" || wide.getValidity() != "full" ||
-        !next || next.getAccumulator() != accumulate.getResult() ||
-        next.getReductionAxes() != accumulate.getReductionAxes() ||
-        next->getBlock() != accumulate->getBlock() ||
+        narrow.getValidity() != wide.getValidity() || !accumulate.getLengths().empty() ||
         lhs.getShape() != rhs.getShape() ||
         lhs.getShape() != result.getShape() ||
         lhs.getAxisIds() != rhs.getAxisIds() ||
