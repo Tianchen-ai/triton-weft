@@ -1440,6 +1440,10 @@ producer，仅穿过整数常量、整数转换、纯布局转换、splat/broadc
 不把浮点恒等式或轴消除混入该规则。失去用途的广播链由后续同一条 CSE/dead-layout 主链清理。
 同样的有界零值证明适用于 pointwise widening integer MAC 的 accumulator：零初值可由
 相同 typed operands 的 widening multiply 起链，去掉零载体和无效累加，后续加法保持不变。
+循环内固定全域的 scalar dot 归约保留原 MAC 形式：其零种子可跨迭代复用，两种形式的
+稳态乘积工作均为一条指令，不能仅用删除种子认定更优。保留这条依赖也避免向原生调度器
+暴露逐个交错的 multiply/reduction，造成每个乘积都切换 SEW。尾部活动长度相关的零种子
+仍可由同域 widening multiply 消除；显式长度和 undisturbed 合同不进入这项选择。
 
 无符号 RVV 整数值除以或模一个直接标量、非零二次幂常量时，分别选择同 type 的
 `shr(log2(divisor))` 或 `and(divisor-1)` 与对应 exact leaf；不改 Canonical IR。

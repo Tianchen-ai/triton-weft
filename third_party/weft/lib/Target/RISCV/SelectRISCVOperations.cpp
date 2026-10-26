@@ -292,6 +292,19 @@ void selectZeroSeedProducts(mlir::ModuleOp module,
         narrow.getFragmentFactors() != wide.getFragmentFactors() ||
         narrow.getLocalFactors() != wide.getLocalFactors())
       continue;
+    // A full-domain zero used by scalar dot reductions is loop invariant.
+    // Both forms issue one product instruction per consumer; removing that
+    // amortized seed does not reduce steady-state work. Keep the existing MAC
+    // dependency instead of exposing independent multiply/reduction pairs to
+    // native scheduling, which can introduce an SEW change for every product.
+    // A tail-dependent zero still needs its active length and benefits from the
+    // multiplication form below.
+    if (wide.getValidity() == "full" &&
+        accumulate->getParentOfType<mlir::scf::ForOp>() &&
+        accumulate.getResult().hasOneUse() &&
+        mlir::isa<riscv::RVVFinalizeWidenDotOp>(
+            *accumulate.getResult().getUsers().begin()))
+      continue;
     llvm::StringRef instruction = lhsElement.isSigned() && rhsElement.isSigned()
         ? "rvv.vwmul.vv"
         : lhsElement.isSigned() ? "rvv.vwmulsu.vv"
