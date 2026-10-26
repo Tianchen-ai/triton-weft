@@ -143,10 +143,11 @@ generic unroll 之前读取未复制的 contraction/reduction use-def，冻结 c
 出现的 grouped/layered issue relation 再交给同一个幂等 sharing owner，物化为共享
 raw-window load 与显式 layer decode。exact leaf
 完成后，resource pass 才能把 leaf temporary 与 SSA live interval 一起计入峰值。
-`UnrollRISCVLevels` 对 operation-major 交错形成的剩余循环和尾循环禁止系统再次展开，
-并保留流水与 partial planner 已声明的限制，避免扩大其已验证的重叠 issue 窗口。
-普通 iteration-major 展开保持顺序 SSA carry，后续机器循环优化、调度与寄存器分配仍由
-native 工具链负责；不能仅因它经过物理展开，就禁止 LLVM 优化普通循环。
+`UnrollRISCVLevels` 形成的剩余循环和尾循环禁止系统再次展开，保留所选访存分组及
+operation-major 交错的 issue 窗口。流水与 partial planner 已声明的限制继续保留。
+Level-scaled partial 的专门展开在每轮内部收集并归约 partial，外围只携带原标量累加值；
+它不自动增加禁止 native 展开的限制。机器循环优化、调度与寄存器分配仍由 native
+工具链完成，不能把一次局部 partial 收集当成需要固定的外围机器循环。
 
 整块 stage 的多轴投影在 ordered loop 闭合后、contraction 物化前确定供给，和后续
 Value materializer 复用同一实现。可证明没有干扰写入时，staged descriptor 保留原 birth，
