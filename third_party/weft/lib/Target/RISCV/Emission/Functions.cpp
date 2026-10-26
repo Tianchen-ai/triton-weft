@@ -1,22 +1,54 @@
 #include "Emitter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include <map>
 
 namespace weft::riscv_emission {
 
 mlir::LogicalResult Emitter::compileHelper(riscv::HelperOp op) {
   auto abi = op->getAttrOfType<mlir::StringAttr>("native_abi");
-  if (!abi || abi.getValue() != "selected-parts") return fail(op, "helper has no closed native ABI");
+  if (!abi || (abi.getValue() != "selected-parts" && abi.getValue() != "scalar-result"))
+    return fail(op, "helper has no closed native ABI");
+  const bool scalarResult = abi.getValue() == "scalar-result";
+  std::string returnType = "void";
+  if (scalarResult) {
+    if (op.getNumResults() != 1) return fail(op, "scalar helper ABI needs exactly one result");
+    auto type = scalarCType(op.getResult(0).getType());
+    if (!type) return fail(op, "scalar helper result has no native C type");
+    returnType = *type;
+  }
   std::string body;
   llvm::raw_string_ostream stream(body);
   Emitter function(module, kernel, stream);
+  function.scalarHelperResult = scalarResult;
   function.axisScopes = axisScopes;
   function.fieldProjections = fieldProjections;
   std::string name = fresh(identifier(kernel.getSymName()) + "_" + identifier(op.getName()));
   llvm::SmallVector<std::string> declarations, arguments;
+  std::map<std::pair<std::string, std::string>, std::string> inputs;
+  for (auto attribute : kernel.getShapeSymbols()) {
+    auto symbol = mlir::cast<mlir::StringAttr>(attribute).getValue();
+    if (!autoBindings.contains(symbol)) {
+      std::string value = identifier(symbol);
+      declarations.push_back("size_t " + value);
+      arguments.push_back(value);
+      inputs[{"size_t", value}] = value;
+    }
+  }
   auto parameter = [&](std::string type, std::string value, bool output = false) {
+    // Descriptor parts refer to evaluated values. Retain literal extents and
+    // reuse an already passed named value instead of severing their equality
+    // at a noinline boundary. Do not combine arbitrary C expressions or outputs.
+    const bool named = !value.empty() && (llvm::isAlpha(value.front()) || value.front() == '_') &&
+        llvm::all_of(value, [](char c) { return llvm::isAlnum(c) || c == '_'; });
+    int64_t literal;
+    if (!output && !llvm::StringRef(value).getAsInteger(10, literal))
+      return "((" + type + ")(" + value + "))";
+    if (!output && named)
+      if (auto found = inputs.find({type, value}); found != inputs.end()) return found->second;
     std::string arg = "arg_" + std::to_string(declarations.size());
     declarations.push_back(type + (output ? " *" : " ") + arg);
     arguments.push_back(output ? "&(" + value + ")" : value);
+    if (!output && named) inputs[{type, value}] = arg;
     return output ? "(*" + arg + ")" : arg;
   };
   auto scalarList = [&](auto &values) {
@@ -91,17 +123,17 @@ mlir::LogicalResult Emitter::compileHelper(riscv::HelperOp op) {
       scope.base = parameter("size_t", scope.base);
       scope.active = parameter("size_t", scope.active);
     }
-  for (auto attribute : kernel.getShapeSymbols()) {
-    auto symbol = mlir::cast<mlir::StringAttr>(attribute).getValue();
-    if (!autoBindings.contains(symbol)) {
-      declarations.push_back("size_t " + identifier(symbol));
-      arguments.push_back(identifier(symbol));
-    }
-  }
+  std::string returnedScalar;
   for (mlir::Value result : op.getResults()) {
     auto storage = declareMutableBinding(result, "helper_result");
     if (mlir::failed(storage)) return fail(op, "helper result has no native return representation");
     bindings[result] = *storage;
+    if (scalarResult) {
+      if (storage->kind != Binding::Kind::Scalar)
+        return fail(op, "selected scalar helper ABI has a non-scalar caller binding");
+      returnedScalar = storage->scalar;
+      continue;
+    }
     auto bound = bind(result, *storage, true);
     if (mlir::failed(bound)) return fail(op, "helper return ABI is incomplete");
     function.helperResults.push_back({result, std::move(*bound)});
@@ -111,13 +143,21 @@ mlir::LogicalResult Emitter::compileHelper(riscv::HelperOp op) {
   if (mlir::failed(function.compileBlock(op.getBody().front(), {}))) return mlir::failure();
   nextName = function.nextName;
   helperDefinitions += function.helperDefinitions;
-  helperDefinitions += std::string(op.getNoinline() ? "static __attribute__((noinline)) void " : "static inline __attribute__((always_inline)) void ") +
-      name + "(" + llvm::join(declarations, ", ") + ") {\n" + body + "}\n";
-  line(name + "(" + llvm::join(arguments, ", ") + ");");
+  helperDefinitions += std::string(op.getNoinline() ? "static __attribute__((noinline)) " : "static inline __attribute__((always_inline)) ") +
+      returnType + " " + name + "(" + llvm::join(declarations, ", ") + ") {\n" + body + "}\n";
+  line((scalarResult ? returnedScalar + " = " : "") + name + "(" + llvm::join(arguments, ", ") + ");");
   return mlir::success();
 }
 
 mlir::LogicalResult Emitter::compileHelperReturn(riscv::HelperReturnOp op) {
+  if (scalarHelperResult) {
+    if (op.getValues().size() != 1) return fail(op, "scalar helper return has an invalid arity");
+    auto binding = bindings.lookup(op.getValues()[0]);
+    if (binding.kind != Binding::Kind::Scalar)
+      return fail(op, "scalar helper return lost its selected native representation");
+    line("return " + binding.scalar + ";");
+    return mlir::success();
+  }
   if (helperResults.size() != op.getValues().size()) return fail(op, "helper return has no matching native signature");
   for (auto [i, value] : llvm::enumerate(op.getValues())) {
     auto &[destination, storage] = helperResults[i];

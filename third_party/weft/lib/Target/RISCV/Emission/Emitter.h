@@ -1086,6 +1086,7 @@ private:
   unsigned indent = 0;
   unsigned nextName = 0;
   std::string helperDefinitions;
+  bool scalarHelperResult = false;
   llvm::SmallVector<std::pair<mlir::Value, Binding>, 0> helperResults;
   llvm::DenseMap<mlir::Value, Binding> bindings;
   mlir::Operation *currentOperation = nullptr;

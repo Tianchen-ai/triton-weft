@@ -284,8 +284,13 @@ terminal 以 Clang 23 的 `fmaximum_num` / `fminimum_num` builtin 拼写该已�
 ### `FinalizeRISCVHelpers`
 
 在布局、转换及资源闭合后，收集 helper 真正使用的外部 SSA 和 descriptor 依赖，
-固定 selected-parts native ABI。返回值转换先由 layout pass 写入 IR；terminal 只按
+闭合 native helper ABI。返回值转换先由 layout pass 写入 IR；terminal 只按
 已选类型输出函数参数、返回槽和调用。noinline 保留为原生函数属性；内层返回只退出该函数。
+只有一个普通标量结果时，pass 选择 `scalar-result` ABI，经原生整数／浮点返回寄存器交接，
+不生成临时结果槽与额外的存储／读取。其它结果继续使用已选 parts；选择与结果类型由 final
+verifier 核对，terminal 不自行推断调用约定。源级 noinline 和控制流返回语义保持不变。
+descriptor 的常量部分保持为常量，同类型的同一个已求值具名标量只传一次；不把本已相等的
+shape、point 与 stride 分量变成彼此无关的原生参数，也不重算或合并 payload 读取。
 
 同一收尾 pass 为原生 kernel 入口写入 `native_entry_alignment=32`。这是有界的代码放置
 策略，最多增加 30 bytes 对齐填充，不是 VLEN 或 cache-line 大小声明。它避免入口仅按

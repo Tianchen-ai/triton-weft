@@ -72,7 +72,10 @@ public:
           captures.insert(definition->operand_begin(), definition->operand_end());
       }
       helper.getCapturesMutable().assign(captures.getArrayRef());
-      helper->setAttr("native_abi", StringAttr::get(&getContext(), "selected-parts"));
+      const bool scalarResult = helper.getNumResults() == 1 &&
+          isa<IntegerType, IndexType, FloatType>(helper.getResult(0).getType());
+      helper->setAttr("native_abi", StringAttr::get(&getContext(),
+          scalarResult ? "scalar-result" : "selected-parts"));
     });
   }
 };

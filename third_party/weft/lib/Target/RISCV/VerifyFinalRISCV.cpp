@@ -218,6 +218,15 @@ public:
     });
     llvm::DenseSet<std::pair<int64_t, int64_t>> partialBirths;
     getOperation().walk([&](mlir::Operation *operation) {
+      if (auto helper = mlir::dyn_cast<riscv::HelperOp>(operation)) {
+        auto abi = helper->getAttrOfType<mlir::StringAttr>("native_abi");
+        if (!abi || (abi.getValue() != "selected-parts" && abi.getValue() != "scalar-result") ||
+            (abi.getValue() == "scalar-result" && (helper.getNumResults() != 1 ||
+             !mlir::isa<mlir::IntegerType, mlir::IndexType, mlir::FloatType>(helper.getResult(0).getType())))) {
+          helper.emitError("native helper requires a closed ABI matching its result types");
+          failed = true;
+        }
+      }
       if (auto select = mlir::dyn_cast<mlir::arith::SelectOp>(operation)) {
         auto type = select.getType();
         if (!select.getCondition().getType().isInteger(1) ||
