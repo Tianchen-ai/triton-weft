@@ -3212,38 +3212,15 @@ mlir::FailureOr<riscv::ValueType> denseMemoryCarrier(
   if (!kernel || kernel.getResourcesMaterialized() ||
       before.getReplicaGroup() != 1)
     return operation->emitError("dense multi-axis lane access requires an unfrozen ungrouped register layout"), mlir::failure();
-  llvm::SmallVector<int64_t> splitLanes(lanes);
-  llvm::SmallVector<int64_t> replicas(before.getReplicaFactors().asArrayRef());
   int64_t inner = lanes.size() - 1;
   while (lanes[inner] == 1) --inner;
-  int64_t factor = 1;
-  for (int64_t axis = 0; axis < inner; ++axis) {
-    auto next = riscv_internal::staticProduct({factor, lanes[axis]});
-    auto copies = riscv_internal::staticProduct({replicas[axis], lanes[axis]});
-    if (!next || !copies)
-      return operation->emitError("dense lane split exceeds the coordinate domain"), mlir::failure();
-    factor = *next;
-    replicas[axis] = *copies;
-    splitLanes[axis] = 1;
-  }
-  if (before.getLmulEighths() % factor)
-    return operation->emitError("dense lane split has no exact register carrier"), mlir::failure();
-  const int64_t lmul = before.getLmulEighths() / factor;
-  auto copies = riscv_internal::staticProduct(replicas);
-  auto groups = copies ? riscv_internal::staticProduct({*copies, std::max<int64_t>(1, (lmul + 7) / 8)})
-                       : std::optional<int64_t>();
-  if (!groups)
-    return operation->emitError("dense lane split has unbounded register residency"), mlir::failure();
-  auto layout = riscv::LayoutAttr::get(builder.getContext(), "rvv", type.getAxisIds(),
-      before.getTimeFactors(), riscv_internal::integers(builder, splitLanes),
-      riscv_internal::integers(builder, replicas), before.getFragmentFactors(),
-      before.getLocalFactors(), before.getSew(), lmul, before.getVl() / factor, *groups,
-      before.getValidity());
-  auto result = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(type, layout));
-  if (!riscv::supportsRVVLayout(kernel.getTarget(), layout) ||
-      !riscv::rvvLayoutRepackSlices(type, result))
+  llvm::SmallVector<unsigned> splitAxes;
+  for (unsigned axis = 0; axis < static_cast<unsigned>(inner); ++axis)
+    if (lanes[axis] > 1) splitAxes.push_back(axis);
+  auto result = riscv_internal::splitRVVLaneAxes(builder, kernel.getTarget(), type, splitAxes);
+  if (!result)
     return operation->emitError("dense memory requires a legal one-axis carrier conversion"), mlir::failure();
-  return result;
+  return *result;
 }
 
 mlir::DenseI64ArrayAttr linearLocalStrides(mlir::Builder &builder, riscv::ValueType type) {

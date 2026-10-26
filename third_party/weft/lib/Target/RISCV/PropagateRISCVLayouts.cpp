@@ -3275,36 +3275,18 @@ private:
         llvm::enumerate(before.getLaneFactors().asArrayRef()),
         [&](auto factor) { return factor.index() != eliminated && factor.value() > 1; });
     if (before.getCarrier() == "rvv" && before.getValidity() == "full" &&
-        before.getReplicaGroup() == 1 && reducedLanes > 1 && survivingLanes &&
-        before.getLmulEighths() % reducedLanes == 0) {
+        before.getReplicaGroup() == 1 && reducedLanes > 1 && survivingLanes) {
       // Hardware lane reductions return one scalar. When another lane axis
       // survives, split the eliminated coordinate into register replicas so
       // the existing register reduction keeps each free coordinate distinct.
-      llvm::SmallVector<int64_t> lanes(before.getLaneFactors().asArrayRef());
-      llvm::SmallVector<int64_t> replicas(before.getReplicaFactors().asArrayRef());
-      lanes[eliminated] = 1;
-      auto copies = riscv_internal::staticProduct({replicas[eliminated], reducedLanes});
-      if (!copies) {
-        reduce.emitError("reduction lane split exceeds the coordinate domain");
+      auto split = riscv_internal::splitRVVLaneAxes(
+          builder, kernel.getTarget(), input, {static_cast<unsigned>(eliminated)});
+      if (!split) {
+        reduce.emitError("reduction lane split has no legal register carrier");
         return false;
       }
-      replicas[eliminated] = *copies;
-      const int64_t lmul = before.getLmulEighths() / reducedLanes;
-      auto count = riscv_internal::staticProduct(replicas);
-      auto groups = count ? riscv_internal::staticProduct({*count, std::max<int64_t>(1, (lmul + 7) / 8)})
-                          : std::optional<int64_t>();
-      if (!groups) {
-        reduce.emitError("reduction lane split has unbounded register residency");
-        return false;
-      }
-      auto split = riscv::LayoutAttr::get(builder.getContext(), "rvv", input.getAxisIds(),
-          before.getTimeFactors(), riscv_internal::integers(builder, lanes),
-          riscv_internal::integers(builder, replicas), before.getFragmentFactors(),
-          before.getLocalFactors(), before.getSew(), lmul, before.getVl() / reducedLanes,
-          *groups, "full");
-      auto splitType = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(input, split));
-      if (riscv::supportsRVVLayout(kernel.getTarget(), split) &&
-          riscv::rvvLayoutRepackSlices(input, splitType)) {
+      auto splitType = *split;
+      {
         mlir::OpBuilder::InsertionGuard guard(builder);
         builder.setInsertionPoint(reduce);
         auto conversion = riscv::ConvertLayoutOp::create(builder, reduce.getLoc(),

@@ -1687,6 +1687,44 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
   return {};
 }
 
+std::optional<riscv::ValueType> riscv_internal::splitRVVLaneAxes(
+    mlir::Builder &builder, riscv::TargetAttr target, riscv::ValueType input,
+    llvm::ArrayRef<unsigned> axes) {
+  auto before = input.getLayout();
+  if (before.getCarrier() != "rvv" || before.getReplicaGroup() != 1)
+    return std::nullopt;
+  llvm::SmallVector<int64_t> lanes(before.getLaneFactors().asArrayRef());
+  llvm::SmallVector<int64_t> replicas(before.getReplicaFactors().asArrayRef());
+  int64_t factor = 1;
+  for (unsigned axis : axes) {
+    if (axis >= lanes.size()) return std::nullopt;
+    auto next = staticProduct({factor, lanes[axis]});
+    auto copies = staticProduct({replicas[axis], lanes[axis]});
+    if (!next || !copies) return std::nullopt;
+    factor = *next;
+    replicas[axis] = *copies;
+    lanes[axis] = 1;
+  }
+  auto count = staticProduct(replicas);
+  if (!count || factor <= 0 || before.getVl() % factor) return std::nullopt;
+  // Lane coordinates fix VL, not LMUL. Below the smallest fractional LMUL,
+  // use the legal carrier capacity and account for every live replica.
+  riscv::ValueType selected;
+  for (int64_t lmul : target.getLegalLMULEighths().asArrayRef()) {
+    if (selected && lmul >= selected.getLayout().getLmulEighths()) continue;
+    auto groups = staticProduct({*count, std::max<int64_t>(1, (lmul + 7) / 8)});
+    if (!groups) continue;
+    auto layout = riscv::LayoutAttr::get(builder.getContext(), "rvv", input.getAxisIds(),
+        before.getTimeFactors(), integers(builder, lanes), integers(builder, replicas),
+        before.getFragmentFactors(), before.getLocalFactors(), before.getSew(), lmul,
+        before.getVl() / factor, *groups, before.getValidity());
+    if (!riscv::supportsRVVLayout(target, layout)) continue;
+    auto candidate = mlir::cast<riscv::ValueType>(withLayout(input, layout));
+    if (riscv::rvvLayoutRepackSlices(input, candidate)) selected = candidate;
+  }
+  return selected ? std::optional<riscv::ValueType>(selected) : std::nullopt;
+}
+
 std::optional<int64_t>
 riscv_internal::staticProduct(llvm::ArrayRef<int64_t> values) {
   int64_t result = 1;

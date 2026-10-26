@@ -105,6 +105,9 @@ riscv::ConversionAttr layoutConversion(mlir::Builder &builder,
                                        riscv::LayoutAttr source,
                                        riscv::LayoutAttr target);
 bool selectLaneRepack(mlir::Builder &builder, riscv::ConvertLayoutOp operation);
+std::optional<riscv::ValueType> splitRVVLaneAxes(
+    mlir::Builder &builder, riscv::TargetAttr target, riscv::ValueType input,
+    llvm::ArrayRef<unsigned> axes);
 riscv::ScheduleAttr schedule(mlir::Builder &builder, int64_t unroll,
                              int64_t pipelineDepth,
                              int64_t prefetchDistance = 0);

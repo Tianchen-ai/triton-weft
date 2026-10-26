@@ -403,6 +403,9 @@ bounded register reduction 可以保留一致的 free-axis memory supply，以 r
 当多个轴已共用 lanes、但只归约其中一轴时，先用纯 `lane_repack` 将该轴移入 register
 replicas，再执行 register reduction，保留其它 lane 坐标。单个返回 scalar 的 RVV lane
 reduction 不能实现仍有独立 lane 轴的结果。
+拆分后的 VL 保留准确坐标数，LMUL 从目标合法集合选择能容纳该 VL 的最小载体；小于
+最小 fractional LMUL 容量的切片仍然合法，不要求原 LMUL 能被切片数整除。每个副本
+按实际寄存器组计费，新增转换和联合驻留继续由资源 pass 核验。
 已实例化的 LMUL binding 是基础表示宽度，不是所有 SSA 值的统一上限。
 保持同一 logical lane span 的 cast/widen/narrow 链会按 SEW 比例唯一派生每个值的
 LMUL；同整数元素类型、同 shape/axis/lane axis 的普通逐元素 consumer 继续保留这个派生宽度，
