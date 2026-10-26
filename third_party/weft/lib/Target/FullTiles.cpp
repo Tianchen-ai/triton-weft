@@ -4,8 +4,11 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/DenseSet.h"
 #include <algorithm>
+#include <array>
 
 using namespace mlir;
 namespace {
@@ -139,6 +142,36 @@ struct FoldMaskReduction : OpRewritePattern<vector::ReductionOp> {
   }
 };
 
+std::array<int64_t, 3> specializationWork(scf::ForOp loop) {
+  std::array<int64_t, 3> work{};
+  loop.getBody()->walk([&](Operation *op) {
+    if (isa<scf::IfOp>(op)) ++work[0];
+    if (!isa<arith::ConstantOp>(op) && llvm::any_of(op->getResultTypes(), [](Type type) {
+          auto shaped = dyn_cast<ShapedType>(type);
+          return shaped && shaped.getElementType().isInteger(1);
+        })) ++work[1];
+    if (auto memory = dyn_cast<MemoryEffectOpInterface>(op)) {
+      SmallVector<MemoryEffects::EffectInstance> effects;
+      memory.getEffects(effects);
+      if (llvm::any_of(effects, [](const auto &effect) {
+            return isa<MemoryEffects::Read, MemoryEffects::Write,
+                       MemoryEffects::Allocate, MemoryEffects::Free>(effect.getEffect());
+          })) ++work[2];
+    }
+  });
+  return work;
+}
+
+bool simplifiesPayload(scf::ForOp original, scf::ForOp proposal) {
+  auto before = specializationWork(original), after = specializationWork(proposal);
+  bool reduced = false;
+  for (unsigned i = 0; i < before.size(); ++i) {
+    if (after[i] > before[i]) return false;
+    reduced |= after[i] < before[i];
+  }
+  return reduced;
+}
+
 std::optional<int64_t> tileStep(scf::ForOp loop) {
   APInt lower, stride;
   if (!loop.getInductionVar().getType().isIndex() ||
@@ -202,6 +235,7 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
     function->walk([&](Operation *) { ++original; });
     const int64_t budget = std::clamp<int64_t>(original, 6000, 24000);
     int64_t duplicated = 0, versions = 0;
+    llvm::DenseSet<Operation *> versionedAlternates;
     // Independent tiled axes can share one complete-domain version. Peeling
     // each inner axis first spends the growth budget before a parent mask can
     // disappear, leaving that mask live across all inner products. Version the
@@ -247,7 +281,11 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
       }
       int64_t added = 0;
       full.getBody()->walk([&](Operation *) { ++added; });
-      if (added > budget - duplicated) {
+      // Scalar extent arithmetic alone does not justify cloning a numerical
+      // loop nest. Require an actual removed mask, branch or storage operation;
+      // otherwise code growth can increase native register pressure for no
+      // change in the repeated payload work.
+      if (added > budget - duplicated || !simplifiesPayload(root, full)) {
         b.eraseOp(full); continue;
       }
       b.setInsertionPoint(full);
@@ -277,12 +315,17 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
         scf::YieldOp::create(b, root.getLoc(), loop.getResults());
       }
       duplicated += added;
+      root.walk([&](scf::ForOp original) {
+        versionedAlternates.insert(original.getOperation());
+      });
       ++versions;
     }
     for (auto loop : loops) {
-      // The original alternate nest still benefits from inner complete tiles
-      // when another axis has a tail. Spend only the remaining shared budget;
-      // the complete-domain clone is not present in this original loop list.
+      // A whole-nest version already owns one complete body and one masked
+      // alternate. Peeling that alternate again multiplies the same numerical
+      // body without improving the selected complete-domain path. Independent
+      // original nests still use the remaining shared growth budget.
+      if (versionedAlternates.contains(loop.getOperation())) continue;
       // A scalar carry can consume a large SIMD body. Its result type does not
       // establish that the body has no vector masks to eliminate; use the
       // actual complete-tile proofs and bounded body size below instead.
@@ -346,7 +389,9 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
       }
       int64_t added = 0;
       full.getBody()->walk([&](Operation *) { ++added; });
-      if (added > budget - duplicatedOperations) { b.eraseOp(full); continue; }
+      if (added > budget - duplicatedOperations || !simplifiesPayload(loop, full)) {
+        b.eraseOp(full); continue;
+      }
       duplicatedOperations += added;
       b.setInsertionPoint(full);
       // The original signed scf.for is empty for a negative upper bound.
