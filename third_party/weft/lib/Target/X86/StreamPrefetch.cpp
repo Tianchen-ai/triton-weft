@@ -1,4 +1,5 @@
 #include "Weft/Target/X86Compiler.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -104,6 +105,15 @@ public:
       // scheduling budget, independent of the operation or Encoding name.
       if (totalBytes < minFootprint || totalBytes > maxFootprint || hints > 512 ||
           allAddresses.size() > maxAddressOps) continue;
+      // Count the complete finite stream, including enclosing traversals.
+      // A short traversal already contained in the lookahead budget does not
+      // amortize a second address stream and guarded hints. Unknown extents
+      // retain their symbolic traversal and the existing bounded lookahead.
+      auto function = loop->getParentOfType<func::FuncOp>();
+      auto frequency = weft::analysis::executionMultiplicityInBlock(
+          packets.back().load, &function.getBody().front());
+      if (frequency && frequency->dynamicLoops.empty() &&
+          frequency->fixed <= uint64_t(maxFootprint / totalBytes)) continue;
       // Larger source windows retire fewer iterations while filling the same
       // bounded hint footprint. The source tile and its traversal stay intact.
       int64_t lookahead = std::min(maxLookahead, maxFootprint / totalBytes);
