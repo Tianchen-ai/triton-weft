@@ -3653,7 +3653,8 @@ public:
       read.setLeafAttr(riscv_internal::leaf(builder, "transfer", "field-read", instruction, instruction,
           0, 0, *temporary, 0, "none", "exact"));
     });
-    getOperation().walk([&](riscv::ExtractOp operation) {
+    }
+    auto planExtractAccess = [&](riscv::ExtractOp operation, bool finalizeIndexed) {
       auto regular = operation->getAttrOfType<mlir::DenseI64ArrayAttr>("index_pattern");
       if (regular && operation.getAccess().getForm() == "register") {
         auto result = mlir::dyn_cast<riscv::ValueType>(operation.getResult().getType());
@@ -3858,6 +3859,13 @@ public:
       if (indexValue && resultValue && indexValue.getLayout().getCarrier() == "rvv" &&
           resultValue.getLayout().getCarrier() == "rvv" &&
           !riscv::hasLegalRVVIndexedEMUL(indexValue, resultValue)) {
+        // A logical gather can still be a contiguous field window. Its index
+        // expression is then eliminated, so index EEW must not constrain the
+        // data layout before unit/entry access selection has run.
+        if (!finalizeIndexed) {
+          operation.setLeafAttr(riscv_internal::unselectedLeaf(builder));
+          return;
+        }
         // The index can broadcast over free axes, but those axes cannot enlarge
         // the indexed load's data LMUL without enlarging its index EMUL too.
         // Read in the index coordinate domain and represent the consumer's
@@ -3950,6 +3958,10 @@ public:
       operation.setAccessAttr(access);
       operation.setLeafAttr(transferLeaf(
           builder, "extract", ("rvv.extract." + form).str()));
+    };
+    if (!nestedDomainOnly) {
+    getOperation().walk([&](riscv::ExtractOp operation) {
+      planExtractAccess(operation, false);
     });
 
     // A direct logical-u1 field may already carry the complete logical axis;
@@ -4491,6 +4503,11 @@ public:
       llvm::DenseSet<mlir::Operation *> visited;
       eraseDeadRegularIndexChain(fullIndices, visited, rewriter);
     }
+
+    if (!nestedDomainOnly) getOperation().walk([&](riscv::ExtractOp operation) {
+      if (operation.getLeaf().getEngine() == "unselected")
+        planExtractAccess(operation, true);
+    });
 
     if (nestedDomainOnly) {
       failed |= mlir::failed(materializeLocalEntrySources(getOperation(), rewriter));

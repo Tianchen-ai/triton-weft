@@ -699,7 +699,9 @@ indexed Extract 的 index 投影可以沿单 use 纯 pointwise 链和 iota 重�
 投影去掉部分 lane 轴时不能只比较元素数而忽略 index EEW/data SEW 所要求的寄存器比例。
 不能直接拼接旧 lane parts，
 不等于该纯 index 程序不能在目标 layout 中重新形成；memory producer 不由这条规则复制。
-内存规划同样使用这条 EMUL 合同。索引在自由轴上广播时，先以索引所承载的 lane 域完成
+内存规划先识别连续 field/entry 窗口，只有仍需 indexed 访存的 Extract 才使用这条 EMUL
+合同。连续窗口会消除地址索引，不能先按索引 EEW 拆窄数据载体，再把小读取拼回。
+真正的索引在自由轴上广播时，先以索引所承载的 lane 域完成
 读取，再由显式 conversion 形成消费者的合并 lane 布局；不能只扩大数据 LMUL 而沿用窄索引。
 若 Extract 仍投影 grouped/layered storage，不能把超过对应 storage layer 的 SIMD lane
 span 向读取侧重物化；保留合法窗口读取后的显式 numeric pack，而不是制造未闭合的跨层读取。
