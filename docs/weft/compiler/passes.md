@@ -155,6 +155,9 @@ Value materializer 复用同一实现。可证明没有干扰写入时，staged 
 作用域内形成私有快照；静态 local storage 仍受目标预算约束。完整 pointwise Value 的
 资源判断复用候选 issue 的成本查询，计入完整输入／输出活跃集，避免后续 FMA broadcast
 把先前仅靠 last-use reuse 合法的表示推到寄存器上限之外。
+同形状、同物理几何的普通逐 lane 二元指令可复用最后一次使用的输入寄存器；成本查询
+同时计算操作前峰值与复用后的结果峰值，不将其计成额外完整 Value。广播、转换、select
+与数学展开不使用该证明，实际 leaf 临时量和最终 spill 仍由正式资源管线收口。
 
 最终 layout 改写前先清理失去消费者的纯 index/conversion 链，避免死路径阻止基于真实
 use 数量的 rematerialization；资源闭合后的清理不能替代这个位置的清理。

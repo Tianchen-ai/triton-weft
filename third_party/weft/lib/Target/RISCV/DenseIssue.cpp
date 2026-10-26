@@ -132,8 +132,24 @@ std::optional<DenseIssueCost> riscv_internal::denseIssueCost(
     if (!coordinates) return std::nullopt;
     cost.operations += coordinates->parts();
     if (live > std::numeric_limits<int64_t>::max() - output) return std::nullopt;
-    // Input/result overlap is a conservative upper bound. A destructive RVV
-    // instruction may reuse its last-use input, but the planner need not assume it.
+    // Ordinary lane-wise binary instructions can overwrite a dead operand with
+    // identical geometry. Counting both carriers at that boundary invents an
+    // extra full Value and can force a reusable staged graph into local storage.
+    // Do not apply this to broadcasts, conversions, selects or math expansions;
+    // their instruction-specific temporaries still require independent space.
+    int64_t reusable = 0;
+    if (auto binary = dyn_cast<riscv::BinaryOp>(operation)) {
+      StringRef kind = binary.getKind();
+      if (kind == "add" || kind == "sub" || kind == "mul" ||
+          kind == "and" || kind == "or" || kind == "xor")
+        for (Value input : operation->getOperands()) {
+          auto inputType = dyn_cast<riscv::ValueType>(input.getType());
+          if (groups.count(input) && last.lookup(input) == position && inputType &&
+              pieceOf(inputType) == representation)
+            reusable = std::max(reusable, std::min(output, groups.lookup(input)));
+        }
+    }
+    const int64_t before = live;
     live += output;
     int64_t temporary = 0;
     if (auto unary = dyn_cast<riscv::UnaryOp>(operation)) {
@@ -147,7 +163,7 @@ std::optional<DenseIssueCost> riscv_internal::denseIssueCost(
     if (auto select = dyn_cast<riscv::SelectOp>(operation)) temporary = std::max<int64_t>(1, output);
     if (auto compare = dyn_cast<riscv::CompareOp>(operation)) temporary = std::max<int64_t>(1, output);
     if (live > std::numeric_limits<int64_t>::max() - temporary) return std::nullopt;
-    cost.vectorGroups = std::max(cost.vectorGroups, live + temporary);
+    cost.vectorGroups = std::max(cost.vectorGroups, std::max(before, live - reusable) + temporary);
     llvm::DenseSet<Value> expired;
     for (Value input : operation->getOperands())
       if (groups.count(input) && last.lookup(input) == position && expired.insert(input).second)
