@@ -64,6 +64,15 @@ Value uniformPredicate(Value value, memref::AllocOp alloc, DominanceInfo &domina
     return uniformPredicate(widen.getIn(), alloc, dominance, b);
   if (auto narrow = value.getDefiningOp<arith::TruncIOp>())
     return uniformPredicate(narrow.getIn(), alloc, dominance, b);
+  if (auto reduction = value.getDefiningOp<vector::ReductionOp>()) {
+    auto kind = reduction.getKind();
+    // AND/OR of a nonempty uniform predicate is the same predicate. Closed
+    // contraction schedules can leave this form after their carries simplify;
+    // retain the complete-writer and dominance proof for the surrounding array.
+    if (value.getType().isInteger(1) && !reduction.getAcc() &&
+        (kind == vector::CombiningKind::AND || kind == vector::CombiningKind::OR))
+      return uniformPredicate(reduction.getVector(), alloc, dominance, b);
+  }
   Attribute attribute;
   if (matchPattern(value, m_Constant(&attribute))) {
     APInt bits;
