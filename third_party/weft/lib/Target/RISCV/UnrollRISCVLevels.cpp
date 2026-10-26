@@ -133,11 +133,12 @@ private:
     }
     if (mlir::isa<mlir::scf::ForOp>(target)) {
       target->setAttr("weft.riscv.direction", b.getStringAttr(counted ? "ascending" : space.descending ? "descending" : "ascending"));
-      // This body already contains the selected number of physical issues.
-      // A second native unroll would multiply their live operands after Weft's
-      // resource closure. Keep machine scheduling and allocation available,
-      // while preserving the explicit bounded issue window.
-      target->setAttr("weft.riscv.system_unroll", b.getStringAttr("disable"));
+      // Operation-major ordering closes an overlapping physical issue window.
+      // Ordinary iteration-major cloning still has sequential SSA carries and
+      // leaves machine loop optimization to the native compiler. Preserve an
+      // existing restriction from a pipeline/partial planner in either case.
+      if (operationMajor)
+        target->setAttr("weft.riscv.system_unroll", b.getStringAttr("disable"));
     }
   }
 

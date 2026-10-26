@@ -3175,7 +3175,9 @@ expandPlannedLevelScaledIssueLoop(mlir::scf::ForOp loop, int64_t factor,
 
   loop->removeAttr("weft.riscv.unroll_factor");
   loop->removeAttr("weft.riscv.unroll_order");
-  loop->setAttr("weft.riscv.system_unroll", rewriter.getStringAttr("disable"));
+  // The collected partials close within one iteration and feed its original
+  // scalar carry. Preserve any existing scheduling restriction, but do not
+  // turn this ordinary outer loop into a fixed native issue window.
 
   // The generic SCF unroller erases the loop when the selected factor equals
   // its exact trip count.  A level-scaled partial plan still needs one region
