@@ -140,8 +140,12 @@ std::optional<DenseIssueCost> riscv_internal::denseIssueCost(
     int64_t reusable = 0;
     if (auto binary = dyn_cast<riscv::BinaryOp>(operation)) {
       StringRef kind = binary.getKind();
-      if (kind == "add" || kind == "sub" || kind == "mul" ||
-          kind == "and" || kind == "or" || kind == "xor")
+      const bool noBroadcast = llvm::all_of(operation->getOperands(), [&](Value input) {
+        auto inputType = dyn_cast<riscv::ValueType>(input.getType());
+        return inputType && pieceOf(inputType) == representation;
+      });
+      if (noBroadcast && (kind == "add" || kind == "sub" || kind == "mul" ||
+          kind == "and" || kind == "or" || kind == "xor"))
         for (Value input : operation->getOperands()) {
           auto inputType = dyn_cast<riscv::ValueType>(input.getType());
           if (groups.count(input) && last.lookup(input) == position && inputType &&
