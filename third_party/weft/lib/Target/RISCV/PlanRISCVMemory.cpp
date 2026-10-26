@@ -4113,6 +4113,11 @@ public:
         continue;
 
       auto sourceField = riscv_internal::sourceField(extract.getInput());
+      // A scalar tuple is a numerical SSA representation, not addressable
+      // payload storage. Only an actual encoded field can supply a memory
+      // window from that carrier; computed tuples retain typed extraction.
+      if (source.getLayout().getCarrier() == "scalar" && !sourceField)
+        continue;
       const auto sourceFacts =
           sourceField ? riscv_internal::fieldFacts(sourceField)
                       : riscv_internal::FieldFacts();

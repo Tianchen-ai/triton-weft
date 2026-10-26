@@ -474,6 +474,10 @@ byte offset 与元素 offset 在这里相同；字段必须自然、byte-aligned
 选择只去掉向量中转与 slide，不移动读取、不改变坐标、元素位宽或后续数值结合。
 其它位宽、tail、跨轴或仍有向量消费者的 entry 保持原物理供应。
 
+indexed-entry 的 source 必须是实际可寻址的字段或 local payload。由纯计算产生的
+scalar tuple 保持数值提取；不能仅因索引具有连续 payload 形状，就将其当作内存地址。
+后续 typed extract/layout conversion 负责它的寄存器供应，不改变读取快照或作者的计算位置。
+
 读取 `MemDescType`、Encoding field mapping 和 value layout，为每条 memory edge写入
 `AccessAttr` 与 transfer leaf。dense access 得到 unit/strided/indexed；encoded field 得到
 natural/grouped-layered/joined 的完整 storage geometry。lookup table被保留为 descriptor edge，
