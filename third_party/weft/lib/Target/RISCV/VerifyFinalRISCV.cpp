@@ -2,6 +2,7 @@
 #include "PhysicalLoopControl.h"
 #include "ReductionBounds.h"
 #include "ValueLiveness.h"
+#include "PipelineSchedule.h"
 
 #include "RISCVPhysicalSupport.h"
 
@@ -812,9 +813,15 @@ public:
           auto kernel = loop->getParentOfType<riscv::KernelOp>();
           auto groups = riscv_internal::nativeUnrollRegisterGroups(loop, count.getInt());
           auto restriction = loop->getAttrOfType<mlir::StringAttr>("weft.riscv.system_unroll");
+          bool integerBudget = true;
+          if (count.getInt() > 1) {
+            auto integer = riscv_internal::nativeIntegerIssuePeak(loop);
+            integerBudget = mlir::succeeded(integer) && integer->has_value() &&
+                integer->value().fits(count.getInt());
+          }
           if (!kernel || !llvm::is_contained(llvm::ArrayRef<int64_t>{1, 2, 4}, count.getInt()) ||
               !groups || *groups > kernel.getTarget().getVectorRegisters() ||
-              (restriction && count.getInt() != 1)) {
+              !integerBudget || (restriction && count.getInt() != 1)) {
             loop.emitError("native unroll count exceeds the closed physical issue budget");
             failed = true;
           }

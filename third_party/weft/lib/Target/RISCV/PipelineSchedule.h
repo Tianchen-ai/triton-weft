@@ -55,5 +55,19 @@ mlir::FailureOr<llvm::SmallVector<mlir::Operation *>> orderReadOnlyIssues(
     llvm::ArrayRef<std::pair<int64_t, int64_t>> priorities,
     int64_t registerBudget);
 
+// Reuse the issue scheduler's scalar frontier when bounding native expansion.
+// Only flat loops have an independent integer issue estimate here.
+inline constexpr int64_t nativeIntegerRegisterBudget = 27; // Excludes x0, sp, gp, tp, ra.
+struct NativeIntegerIssue {
+  int64_t peak = 0;
+  int64_t recurrences = 0;
+  bool fits(int64_t copies) const {
+    return copies >= 1 && recurrences >= 0 && recurrences <= peak &&
+        recurrences <= nativeIntegerRegisterBudget &&
+        peak - recurrences <= (nativeIntegerRegisterBudget - recurrences) / copies;
+  }
+};
+mlir::FailureOr<std::optional<NativeIntegerIssue>> nativeIntegerIssuePeak(mlir::scf::ForOp loop);
+
 } // namespace weft::riscv_internal
 #endif

@@ -752,6 +752,8 @@ public:
 
   struct Cost { FrontierResidency after; int64_t vectorPeak = 0; };
 
+  int64_t integerResidency() const { return live.integer; }
+
   FailureOr<Cost> cost(Operation *operation) const {
     Cost result{live, live.vector};
     auto used = uses.find(operation);
@@ -807,6 +809,35 @@ private:
   llvm::DenseMap<Operation *, SmallVector<unsigned>> uses, births;
 };
 } // namespace
+
+FailureOr<std::optional<NativeIntegerIssue>> riscv_internal::nativeIntegerIssuePeak(scf::ForOp loop) {
+  if (llvm::any_of(*loop.getBody(), [](Operation &operation) {
+        return operation.getNumRegions() != 0;
+      })) return std::optional<NativeIntegerIssue>{};
+  auto liveness = FrontierLiveness::get(loop);
+  if (failed(liveness)) return failure();
+  int64_t peak = liveness->integerResidency();
+  for (Operation &operation : *loop.getBody()) {
+    auto cost = liveness->cost(&operation);
+    if (failed(cost)) return failure();
+    peak = std::max(peak, cost->after.integer);
+    if (failed(liveness->apply(&operation, *cost))) return failure();
+  }
+  int64_t recurrences = 0;
+  auto kernel = loop->getParentOfType<riscv::KernelOp>();
+  unsigned xlen = kernel.getTarget().getMarch().starts_with("rv32") ? 32 : 64;
+  for (Value carry : loop.getRegionIterArgs()) {
+    if (carry.use_empty()) continue;
+    Type element = carry.getType();
+    if (auto value = dyn_cast<riscv::ValueType>(element)) element = value.getElementType();
+    if (!isa<IntegerType>(element) || element.isInteger(1)) continue;
+    auto count = scalarRegisterCount(carry.getType(), xlen);
+    if (!count || *count > std::numeric_limits<int64_t>::max() - recurrences)
+      return loop.emitError("native integer recurrence residency is unbounded"), failure();
+    recurrences += *count;
+  }
+  return std::optional<NativeIntegerIssue>({peak, recurrences});
+}
 
 FailureOr<SmallVector<Operation *>> riscv_internal::orderPipelineFrontiers(
     const PipelineSchedule &schedule, const PipelineExpansion &expansion, int64_t registerBudget) {

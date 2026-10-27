@@ -1091,6 +1091,9 @@ storage aliases 标识其实际消费者作用域；这些作用域优先联合�
 计算 frame 消费。显式启用多阶段流水时，带 carry 且消费受限 encoded 字段的循环也将
 其已有祖先标为联合边界作用域，在调度前闭合输入边界，避免每个归约 issue 和跨阶段版本
 重复保留同一行边界判断。它不增加作者 carry 或调整 Level，只在已有有限版本预算中选择。
+直接消费受限字段、没有内层循环的浮点 recurrence 使用同一联合边界规则，使每个 block 的
+scale 与数据读取都能使用完整行列条件。嵌套数值 recurrence 仍保留其独立生存范围，
+不因外层最终累加器是浮点就扩大内部 partial 的处理范围。
 其余循环保留最小的完整域，不因消除更多 guard 而扩大其它值的驻留。
 明确的作者 alias 合同因而能影响快照、frame 和完整域选择。仅重复输出边界的 store 遍历
 不计为独立输入轴，不能抢先消耗同一计算体的版本预算。候选仍只使用入口已知的 bound，
@@ -1100,6 +1103,11 @@ storage aliases 标识其实际消费者作用域；这些作用域优先联合�
 完整版本的有限 native 展开量在资源闭合后从 1/2/4 中确定：循环外驻留只计一次，
 重复 issue 的本地 SSA 与 leaf 临时量按副本计入。已有系统展开限制优先；最终 LLVM
 仍负责机器寄存器分配与指令调度。emitter 不重新选择展开量。
+helper 的 native 展开还复用调度器的整数 SSA frontier：原数值 integer carry 只驻留一份，
+其余 issue 的保守整数峰值乘以展开量，总量不能超过 27 个寄存器（扣除 x0、sp、gp、tp、ra）。
+地址 index carry 仍按各次 issue 的坐标计入，不能当作数值累加器抵扣。没有平坦 issue 估计的嵌套
+region 保持单份 native issue；最终 verifier 从当前 SSA 重新核对这项限制。浮点数值 carry
+保持原来的顺序更新，最终浮点寄存器分配继续由 LLVM 完成，不将 source accumulator 改成多条支路。
 嵌套循环从内向外收口；外层预算递归计入内层已选的 native 展开量，不能将两个各自
 合法的局部展开相乘后仍沿用单层峰值。循环外存活值仍只按其真实驻留计一次。
 这个 native issue 上界用于闭合隔离后的 helper frame；原 kernel 循环继续由原生工具链

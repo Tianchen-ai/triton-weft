@@ -72,21 +72,33 @@ public:
         }
       });
       llvm::SmallPtrSet<Operation *, 16> pipelineConsumers;
+      llvm::SmallPtrSet<Operation *, 16> flatConsumers;
       kernel.walk([&](scf::ForOp loop) {
         auto schedule = loop->getAttrOfType<weft::riscv::ScheduleAttr>("weft.riscv.schedule");
-        if (!schedule || schedule.getPipelineDepth() < 2 ||
-            loop.getNumRegionIterArgs() == 0 || guardedFieldPayloads(loop) == 0) return;
-        // A carried computation consumes the same independent input bounds
-        // across its physical pipeline versions. Close those bounds before
-        // scheduling, instead of retaining a row guard in every reduction
-        // issue. Only its existing ancestors can own the complete domain.
+        if (loop.getNumRegionIterArgs() == 0 || guardedFieldPayloads(loop) == 0) return;
+        bool pipelined = schedule && schedule.getPipelineDepth() > 1;
+        bool nested = false;
+        loop.getBody()->walk([&](Operation *operation) {
+          nested |= isa<scf::ForOp, scf::WhileOp>(operation);
+        });
+        bool flat = !nested && llvm::all_of(loop.getRegionIterArgs(), [](Value value) {
+          return isa_and_nonnull<FloatType>(weft::riscv_internal::logicalElement(value.getType()));
+        });
+        if (!pipelined && !flat) return;
+        // Close the independent input bounds before scheduling a pipeline or
+        // a flat floating recurrence. Nested numerical recurrences retain the
+        // smaller scope; their intermediate state has a separate lifetime.
+        // Only existing ancestors can own the complete domain.
         for (Operation *scope = loop; scope && scope != kernel;
              scope = scope->getParentOp())
-          if (isa<scf::ForOp>(scope)) pipelineConsumers.insert(scope);
+          if (isa<scf::ForOp>(scope)) {
+            if (pipelined) pipelineConsumers.insert(scope);
+            if (flat) flatConsumers.insert(scope);
+          }
       });
       auto growth = weft::separateFullTiles(kernel, true, guardedFieldPayloads,
           [&](Operation *scope) {
-            return snapshotConsumers.contains(scope) || pipelineConsumers.contains(scope);
+            return snapshotConsumers.contains(scope) || pipelineConsumers.contains(scope) || flatConsumers.contains(scope);
           });
       if (failed(growth)) { invalid = true; return; }
       Builder b(&getContext());
@@ -110,6 +122,7 @@ public:
       kernel->setAttr("weft.riscv.full_domain_versions", b.getI64IntegerAttr(growth->domainVersions));
       kernel->setAttr("weft.riscv.full_tile_snapshot_scopes", b.getI64IntegerAttr(snapshotConsumers.size()));
       kernel->setAttr("weft.riscv.full_tile_pipeline_scopes", b.getI64IntegerAttr(pipelineConsumers.size()));
+      kernel->setAttr("weft.riscv.full_tile_flat_recurrence_scopes", b.getI64IntegerAttr(flatConsumers.size()));
     });
     if (invalid) signalPassFailure();
   }

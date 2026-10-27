@@ -1,5 +1,6 @@
 #include "RISCVPhysicalSupport.h"
 #include "ValueLiveness.h"
+#include "PipelineSchedule.h"
 #include "Weft/Target/RISCVPasses.h"
 #include "Weft/Analysis/PhysicalDependence.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -34,25 +35,33 @@ public:
       }
     });
     if (invalidAlignment) { signalPassFailure(); return; }
+    bool invalidResidency = false;
     getOperation().walk([&](scf::ForOp loop) {
       auto kernel = loop->getParentOfType<riscv::KernelOp>();
       if (!kernel) return;
       const int64_t alignment = kernel->getAttrOfType<IntegerAttr>("native_loop_alignment").getInt();
       if (loop->hasAttr("weft.riscv.bound_native_unroll")) {
-        auto trips = analysis::staticTripCount(loop);
-        int64_t count = 1;
-        if (!loop->hasAttr("weft.riscv.system_unroll") && trips)
-          for (int64_t candidate : {2, 4}) {
-            auto groups = riscv_internal::nativeUnrollRegisterGroups(loop, candidate);
-            if (uint64_t(candidate) <= *trips && groups && *groups <= kernel.getTarget().getVectorRegisters())
-              count = candidate;
-          }
         // Closing an isolated computation frame needs a bounded issue window.
         // Original kernel loops retain the native optimizer's established
         // decision; full-domain versioning alone does not request a new bound.
-        if (loop->getParentOfType<riscv::HelperOp>())
+        if (loop->getParentOfType<riscv::HelperOp>()) {
+          auto trips = analysis::staticTripCount(loop);
+          int64_t count = 1;
+          auto integer = riscv_internal::nativeIntegerIssuePeak(loop);
+          if (failed(integer)) { invalidResidency = true; return; }
+          if (integer->has_value())
+            loop->setAttr("weft.riscv.native_integer_issue_peak",
+                          DenseI64ArrayAttr::get(&getContext(), {integer->value().peak, integer->value().recurrences}));
+          if (!loop->hasAttr("weft.riscv.system_unroll") && trips && integer->has_value())
+            for (int64_t candidate : {2, 4}) {
+              auto groups = riscv_internal::nativeUnrollRegisterGroups(loop, candidate);
+              if (uint64_t(candidate) <= *trips && groups && *groups <= kernel.getTarget().getVectorRegisters() &&
+                  integer->value().fits(candidate))
+                count = candidate;
+            }
           loop->setAttr("weft.riscv.native_unroll_count",
                         IntegerAttr::get(IntegerType::get(&getContext(), 64), count));
+        }
         loop->removeAttr("weft.riscv.bound_native_unroll");
       }
       bool vectorBody = false;
@@ -78,6 +87,7 @@ public:
       else
         loop->removeAttr("weft.riscv.code_alignment");
     });
+    if (invalidResidency) { signalPassFailure(); return; }
     getOperation().walk<WalkOrder::PostOrder>([&](riscv::HelperOp helper) {
       llvm::SetVector<Value> captures;
       getUsedValuesDefinedAbove(helper.getBody(), captures);
