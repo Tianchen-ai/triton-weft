@@ -172,8 +172,7 @@ mlir::FailureOr<Binding> Emitter::loadScalarField(mlir::Value value,
     line("uint16_t " + bits + ";");
     line("memcpy(&" + bits + ", " + fieldStorageAddress(owner, *field,
         std::to_string(field->bitOffset / 8)) + ", sizeof(" + bits + "));");
-    line("_Float16 " + result + ";");
-    line("__asm__(\"fmv.h.x %0, %1\" : \"=f\"(" + result + ") : \"r\"(" + bits + "));");
+    line("_Float16 " + result + " = __builtin_bit_cast(_Float16, " + bits + ");");
     bindings[value] = scalar(result);
     return bindings[value];
   }

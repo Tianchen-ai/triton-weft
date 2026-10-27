@@ -1875,6 +1875,8 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
   auto fixedBase = scalarBase.getDefiningOp<mlir::arith::ConstantIndexOp>();
   const bool fixedLayer = layered && layerCount == 2 && layerForPart.size() == 1 &&
                           fixedBase && fixedBase.value() >= 0;
+  const bool alignedBase = layered && fixedBase && fixedBase.value() >= 0 &&
+                           fixedBase.value() % group == 0;
   const int64_t baseLayer = fixedLayer ? (fixedBase.value() % group) / layer : 0;
   for (int64_t logicalLayer : layerForPart) {
     if (!layered) {
@@ -1886,7 +1888,7 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
     }
     auto selection = selectLayer(
         extract.getAccess(), logicalLayer + baseLayer, layerCount, elementBits,
-        !fixedLayer && logicalBaseMultiple % group);
+        !fixedLayer && !alignedBase && logicalBaseMultiple % group);
     if (!selection)
       return false;
     physicalLayerForPart.push_back(selection->physicalLayer);

@@ -53,10 +53,11 @@ record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry
 LMUL 时同时验证 SEW、LMUL 和完整 layout，不能只按 VLEN 能容纳的 bit 数判断合法性。
 自然整字字段的 scalar/replica 传输沿用已有 alignment-safe byte copy，不因 alignment
 小于字段位宽而提前建立逐字节临时数组。原 encoded read 的快照仍由共同存储分析闭合。
-未对齐的单个 base-record F16 字段在目标具有 Zfhmin 时选择整数 byte load 与 `fmv.h.x`，
-直接交付相同的半精度 bits，避免原生工具链将未对齐 half load 转成栈上的 store/load。
+未对齐的单个 base-record F16 字段在目标具有 Zfhmin 时选择整数 byte load 与精确位重解释，
+直接交付相同的半精度 bits。terminal 以 `__builtin_bit_cast` 拼写这个已选传输，保留原生
+工具链对读取、寄存器移动及调度的可见性，不用不透明 asm 延长周围向量的驻留。
 该局部 transfer 保留读取时点与 NaN payload；能力和 Encoding 条件由选择及 verifier 共同检查，
-emitter 只拼写已选的位传输，不改变累加类型、对齐声明或持久布局。
+不改变累加类型、对齐声明或持久布局。
 普通 scalar F16/16-bit integer `bitcast` 复用同一 Zfhmin 能力判断，分别选择 `fmv.h.x`
 或 `fmv.x.h`；后者按结果的 16-bit 类型保留低位。操作选择和晚期 leaf 收尾调用共同的
 instruction 查询，不能在布局已经闭合后把该位传输重新解释成数值转换或栈中转。
@@ -1207,6 +1208,8 @@ layer 编号只取本 group 内的坐标。verifier 同时检查完整 raw span 
 这个 pass只闭合现有 field-to-register edge，不创建logical axis、Level或source traversal。
 单一 physical window 的两层 byte partition 在选择时闭合为一次 mask 或 shift，
 消除零位移与最高层的冗余 mask；更多 layer 或多 part 窗口保留统一映射及原有联合供给。
+已知整组对齐的常量基点，包括零，不携带动态 layer 偏移；多 part 的联合映射同样消费
+这个对齐证明，不因一般倍数分析缺少零的最大除数而重建多余 decode。
 partial materializer若需把一个已选unit load投影到issue window，只能机械投影原有plan与leaf，
 不能重新选择memory form。
 投影后的正 lane extent 可以为 1；它仍是已有 RVV carrier 的一个显式窗口，须满足
