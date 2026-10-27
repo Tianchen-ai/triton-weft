@@ -1470,6 +1470,9 @@ emitter 只输出已选序列。
 4096 单元、64 个结果 part，每个 part 至多八个标量段或八次 tile 重复。scalar runs 保留
 一个载体的拼接临时量；tile 重复直接复用目的寄存器。两者均不读取额外内存，也不改变
 tail 的逻辑有效域；数值与存储边界仍由原始程序约束。
+合法 tile 重复仍须比较完整局部工作：目的初始化加每个重复 tile 的 slide，必须少于
+已有索引构造和 gather 的指令工作才选中。坐标关系合法不等于重复序列更便宜；相同
+工作量保留 gather，临时寄存器仍由对应 leaf 和正式资源分析核算。
 
 index residue 折叠后成为常量且按 layer 对齐的 base，若窗口完全位于一个 layer，可将其
 layer 坐标移入既有 decode map，base 保留 group origin。实际 byte 地址与读取范围不变，

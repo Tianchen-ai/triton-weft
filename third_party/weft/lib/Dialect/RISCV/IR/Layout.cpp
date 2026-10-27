@@ -921,6 +921,16 @@ std::optional<int64_t> weft::riscv::binaryBroadcastInstructionCount(BinaryOp op)
   return count;
 }
 
+bool weft::riscv::preferRepeatedTileBroadcast(ValueType input, ValueType result) {
+  auto repeat = repeatedTileBroadcastFactor(input, result);
+  auto parts = rvvCarrierCount(result.getLayout());
+  auto gather = axisBroadcastInstructionCount(input, result);
+  // The repeated-tile leaf initializes its destination, then issues one slide
+  // for each additional tile. Legality alone does not make that dependent
+  // chain cheaper than building an index and issuing one gather.
+  return repeat && parts && gather && *repeat * *parts < *gather;
+}
+
 std::optional<int64_t> weft::riscv::packedAxisBroadcastFactor(ValueType input, ValueType result) {
   auto element = mlir::dyn_cast<mlir::IntegerType>(input.getElementType());
   auto a = input.getLayout(), b = result.getLayout();

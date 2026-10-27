@@ -247,7 +247,7 @@ bool rewriteComponent(riscv::IMEUnpackOp anchor, riscv::LayoutAttr layout,
       auto outputLanes = staticProduct(result.getLayout().getLaneFactors()).value() * result.getLayout().getReplicaGroup();
       if (required.getCarrier() != "rvv" || inputLanes == outputLanes)
         continue;
-      const bool repeated = riscv::repeatedTileBroadcastFactor(projected, result).has_value();
+      const bool repeated = riscv::preferRepeatedTileBroadcast(projected, result);
       if (mlir::isa<riscv::BinaryOp>(op) && !repeated)
         continue;
       if (type.getAxisIds().size() >= result.getAxisIds().size() || inputLanes > outputLanes)
@@ -349,7 +349,7 @@ std::optional<Work> work(riscv::KernelOp kernel) {
       } else if (broadcast.getLeaf().getInstruction() == "rvv.axis-broadcast.repeat-tile") {
         auto repeat = riscv::repeatedTileBroadcastFactor(input, output);
         if (!repeat) { complete = false; return; }
-        count = (*repeat - 1) * *riscv::rvvCarrierCount(output.getLayout());
+        count = *repeat * *riscv::rvvCarrierCount(output.getLayout());
       } else {
         auto instructions = riscv::axisBroadcastInstructionCount(input, output);
         if (!instructions) { complete = false; return; }

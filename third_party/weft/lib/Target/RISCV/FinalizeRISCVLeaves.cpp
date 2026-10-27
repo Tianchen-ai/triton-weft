@@ -942,7 +942,7 @@ public:
       rewriter.eraseOp(widen);
     }
     getOperation().walk([&](riscv::RVVAxisBroadcastOp broadcast) {
-      if (riscv::repeatedTileBroadcastFactor(broadcast.getInput().getType(), broadcast.getResult().getType())) {
+      if (riscv::preferRepeatedTileBroadcast(broadcast.getInput().getType(), broadcast.getResult().getType())) {
         auto before = broadcast.getLeaf();
         broadcast.setLeafAttr(riscv_internal::leaf(builder, "rvv", "axis-broadcast",
             "rvv.axis-broadcast.repeat-tile", "rvv.axis-broadcast.repeat-tile",
