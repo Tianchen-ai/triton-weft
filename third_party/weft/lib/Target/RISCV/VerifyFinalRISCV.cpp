@@ -548,11 +548,13 @@ public:
         auto access = field.getAccess();
         auto leaf = field.getLeaf();
         const auto facts = riscv_internal::fieldFacts(field);
+        const bool halfBits = leaf.getInstruction() == "scalar.encoded.f16-bits" &&
+                              riscv::isScalarHalfBitRead(field);
         if (!access || access.getMapping() == "opaque" ||
             leaf.getEngine() != "transfer" ||
             leaf.getFamily() != "encoded-field" ||
-            leaf.getInstruction() !=
-                ("rvv.encoded." + access.getMapping()).str()) {
+            (!halfBits && leaf.getInstruction() !=
+                ("rvv.encoded." + access.getMapping()).str())) {
           field.emitError(
               "final encoded field has no closed storage mapping and transfer leaf");
           failed = true;

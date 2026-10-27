@@ -3974,6 +3974,22 @@ mlir::LogicalResult AtomicRMWOp::verify() {
   return mlir::success();
 }
 
+bool weft::riscv::isScalarHalfBitRead(FieldOp field) {
+  auto access = field.getAccess();
+  auto encoding = mlir::dyn_cast<weft::kernel::EncodingType>(elementOf(field.getOwner().getType()));
+  if (!field.getResult().getType().isF16() || !encoding || encoding.getKind() != "base" ||
+      access.getMapping() != "natural" || access.getStorageBits() != 16 ||
+      access.getBitOffset() % 8 || access.getAlignment() != 1)
+    return false;
+  auto declaration = findEncodingDeclaration(field, baseEncodingFamily(field, encoding));
+  auto kernel = field->getParentOfType<KernelOp>();
+  weft::RISCVISAFacts facts;
+  std::string error;
+  return declaration && declaration.getByteOrder() == "little" && kernel &&
+      weft::parseRISCVISAFacts(kernel.getTarget().getMarch(), kernel.getTarget().getVlenBits(), facts, error) &&
+      facts.hasExtension("zfhmin");
+}
+
 mlir::LogicalResult FieldOp::verify() {
   mlir::Type ownerType = getOwner().getType();
   mlir::Type encodingType;
@@ -4053,6 +4069,10 @@ mlir::LogicalResult FieldOp::verify() {
       return emitOpError(
           "physical field descriptor must use the declared dense element width");
   }
+  if (getLeaf().getInstruction() == "scalar.encoded.f16-bits" &&
+      (!isScalarHalfBitRead(*this) || getLeaf().getTemporaryGroups() != 0 ||
+       !exactLeaf(getLeaf(), "transfer", "encoded-field", "scalar.encoded.f16-bits", "none", "exact")))
+    return emitOpError("half-bit field read requires a scalar unaligned base field and Zfhmin");
   return verifyLeafOperation(*this);
 }
 

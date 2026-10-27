@@ -53,6 +53,10 @@ record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry
 LMUL 时同时验证 SEW、LMUL 和完整 layout，不能只按 VLEN 能容纳的 bit 数判断合法性。
 自然整字字段的 scalar/replica 传输沿用已有 alignment-safe byte copy，不因 alignment
 小于字段位宽而提前建立逐字节临时数组。原 encoded read 的快照仍由共同存储分析闭合。
+未对齐的单个 base-record F16 字段在目标具有 Zfhmin 时选择整数 byte load 与 `fmv.h.x`，
+直接交付相同的半精度 bits，避免原生工具链将未对齐 half load 转成栈上的 store/load。
+该局部 transfer 保留读取时点与 NaN payload；能力和 Encoding 条件由选择及 verifier 共同检查，
+emitter 只拼写已选的位传输，不改变累加类型、对齐声明或持久布局。
 同一 natural scalar field 沿已声明 interleave cohort 的 RVV 读取也复用已有 unit-byte 或
 indexed-byte transfer；它保持字节对齐，不把未对齐地址强制当作自然对齐的元素指针。
 

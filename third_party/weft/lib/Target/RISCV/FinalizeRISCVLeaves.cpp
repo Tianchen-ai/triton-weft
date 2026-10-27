@@ -612,6 +612,9 @@ mlir::LogicalResult materializeFieldReads(mlir::ModuleOp module) {
   llvm::SmallVector<riscv::FieldOp> fields;
   module.walk([&](riscv::FieldOp field) { fields.push_back(field); });
   for (auto field : fields) {
+    if (riscv::isScalarHalfBitRead(field))
+      field.setLeafAttr(riscv_internal::leaf(rewriter, "transfer", "encoded-field",
+          "scalar.encoded.f16-bits", "scalar.encoded.f16-bits", 0, 0));
     auto readsStorage = [&](mlir::Operation *user) {
       auto effects = mlir::dyn_cast<mlir::MemoryEffectOpInterface>(user);
       if (!effects) return false;

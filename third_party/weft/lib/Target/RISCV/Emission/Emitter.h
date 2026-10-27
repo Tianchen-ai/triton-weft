@@ -122,6 +122,7 @@ struct FieldInfo {
   int64_t regularBase = 0;
   int64_t regularStride = 0;
   int64_t regularRepeat = 0;
+  std::string scalarRead;
 };
 
 struct Binding {

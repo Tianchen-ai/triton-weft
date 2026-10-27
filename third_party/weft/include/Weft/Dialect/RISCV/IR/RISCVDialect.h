@@ -88,6 +88,7 @@ bool isContiguousInterleavedScalarRead(mlir::Value input, ValueType result,
                                       AccessAttr access);
 llvm::StringRef fieldReadInstruction(mlir::Value input, ValueType result,
                                      AccessAttr access);
+bool isScalarHalfBitRead(FieldOp field);
 /// Upper bound for the selected fixed load/decode sequence, including its
 /// output assembly. Address operands themselves are separate SSA live values.
 std::optional<int64_t> fieldReadTemporaryGroups(

@@ -13,6 +13,7 @@ mlir::LogicalResult Emitter::compileField(riscv::FieldOp operation) {
   binding.field.name = operation.getName().str();
   binding.field.storageAccess = operation.getAccess();
   binding.field.useAccess = operation.getAccess();
+  binding.field.scalarRead = operation.getLeaf().getInstruction().str();
   binding.field.elementType =
       riscv_internal::logicalElement(operation.getResult().getType());
   if (mlir::isa<kernel::EncodingType>(binding.field.elementType)) {

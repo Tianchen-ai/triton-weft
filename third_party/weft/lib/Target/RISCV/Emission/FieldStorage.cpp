@@ -167,6 +167,16 @@ mlir::FailureOr<Binding> Emitter::loadScalarField(mlir::Value value,
   if (!kind || (*kind != Binding::Kind::Scalar && *kind != Binding::Kind::ScalarTuple) ||
       owner.kind != Binding::Kind::Record || !field || !type || field->bitOffset % 8)
     return reject("scalar field read requires a selected carrier and byte-addressable record");
+  if (projection.field.scalarRead == "scalar.encoded.f16-bits") {
+    const std::string bits = fresh("field_bits"), result = fresh("field_half");
+    line("uint16_t " + bits + ";");
+    line("memcpy(&" + bits + ", " + fieldStorageAddress(owner, *field,
+        std::to_string(field->bitOffset / 8)) + ", sizeof(" + bits + "));");
+    line("_Float16 " + result + ";");
+    line("__asm__(\"fmv.h.x %0, %1\" : \"=f\"(" + result + ") : \"r\"(" + bits + "));");
+    bindings[value] = scalar(result);
+    return bindings[value];
+  }
   const int64_t count = shaped ? scalarPartCount(value) : 1;
   if (count <= 0) return reject("scalar field read has no physical parts");
   const bool regular = projection.field.regularRepeat > 0;
