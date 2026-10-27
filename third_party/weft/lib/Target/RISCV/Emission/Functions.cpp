@@ -19,21 +19,13 @@ mlir::LogicalResult Emitter::compileHelper(riscv::HelperOp op) {
   std::string body;
   llvm::raw_string_ostream stream(body);
   Emitter function(module, kernel, stream);
+  function.indent = 1;
   function.scalarHelperResult = scalarResult;
   function.axisScopes = axisScopes;
   function.fieldProjections = fieldProjections;
   std::string name = fresh(identifier(kernel.getSymName()) + "_" + identifier(op.getName()));
   llvm::SmallVector<std::string> declarations, arguments;
   std::map<std::pair<std::string, std::string>, std::string> inputs;
-  for (auto attribute : kernel.getShapeSymbols()) {
-    auto symbol = mlir::cast<mlir::StringAttr>(attribute).getValue();
-    if (!autoBindings.contains(symbol)) {
-      std::string value = identifier(symbol);
-      declarations.push_back("size_t " + value);
-      arguments.push_back(value);
-      inputs[{"size_t", value}] = value;
-    }
-  }
   auto parameter = [&](std::string type, std::string value, bool output = false) {
     // Descriptor parts refer to evaluated values. Retain literal extents and
     // reuse an already passed named value instead of severing their equality
@@ -117,6 +109,17 @@ mlir::LogicalResult Emitter::compileHelper(riscv::HelperOp op) {
     auto bound = bind(capture, bindings.lookup(capture), false);
     if (mlir::failed(bound)) return fail(op, "helper capture has no selected native representation");
     function.bindings[capture] = std::move(*bound);
+  }
+  // Explicit physical captures define the native parameter order. Symbolic
+  // descriptor formulas use local aliases of those same parameters, rather
+  // than imposing every kernel dimension ahead of the closure's arguments.
+  for (auto attribute : kernel.getShapeSymbols()) {
+    auto symbol = mlir::cast<mlir::StringAttr>(attribute).getValue();
+    if (!autoBindings.contains(symbol)) {
+      std::string value = identifier(symbol);
+      std::string argument = parameter("size_t", value);
+      function.line("const size_t " + value + " = " + argument + ";");
+    }
   }
   for (auto &[axis, scopes] : function.axisScopes)
     for (auto &scope : scopes) {

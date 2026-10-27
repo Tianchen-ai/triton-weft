@@ -306,6 +306,8 @@ terminal 以 Clang 23 的 `fmaximum_num` / `fminimum_num` builtin 拼写该已�
 verifier 核对，terminal 不自行推断调用约定。源级 noinline 和控制流返回语义保持不变。
 descriptor 的常量部分保持为常量，同类型的同一个已求值具名标量只传一次；不把本已相等的
 shape、point 与 stride 分量变成彼此无关的原生参数，也不重算或合并 payload 读取。
+native 参数顺序跟随已冻结的 captures；shape symbol 通过相同参数的局部别名使用，不再
+把所有 kernel 维度额外放在参数列表前端。符号和 descriptor 的相等关系在 helper 内保持可见。
 
 同一收尾 pass 为原生 kernel 入口写入 `native_entry_alignment=32`。这是有界的代码放置
 策略，最多增加 30 bytes 对齐填充，不是 VLEN 或 cache-line 大小声明。它避免入口仅按
