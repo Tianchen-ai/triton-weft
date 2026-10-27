@@ -169,10 +169,13 @@ bool visitStorageWrites(Operation *operation, llvm::function_ref<bool(Value)> vi
   }
   if (operation->getNumRegions()) {
     if (!operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>()) return visit({});
+    // A helper consumes its own return effect. It cannot terminate a caller's
+    // traversal or overwrite the caller's storage merely by returning.
+    const bool nestedControlBarriers = includeControlBarriers && !isa<HelperOp>(operation);
     for (Region &region : operation->getRegions())
       for (Block &block : region)
         for (Operation &nested : block)
-          if (!visitStorageWrites(&nested, visit, includeControlBarriers)) return false;
+          if (!visitStorageWrites(&nested, visit, nestedControlBarriers)) return false;
   }
   return true;
 }
@@ -924,6 +927,10 @@ bool weft::riscv::storageWrittenBetween(Value storage, Operation *read,
       [&](Operation *op) { return !writesOrigins(op, origins); },
       [](Operation *op) {
         if (isa<LoopOp>(op)) return weft::analysis::StorageControl::Repeated;
+        // A helper body is entered once at this call site. Follow the ordered
+        // path to its consumer just as for one conditional region; writes and
+        // early-return barriers on that path are still checked individually.
+        if (isa<HelperOp>(op)) return weft::analysis::StorageControl::Branch;
         return weft::analysis::structuredStorageControl(op);
       });
 }
