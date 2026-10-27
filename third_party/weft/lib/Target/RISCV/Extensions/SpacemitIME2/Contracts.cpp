@@ -1,5 +1,5 @@
-#include "Weft/Target/RISCVFragment.h"
-#include "Weft/Target/RISCVExtensions.h"
+#include "Weft/Target/RISCV/RISCVFragment.h"
+#include "Weft/Target/RISCV/RISCVExtensions.h"
 
 namespace {
 llvm::ArrayRef<weft::RISCVFragmentCapability> fragmentContracts() {

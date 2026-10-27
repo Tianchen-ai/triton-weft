@@ -1,13 +1,13 @@
 #ifndef WEFT_TARGET_EMISSION_EMITTER_H
 #define WEFT_TARGET_EMISSION_EMITTER_H
 
-#include "../RISCVIntrinsicC.h"
-#include "../PhysicalDiagnostics.h"
+#include "Emission/RISCVIntrinsicC.h"
+#include "Backend/PhysicalDiagnostics.h"
 
-#include "../RISCVPhysicalSupport.h"
+#include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Weft/Dialect/Kernel/IR/ShapeBindings.h"
 #include "Weft/Dialect/Kernel/IR/StrideABI.h"
-#include "Weft/Target/RISCVCompiler.h"
+#include "Weft/Target/RISCV/RISCVCompiler.h"
 
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"

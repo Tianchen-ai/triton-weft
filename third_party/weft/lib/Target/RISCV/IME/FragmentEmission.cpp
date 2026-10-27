@@ -1,5 +1,5 @@
 #include "FragmentEmission.h"
-#include "Weft/Target/RISCVExtensions.h"
+#include "Weft/Target/RISCV/RISCVExtensions.h"
 
 namespace weft {
 #define WEFT_RISCV_EXTENSION(module) const RISCVExtension &get##module##Extension();

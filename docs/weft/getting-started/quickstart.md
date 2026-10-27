@@ -46,7 +46,7 @@ loaded[(triton.cdiv(x.size, 64),)](x, y, x.size, 1.25, -0.5)
 从仓库根目录运行现有调用示例：
 
 ```sh
-python examples/weft/use.py --size 4097 --threads 2
+python -m examples.weft.language.views --size 4097 --threads 2
 ```
 
 性能、数值覆盖和 llama.cpp 测量使用独立 Weft Bench，结果放在其输出目录。

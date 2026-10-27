@@ -1,290 +1,297 @@
+"""GGML base storage encodings and the shared Q4_K row derivation.
+
+These declarations describe bytes and logical fields, not reference kernels.
+GGML-specific author layouts for benchmark candidates live in Bench's
+weft_bench.kernels.ggml.layouts package. Applications prepare persistent storage
+explicitly before passing it to a kernel or binding a native GGML call site.
+"""
 from __future__ import annotations
 
 import triton
-import triton.language as wl
+import triton.language as tl
 
 
 @triton.encoding
 class Q1_0:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 128
-    d: wl.f16
-    q: wl.u1[128] @ wl.grouped(elements=8) @ wl.bit_layers(elements=1, order=wl.lo_first)
+    d: tl.f16
+    q: tl.u1[128] @ tl.grouped(elements=8) @ tl.bit_layers(elements=1, order=tl.lo_first)
 
 
 @triton.encoding
 class Q4_0:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 32
-    d: wl.f16
-    q: wl.u4[32] @ wl.grouped(elements=32) @ wl.bit_layers(elements=16, order=wl.lo_first)
+    d: tl.f16
+    q: tl.u4[32] @ tl.grouped(elements=32) @ tl.bit_layers(elements=16, order=tl.lo_first)
 
 
 @triton.encoding
 class Q4_1:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 32
-    d: wl.f16
-    m: wl.f16
-    q: wl.u4[32] @ wl.grouped(elements=32) @ wl.bit_layers(elements=16, order=wl.lo_first)
+    d: tl.f16
+    m: tl.f16
+    q: tl.u4[32] @ tl.grouped(elements=32) @ tl.bit_layers(elements=16, order=tl.lo_first)
 
 
 @triton.encoding
 class Q5_0:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 32
-    d: wl.f16
-    qh: wl.u1[32] @ wl.grouped(elements=8) @ wl.bit_layers(elements=1, order=wl.lo_first)
-    q: wl.u4[32] @ wl.grouped(elements=32) @ wl.bit_layers(elements=16, order=wl.lo_first)
+    d: tl.f16
+    qh: tl.u1[32] @ tl.grouped(elements=8) @ tl.bit_layers(elements=1, order=tl.lo_first)
+    q: tl.u4[32] @ tl.grouped(elements=32) @ tl.bit_layers(elements=16, order=tl.lo_first)
 
 
 @triton.encoding
 class Q5_1:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 32
-    d: wl.f16
-    m: wl.f16
-    qh: wl.u1[32] @ wl.grouped(elements=8) @ wl.bit_layers(elements=1, order=wl.lo_first)
-    q: wl.u4[32] @ wl.grouped(elements=32) @ wl.bit_layers(elements=16, order=wl.lo_first)
+    d: tl.f16
+    m: tl.f16
+    qh: tl.u1[32] @ tl.grouped(elements=8) @ tl.bit_layers(elements=1, order=tl.lo_first)
+    q: tl.u4[32] @ tl.grouped(elements=32) @ tl.bit_layers(elements=16, order=tl.lo_first)
 
 
 @triton.encoding
 class Q8_0:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 32
-    d: wl.f16
-    q: wl.i8[32]
+    d: tl.f16
+    q: tl.i8[32]
 
 
 @triton.encoding
 class Q2_K:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    scales: wl.u8[16]
-    q: wl.u2[256] @ wl.grouped(elements=128) @ wl.bit_layers(elements=32, order=wl.lo_first)
-    d: wl.f16
-    dmin: wl.f16
+    scales: tl.u8[16]
+    q: tl.u2[256] @ tl.grouped(elements=128) @ tl.bit_layers(elements=32, order=tl.lo_first)
+    d: tl.f16
+    dmin: tl.f16
 
 
 @triton.encoding
 class Q3_K:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    hmask: wl.u1[256] @ wl.grouped(elements=256) @ wl.bit_layers(elements=32, order=wl.lo_first)
-    q: wl.u2[256] @ wl.grouped(elements=128) @ wl.bit_layers(elements=32, order=wl.lo_first)
-    scale_low: wl.u4[16] @ wl.grouped(elements=16) @ wl.bit_layers(elements=8, order=wl.lo_first)
-    scale_high: wl.u2[16] @ wl.grouped(elements=16) @ wl.bit_layers(elements=4, order=wl.lo_first)
-    d: wl.f16
+    hmask: tl.u1[256] @ tl.grouped(elements=256) @ tl.bit_layers(elements=32, order=tl.lo_first)
+    q: tl.u2[256] @ tl.grouped(elements=128) @ tl.bit_layers(elements=32, order=tl.lo_first)
+    scale_low: tl.u4[16] @ tl.grouped(elements=16) @ tl.bit_layers(elements=8, order=tl.lo_first)
+    scale_high: tl.u2[16] @ tl.grouped(elements=16) @ tl.bit_layers(elements=4, order=tl.lo_first)
+    d: tl.f16
 
 
 @triton.encoding
 class Q4_K:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    d: wl.f16
-    dmin: wl.f16
-    sc: wl.u6[8] @ wl.pack_fields(group=4, fields=2, low_bits=4, order=wl.lo_first)
-    m: wl.u6[8] @ wl.pack_fields(group=4, fields=2, low_bits=4, order=wl.lo_first)
-    q: wl.u4[256] @ wl.grouped(elements=64) @ wl.bit_layers(elements=32, order=wl.lo_first)
+    d: tl.f16
+    dmin: tl.f16
+    sc: tl.u6[8] @ tl.pack_fields(group=4, fields=2, low_bits=4, order=tl.lo_first)
+    m: tl.u6[8] @ tl.pack_fields(group=4, fields=2, low_bits=4, order=tl.lo_first)
+    q: tl.u4[256] @ tl.grouped(elements=64) @ tl.bit_layers(elements=32, order=tl.lo_first)
 
 
 @triton.encoding
 class Q5_K:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    d: wl.f16
-    dmin: wl.f16
-    sc: wl.u6[8] @ wl.pack_fields(group=4, fields=2, low_bits=4, order=wl.lo_first)
-    m: wl.u6[8] @ wl.pack_fields(group=4, fields=2, low_bits=4, order=wl.lo_first)
-    qh: wl.u1[256] @ wl.grouped(elements=256) @ wl.bit_layers(elements=32, order=wl.lo_first)
-    q: wl.u4[256] @ wl.grouped(elements=64) @ wl.bit_layers(elements=32, order=wl.lo_first)
+    d: tl.f16
+    dmin: tl.f16
+    sc: tl.u6[8] @ tl.pack_fields(group=4, fields=2, low_bits=4, order=tl.lo_first)
+    m: tl.u6[8] @ tl.pack_fields(group=4, fields=2, low_bits=4, order=tl.lo_first)
+    qh: tl.u1[256] @ tl.grouped(elements=256) @ tl.bit_layers(elements=32, order=tl.lo_first)
+    q: tl.u4[256] @ tl.grouped(elements=64) @ tl.bit_layers(elements=32, order=tl.lo_first)
 
 
 @triton.encoding
 class Q6_K:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     elements = 256
-    ql: wl.u4[256] @ wl.grouped(elements=128) @ wl.bit_layers(elements=64, order=wl.lo_first)
-    qh: wl.u2[256] @ wl.grouped(elements=128) @ wl.bit_layers(elements=32, order=wl.lo_first)
-    scales: wl.i8[16] @ wl.grouped(elements=16) @ wl.bit_layers(elements=16, order=wl.lo_first)
-    d: wl.f16
+    ql: tl.u4[256] @ tl.grouped(elements=128) @ tl.bit_layers(elements=64, order=tl.lo_first)
+    qh: tl.u2[256] @ tl.grouped(elements=128) @ tl.bit_layers(elements=32, order=tl.lo_first)
+    scales: tl.i8[16] @ tl.grouped(elements=16) @ tl.bit_layers(elements=16, order=tl.lo_first)
+    d: tl.f16
 
 
 @triton.encoding
 class IQ1_S:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    d: wl.f16
-    q: wl.u8[32]
-    qh: wl.u16[8]
+    d: tl.f16
+    q: tl.u8[32]
+    qh: tl.u16[8]
 
 
 @triton.encoding
 class IQ1_M:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     elements = 256
-    q: wl.u8[32]
-    qh: wl.u8[16]
-    scales: wl.u8[8]
+    q: tl.u8[32]
+    qh: tl.u8[16]
+    scales: tl.u8[8]
 
 
 @triton.encoding
 class IQ2_S:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    d: wl.f16
-    q: wl.u8[32]
-    signs: wl.u1[256] @ wl.grouped(elements=8) @ wl.bit_layers(elements=1, order=wl.lo_first)
-    qh: wl.u8[8]
-    scales: wl.u8[8]
+    d: tl.f16
+    q: tl.u8[32]
+    signs: tl.u1[256] @ tl.grouped(elements=8) @ tl.bit_layers(elements=1, order=tl.lo_first)
+    qh: tl.u8[8]
+    scales: tl.u8[8]
 
 
 @triton.encoding
 class IQ2_XS:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    d: wl.f16
-    q: wl.u16[32]
-    scales: wl.u8[8]
+    d: tl.f16
+    q: tl.u16[32]
+    scales: tl.u8[8]
 
 
 @triton.encoding
 class IQ2_XXS:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    d: wl.f16
-    q: wl.u16[32]
+    d: tl.f16
+    q: tl.u16[32]
 
 
 @triton.encoding
 class I8X8:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 8
     elements = 8
-    values: wl.i8[8]
+    values: tl.i8[8]
 
 
 @triton.encoding
 class I8X4:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 4
     elements = 4
-    values: wl.i8[4]
+    values: tl.i8[4]
 
 
 @triton.encoding
 class IQ3_S:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    d: wl.f16
-    q: wl.u8[64]
-    qh: wl.u1[64] @ wl.grouped(elements=8) @ wl.bit_layers(elements=1, order=wl.lo_first)
-    signs: wl.u1[256] @ wl.grouped(elements=8) @ wl.bit_layers(elements=1, order=wl.lo_first)
-    scales: wl.u4[8] @ wl.grouped(elements=2) @ wl.bit_layers(elements=1, order=wl.lo_first)
+    d: tl.f16
+    q: tl.u8[64]
+    qh: tl.u1[64] @ tl.grouped(elements=8) @ tl.bit_layers(elements=1, order=tl.lo_first)
+    signs: tl.u1[256] @ tl.grouped(elements=8) @ tl.bit_layers(elements=1, order=tl.lo_first)
+    scales: tl.u4[8] @ tl.grouped(elements=2) @ tl.bit_layers(elements=1, order=tl.lo_first)
 
 
 @triton.encoding
 class IQ3_XXS:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    d: wl.f16
-    q: wl.u8[64]
-    metadata: wl.u32[8]
+    d: tl.f16
+    q: tl.u8[64]
+    metadata: tl.u32[8]
 
 
 @triton.encoding
 class IQ4_NL:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 32
-    d: wl.f16
-    q: wl.u4[32] @ wl.grouped(elements=32) @ wl.bit_layers(elements=16, order=wl.lo_first)
+    d: tl.f16
+    q: tl.u4[32] @ tl.grouped(elements=32) @ tl.bit_layers(elements=16, order=tl.lo_first)
 
 
 @triton.encoding
 class IQ4_XS:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    d: wl.f16
-    scales_h: wl.u16
-    scales_l: wl.u8[4]
-    q: wl.u4[256] @ wl.grouped(elements=32) @ wl.bit_layers(elements=16, order=wl.lo_first)
+    d: tl.f16
+    scales_h: tl.u16
+    scales_l: tl.u8[4]
+    q: tl.u4[256] @ tl.grouped(elements=32) @ tl.bit_layers(elements=16, order=tl.lo_first)
 
 
 @triton.encoding
 class TQ1_0:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    q: wl.u8[48]
-    qh: wl.u8[4]
-    d: wl.f16
+    q: tl.u8[48]
+    qh: tl.u8[4]
+    d: tl.f16
 
 
 @triton.encoding
 class TQ2_0:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 256
-    q: wl.u2[256] @ wl.grouped(elements=128) @ wl.bit_layers(elements=32, order=wl.lo_first)
-    d: wl.f16
+    q: tl.u2[256] @ tl.grouped(elements=128) @ tl.bit_layers(elements=32, order=tl.lo_first)
+    d: tl.f16
 
 
 @triton.encoding
 class MXFP4:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     elements = 32
-    e: wl.u8
-    q: wl.u4[32] @ wl.grouped(elements=32) @ wl.bit_layers(elements=16, order=wl.lo_first)
+    e: tl.u8
+    q: tl.u4[32] @ tl.grouped(elements=32) @ tl.bit_layers(elements=16, order=tl.lo_first)
 
 
 @triton.encoding
 class NVFP4:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     elements = 64
-    d: wl.u8[4]
-    q: wl.u4[64] @ wl.grouped(elements=16) @ wl.bit_layers(elements=8, order=wl.lo_first)
+    d: tl.u8[4]
+    q: tl.u4[64] @ tl.grouped(elements=16) @ tl.bit_layers(elements=8, order=tl.lo_first)
 
 
 @triton.encoding
 class Q8_1:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 2
     elements = 32
-    d: wl.f16
-    s: wl.f16
-    q: wl.i8[32]
+    d: tl.f16
+    s: tl.f16
+    q: tl.i8[32]
 
 
 @triton.encoding
 class Q8_K:
-    layout = (wl.bitorder.lsb_first, wl.byteorder.little)
+    layout = (tl.bitorder.lsb_first, tl.byteorder.little)
     alignment = 4
     elements = 256
-    ds: wl.f32
-    q: wl.i8[256]
-    bsum: wl.i16[16]
+    ds: tl.f32
+    q: tl.i8[256]
+    bsum: tl.i16[16]
 
 
 @triton.derive
 def Q4K_I(
-    W: wl.View[Q4_K, (M, K)], *, rows: wl.static[int]
-) -> wl.View[Q4K_I[rows], (M, K)]:
-    return wl.interleave(W, rows=rows)
+    W: tl.View[Q4_K, (M, K)], *, rows: tl.static[int]
+) -> tl.View[Q4K_I[rows], (M, K)]:
+    return tl.interleave(W, rows=rows)

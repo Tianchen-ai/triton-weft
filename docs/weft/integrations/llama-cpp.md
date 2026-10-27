@@ -4,7 +4,7 @@ Python supplies compiler input. GGML workers execute an exported native library.
 There is no Python interpreter, compiler subprocess or additional OpenMP team
 inside the replaced call.
 
-The complete tutorial is `examples/weft/llama_cpp.py`. It declares Q8_0 storage,
+The complete tutorial is `examples/weft/deployment/llama_cpp.py`. It declares Q8_0 storage,
 reduces each 32-element signed byte block into I32, applies both FP16 scales in
 F32, and accumulates a row. Its public arguments are `W[K], X[K], Y[1]` with one
 dynamic K, matching the `ggml.vec_dot/q8_0` role. It is a readable deployment
@@ -13,7 +13,7 @@ example, not a promise of acceleration over an optimized native dot.
 ## Compile and bind
 
 ```sh
-python examples/weft/llama_cpp.py /path/to/new-package --profile native
+python -m examples.weft.deployment.llama_cpp /path/to/new-package --profile native
 ```
 
 For a cross build, pass `--profile k1` (or the selected target) and `--toolchain`

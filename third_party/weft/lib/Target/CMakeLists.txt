@@ -1,8 +1,2 @@
-add_library(WeftSourceSpecialization STATIC BindSourceParameters.cpp)
-target_link_libraries(WeftSourceSpecialization PUBLIC WeftKernelDialect MLIRIR MLIRPass)
-
-add_library(WeftPhysicalTransforms STATIC LoopPipeline.cpp FullTiles.cpp)
-target_link_libraries(WeftPhysicalTransforms PUBLIC MLIRArithDialect MLIRSCFDialect MLIRVectorDialect MLIRTransforms MLIRIR)
-
 add_subdirectory(RISCV)
 add_subdirectory(X86)

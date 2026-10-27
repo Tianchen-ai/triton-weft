@@ -1,0 +1,3 @@
+add_library(WeftPhysicalTransforms STATIC LoopPipeline.cpp FullTiles.cpp)
+target_link_libraries(WeftPhysicalTransforms PUBLIC
+  MLIRArithDialect MLIRSCFDialect MLIRVectorDialect MLIRTransforms MLIRIR)

@@ -2,7 +2,7 @@
 #define WEFT_DIALECT_RISCV_IR_FRAGMENT_H
 
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
-#include "Weft/Target/RISCVFragment.h"
+#include "Weft/Target/RISCV/RISCVFragment.h"
 
 namespace weft::riscv {
 FragmentCapabilityAttr fragmentCapabilityAttr(

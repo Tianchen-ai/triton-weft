@@ -2,8 +2,8 @@
 #define WEFT_RUNTIME_INTERNAL_H
 
 #include "weft/runtime.h"
-#include "Weft/Target/RISCVTargetProfile.h"
-#include "Weft/Target/X86Target.h"
+#include "Weft/Target/RISCV/RISCVTargetProfile.h"
+#include "Weft/Target/X86/X86Target.h"
 #include "llvm/Support/JSON.h"
 
 #include <map>

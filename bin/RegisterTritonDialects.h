@@ -1,8 +1,8 @@
 #pragma once
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
-#include "Weft/Target/RISCVPipeline.h"
-#include "Weft/Target/X86Compiler.h"
+#include "Weft/Target/RISCV/RISCVPipeline.h"
+#include "Weft/Target/X86/X86Compiler.h"
 #include "amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "amd/include/TritonAMDGPUTransforms/Passes.h"
 #include "nvidia/include/Dialect/NVGPU/IR/Dialect.h"

@@ -1,6 +1,6 @@
 #include "Emitter.h"
 #include "../IME/FragmentEmission.h"
-#include "Weft/Target/RISCVFragment.h"
+#include "Weft/Target/RISCV/RISCVFragment.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 

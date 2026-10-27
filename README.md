@@ -89,9 +89,9 @@ pointwise code, row softmax, matmul, scan, histogram, autotuning, native export,
 PyTorch and the existing quantized/model programs. For example:
 
 ```sh
-python examples/weft/triton_basics.py --operation softmax
-python examples/weft/triton_basics.py --operation histogram
-python examples/weft/autotune_export.py /path/to/new/artifact
+python -m examples.weft.language.triton_basics --operation softmax
+python -m examples.weft.language.triton_basics --operation histogram
+python -m examples.weft.deployment.autotune_export /path/to/new/artifact
 ```
 
 Choose a route on each contraction with `tl.dot(a, b, engine="vector")` or

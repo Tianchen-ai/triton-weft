@@ -46,11 +46,11 @@ mask 为假的元素不发生访存。`CompiledKernel.asm` 可检查语义 IR、
 从仓库根目录运行正式示例：
 
 ```sh
-python examples/weft/triton_basics.py --operation softmax
-python examples/weft/triton_basics.py --operation matmul
-python examples/weft/triton_basics.py --operation scan
-python examples/weft/triton_basics.py --operation histogram
-python examples/weft/autotune_export.py /path/to/new/artifact
+python -m examples.weft.language.triton_basics --operation softmax
+python -m examples.weft.language.triton_basics --operation matmul
+python -m examples.weft.language.triton_basics --operation scan
+python -m examples.weft.language.triton_basics --operation histogram
+python -m examples.weft.deployment.autotune_export /path/to/new/artifact
 ```
 
 PyTorch 图接入先按安装指南运行一次 `python -m triton.tools.pytorch`，
