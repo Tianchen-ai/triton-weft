@@ -71,8 +71,23 @@ public:
           }
         }
       });
+      llvm::SmallPtrSet<Operation *, 16> pipelineConsumers;
+      kernel.walk([&](scf::ForOp loop) {
+        auto schedule = loop->getAttrOfType<weft::riscv::ScheduleAttr>("weft.riscv.schedule");
+        if (!schedule || schedule.getPipelineDepth() < 2 ||
+            loop.getNumRegionIterArgs() == 0 || guardedFieldPayloads(loop) == 0) return;
+        // A carried computation consumes the same independent input bounds
+        // across its physical pipeline versions. Close those bounds before
+        // scheduling, instead of retaining a row guard in every reduction
+        // issue. Only its existing ancestors can own the complete domain.
+        for (Operation *scope = loop; scope && scope != kernel;
+             scope = scope->getParentOp())
+          if (isa<scf::ForOp>(scope)) pipelineConsumers.insert(scope);
+      });
       auto growth = weft::separateFullTiles(kernel, true, guardedFieldPayloads,
-          [&](Operation *scope) { return snapshotConsumers.contains(scope); });
+          [&](Operation *scope) {
+            return snapshotConsumers.contains(scope) || pipelineConsumers.contains(scope);
+          });
       if (failed(growth)) { invalid = true; return; }
       Builder b(&getContext());
       for (Operation *full : growth->fullDomains)
@@ -94,6 +109,7 @@ public:
       kernel->setAttr("weft.riscv.full_tile_added_operations", b.getI64IntegerAttr(growth->operations));
       kernel->setAttr("weft.riscv.full_domain_versions", b.getI64IntegerAttr(growth->domainVersions));
       kernel->setAttr("weft.riscv.full_tile_snapshot_scopes", b.getI64IntegerAttr(snapshotConsumers.size()));
+      kernel->setAttr("weft.riscv.full_tile_pipeline_scopes", b.getI64IntegerAttr(pipelineConsumers.size()));
     });
     if (invalid) signalPassFailure();
   }
