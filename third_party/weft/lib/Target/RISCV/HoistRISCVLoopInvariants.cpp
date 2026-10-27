@@ -38,50 +38,6 @@ bool hasAtLeastIterations(mlir::LoopLikeOpInterface loop, int64_t count) {
   return iterations && *iterations >= uint64_t(count);
 }
 
-void materializeDeferredScalarFieldsBeforeReadLoops(
-    mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
-  llvm::SmallVector<weft::riscv::FieldOp> fields;
-  module.walk([&](weft::riscv::FieldOp field) { fields.push_back(field); });
-  for (weft::riscv::FieldOp field : fields) {
-    mlir::Type type = field.getResult().getType();
-    if ((!type.isIndex() &&
-         !mlir::isa<mlir::IntegerType, mlir::FloatType>(type)) ||
-        llvm::any_of(field.getResult().getUsers(), [](mlir::Operation *user) {
-          return mlir::isa<weft::riscv::RegisterMaterializeOp>(user);
-        }))
-      continue;
-
-    mlir::Operation *target = nullptr;
-    for (mlir::Operation *cursor = field->getPrevNode(); cursor;
-         cursor = cursor->getPrevNode()) {
-      if (cursor == field.getOwner().getDefiningOp())
-        break;
-      auto loop = mlir::dyn_cast<mlir::LoopLikeOpInterface>(cursor);
-      if (loop) {
-        if (!loop.isDefinedOutsideOfLoop(field.getOwner()) ||
-            !hasAtLeastIterations(loop, 2) ||
-            !weft::riscv::hasOnlyReadEffects(loop, true))
-          break;
-        target = cursor;
-        continue;
-      }
-      if (!weft::riscv::hasOnlyReadEffects(cursor))
-        break;
-    }
-    if (!target)
-      continue;
-
-    field->moveBefore(target);
-    rewriter.setInsertionPointAfter(field);
-    auto materialized = weft::riscv::RegisterMaterializeOp::create(rewriter,
-        field.getLoc(), type, field.getResult(), -1, -1, -1,
-        "physical-share");
-    weft::riscv_internal::copyOrigin(field, materialized);
-    field.getResult().replaceAllUsesExcept(materialized.getResult(),
-                                           materialized.getOperation());
-  }
-}
-
 class HoistRISCVLoopInvariantsPass
     : public mlir::PassWrapper<HoistRISCVLoopInvariantsPass,
                                mlir::OperationPass<mlir::ModuleOp>> {
@@ -142,8 +98,6 @@ public:
             loop.moveOutOfLoop(operation);
           });
     }
-    mlir::IRRewriter rewriter(&getContext());
-    materializeDeferredScalarFieldsBeforeReadLoops(getOperation(), rewriter);
     llvm::SmallVector<mlir::Operation *> operations;
     getOperation().walk(
         [&](mlir::Operation *operation) { operations.push_back(operation); });
