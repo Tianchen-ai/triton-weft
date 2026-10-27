@@ -212,7 +212,8 @@ void record(RegisterPeak &peak, Groups groups, Block *block,
 }
 }
 
-std::optional<RegisterPeak> BlockRegisterLiveness::peak(unsigned first, unsigned last) const {
+std::optional<RegisterPeak> BlockRegisterLiveness::peak(unsigned first, unsigned last,
+                                                     bool nativeExpansion) const {
   if (ordered.empty()) return first == 0 && last == 0 ? std::optional<RegisterPeak>(RegisterPeak{}) : std::nullopt;
   if (first > last || last >= ordered.size()) return std::nullopt;
 
@@ -265,9 +266,17 @@ std::optional<RegisterPeak> BlockRegisterLiveness::peak(unsigned first, unsigned
             if (conditional) captures.push_back(interval.value);
           }
           auto analysis = BlockRegisterLiveness::get(child, captures);
-          auto childPeak = analysis ? analysis->peak() : std::nullopt;
+          auto childPeak = analysis ? analysis->peak(nativeExpansion) : std::nullopt;
           if (!childPeak || retained.vector < 0 || retained.fragment < 0) return std::nullopt;
-          if (!retained.add({childPeak->vector, childPeak->fragment})) return std::nullopt;
+          int64_t copies = 1;
+          if (nativeExpansion && isa<scf::ForOp>(operation))
+            if (auto count = operation->getAttrOfType<IntegerAttr>("weft.riscv.native_unroll_count"))
+              copies = count.getInt();
+          // A parent native issue also contains the already selected child
+          // expansion. Keep values outside that child live once and multiply
+          // only its local peak, recursively including its own descendants.
+          if (copies < 1 || childPeak->total() > std::numeric_limits<int64_t>::max() / copies ||
+              !retained.add({copies * childPeak->vector, copies * childPeak->fragment})) return std::nullopt;
           if (childPeak->total())
             record(result, retained, childPeak->block, childPeak->point,
                    childPeak->before, std::max(1u, childPeak->count));
@@ -279,8 +288,8 @@ std::optional<RegisterPeak> BlockRegisterLiveness::peak(unsigned first, unsigned
   return result;
 }
 
-std::optional<RegisterPeak> BlockRegisterLiveness::peak() const {
-  return peak(0, ordered.empty() ? 0 : ordered.size() - 1);
+std::optional<RegisterPeak> BlockRegisterLiveness::peak(bool nativeExpansion) const {
+  return peak(0, ordered.empty() ? 0 : ordered.size() - 1, nativeExpansion);
 }
 
 std::optional<RegisterPeak> riscv_internal::registerPeak(Block &block) {
@@ -291,7 +300,8 @@ std::optional<RegisterPeak> riscv_internal::registerPeak(Block &block) {
 std::optional<int64_t> riscv_internal::nativeUnrollRegisterGroups(Operation *operation, int64_t copies) {
   auto loop = dyn_cast<scf::ForOp>(operation);
   if (!loop || copies < 1) return std::nullopt;
-  auto body = registerPeak(*loop.getBody());
+  auto analysis = BlockRegisterLiveness::get(*loop.getBody());
+  auto body = analysis ? analysis->peak(true) : std::nullopt;
   auto resident = surroundingRegisterGroups(loop);
   if (!body || !resident || body->total() > (std::numeric_limits<int64_t>::max() - *resident) / copies)
     return std::nullopt;

@@ -1091,6 +1091,8 @@ RISC-V 的 encoded field 可能在较晚的 transfer lowering 才产生 guard；
 完整版本的有限 native 展开量在资源闭合后从 1/2/4 中确定：循环外驻留只计一次，
 重复 issue 的本地 SSA 与 leaf 临时量按副本计入。已有系统展开限制优先；最终 LLVM
 仍负责机器寄存器分配与指令调度。emitter 不重新选择展开量。
+嵌套循环从内向外收口；外层预算递归计入内层已选的 native 展开量，不能将两个各自
+合法的局部展开相乘后仍沿用单层峰值。循环外存活值仍只按其真实驻留计一次。
 
 候选只来自原循环，新增副本不再次进入本 pass 的选择；按简化后的新增 operation 数扣除
 每个 kernel 的有限预算，并设置绝对代码增长上限。调度、buffer 版本和最终资源分析在
@@ -1203,6 +1205,8 @@ layer 编号只取本 group 内的坐标。verifier 同时检查完整 raw span 
 不能对跨 group offset 只取 layer 余数。完整地址关系成立时，无需先生成向量除余和 gather。
 
 这个 pass只闭合现有 field-to-register edge，不创建logical axis、Level或source traversal。
+单一 physical window 的两层 byte partition 在选择时闭合为一次 mask 或 shift，
+消除零位移与最高层的冗余 mask；更多 layer 或多 part 窗口保留统一映射及原有联合供给。
 partial materializer若需把一个已选unit load投影到issue window，只能机械投影原有plan与leaf，
 不能重新选择memory form。
 投影后的正 lane extent 可以为 1；它仍是已有 RVV carrier 的一个显式窗口，须满足

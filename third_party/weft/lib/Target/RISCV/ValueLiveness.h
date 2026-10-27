@@ -49,8 +49,9 @@ public:
 
   // Include child-region peaks and selected leaf temporaries. The operation
   // window is inclusive; values defined before it remain live when captured.
-  std::optional<RegisterPeak> peak(unsigned first, unsigned last) const;
-  std::optional<RegisterPeak> peak() const;
+  std::optional<RegisterPeak> peak(unsigned first, unsigned last,
+                                   bool nativeExpansion = false) const;
+  std::optional<RegisterPeak> peak(bool nativeExpansion = false) const;
 
 private:
   mlir::Block *block = nullptr;

@@ -1869,6 +1869,13 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
   shiftBaseFactorForPart.reserve(layerForPart.size());
   maskValueForPart.reserve(layerForPart.size());
   const int64_t layerCount = layered ? group / layer : 1;
+  // A single window of a binary byte partition is either a mask or a shift.
+  // Select that direct extraction instead of issuing both. Wider layer groups
+  // and multi-part windows keep their uniform decode schedule.
+  auto fixedBase = scalarBase.getDefiningOp<mlir::arith::ConstantIndexOp>();
+  const bool fixedLayer = layered && layerCount == 2 && layerForPart.size() == 1 &&
+                          fixedBase && fixedBase.value() >= 0;
+  const int64_t baseLayer = fixedLayer ? (fixedBase.value() % group) / layer : 0;
   for (int64_t logicalLayer : layerForPart) {
     if (!layered) {
       physicalLayerForPart.push_back(0);
@@ -1878,8 +1885,8 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
       continue;
     }
     auto selection = selectLayer(
-        extract.getAccess(), logicalLayer, layerCount, elementBits,
-        logicalBaseMultiple % group);
+        extract.getAccess(), logicalLayer + baseLayer, layerCount, elementBits,
+        !fixedLayer && logicalBaseMultiple % group);
     if (!selection)
       return false;
     physicalLayerForPart.push_back(selection->physicalLayer);
