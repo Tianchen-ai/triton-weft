@@ -66,8 +66,14 @@ derived layout、跨控制结果或 stage 的 encoded reshape 子图。
 descriptor 的请求 extent 与 backing storage 的有效范围分别验证：`MemoryBounds`
 生成穿过 subview、slice 和轴改名的显式 SSA 条件。嵌套 domain point 替换同轴的
 绝对基坐标，普通 index/subview offset 仍按相对坐标组合，避免重复加上父层 base。
+共享 origin 查询先检查最近的 slice/extract 坐标，再回看 backing；内层子窗口不能
+继承成外层 record 的起点。IME 将一个 contraction 分成多个 K atom 时沿该起点
+生成子窗口，并合成已有的 domain projection，保留其它轴的选择和原读取快照。
 已经拥有实际 allocation 的 `LocalBind` 保持 local carrier；布局传播不能隐式将
 存储身份变成寄存器数值，消费者必须经过真实的 load 或 conversion。
+分组的局部 Value 向 RVV 投影时，group 坐标、保留轴的 stride、slice 和 load 在
+composite lowering 中显式形成；它与标量副本投影共用同一分组坐标计算，后续 memory
+pass 选择真实传输，不把尚未选择的局部数组访问留给 emitter。
 
 ## 1. 固定顺序
 

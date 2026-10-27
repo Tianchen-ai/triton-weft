@@ -795,7 +795,8 @@ private:
       auto result =
           mlir::dyn_cast<riscv::ValueType>(extract.getResult().getType());
       auto binding = extract.getInput().getDefiningOp<riscv::LocalBindOp>();
-      if (!result || result.getLayout().getCarrier() != "scalar" || !binding ||
+      if (!result || (result.getLayout().getCarrier() != "scalar" &&
+                      result.getLayout().getCarrier() != "rvv") || !binding ||
           extract.getSelectors().size() != input.getShape().size())
         continue;
 
@@ -821,11 +822,14 @@ private:
       auto resultParts = riscv_internal::staticProduct(
           result.getLayout().getReplicaFactors().asArrayRef());
       if (!supported || cursor != extract.getIndices().size() || !groupPoint ||
-          groupDimension < 0 || !resultParts || *resultParts <= 0 ||
-          llvm::any_of(result.getLayout().getTimeFactors().asArrayRef(),
-                       [](int64_t factor) { return factor != 1; }) ||
-          llvm::any_of(result.getLayout().getLaneFactors().asArrayRef(),
-                       [](int64_t factor) { return factor != 1; }))
+          groupDimension < 0 || !resultParts || *resultParts <= 0)
+        continue;
+      const bool vectorResult = result.getLayout().getCarrier() == "rvv";
+      if (!vectorResult &&
+          (llvm::any_of(result.getLayout().getTimeFactors().asArrayRef(),
+                        [](int64_t factor) { return factor != 1; }) ||
+           llvm::any_of(result.getLayout().getLaneFactors().asArrayRef(),
+                        [](int64_t factor) { return factor != 1; })))
         continue;
 
       mlir::OpBuilder::InsertionGuard guard(rewriter);
@@ -839,6 +843,40 @@ private:
           extract.getLoc(), groupPoint.getBase(), recordExtent);
       mlir::Value group = mlir::arith::DivUIOp::create(rewriter,
           extract.getLoc(), relative, groupPoint.getPartition());
+
+      if (vectorResult) {
+        auto memory = riscv_internal::localView(rewriter, binding.getResult(), extract);
+        if (mlir::failed(memory)) {
+          extract.emitError("local grouped projection has no complete storage descriptor");
+          failed = true;
+          continue;
+        }
+        auto source = mlir::cast<riscv::MemDescType>(memory->getType());
+        llvm::SmallVector<int64_t> strides, origins;
+        llvm::SmallVector<mlir::Attribute> selectors;
+        for (size_t dimension = 0; dimension < input.getShape().size(); ++dimension) {
+          const bool grouped = static_cast<int64_t>(dimension) == groupDimension;
+          selectors.push_back(rewriter.getStringAttr(grouped ? "index" : "all"));
+          if (!grouped) {
+            strides.push_back(source.getStrides()[dimension]);
+            origins.push_back(source.getOrigins()[dimension]);
+          }
+        }
+        auto sliced = riscv::MemDescType::get(rewriter.getContext(), source.getEncoding(),
+            result.getShape(), result.getAxisIds(), rewriter.getDenseI64ArrayAttr(strides),
+            rewriter.getDenseI64ArrayAttr(origins), source.getAlignment(), "slice",
+            source.getAccess(), source.getAliasSet(), source.getLayoutIdentity(),
+            source.getStorageBits(), source.getElements(), source.getInterleaveRows());
+        auto region = riscv::SliceOp::create(rewriter, extract.getLoc(), sliced, *memory,
+            mlir::ValueRange{group}, rewriter.getArrayAttr(selectors));
+        auto load = riscv::LoadOp::create(rewriter, extract.getLoc(), result, region,
+            mlir::Value(), riscv_internal::unassignedAccess(rewriter),
+            riscv_internal::unselectedLeaf(rewriter));
+        copyIdentity(extract, region);
+        copyIdentity(extract, load);
+        rewriter.replaceOp(extract, load.getResult());
+        continue;
+      }
 
       llvm::SmallVector<mlir::Value> loaded;
       for (int64_t part = 0; part < *resultParts; ++part) {

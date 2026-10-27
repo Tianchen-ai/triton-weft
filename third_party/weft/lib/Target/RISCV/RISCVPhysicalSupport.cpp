@@ -2291,15 +2291,18 @@ riscv::PhysicalPointOp riscv_internal::originPoint(mlir::Value value,
     if (!definition)
       continue;
     if (auto extract = mlir::dyn_cast<riscv::ExtractOp>(definition)) {
+      // The most recent domain selection defines the saved coordinate. Walk
+      // it before the backing value, which can carry an enclosing same-axis
+      // record point rather than this consumer's subwindow.
+      worklist.push_back(extract.getInput());
       for (mlir::Value index : extract.getIndices())
         worklist.push_back(index);
-      worklist.push_back(extract.getInput());
       continue;
     }
     if (auto slice = mlir::dyn_cast<riscv::SliceOp>(definition)) {
+      worklist.push_back(slice.getBase());
       for (mlir::Value index : slice.getIndices())
         worklist.push_back(index);
-      worklist.push_back(slice.getBase());
       continue;
     }
     if (auto field = mlir::dyn_cast<riscv::FieldOp>(definition)) {

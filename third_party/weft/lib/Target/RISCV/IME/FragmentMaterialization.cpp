@@ -242,8 +242,36 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
         }
         llvm::SmallVector<mlir::Attribute> selectors(shape.size(), rewriter.getStringAttr("all"));
         selectors[position] = rewriter.getStringAttr("domain");
-        auto extract = riscv::ExtractOp::create(rewriter, operation->getLoc(), target, input,
-            mlir::ValueRange{selector}, rewriter.getArrayAttr(selectors),
+        mlir::Value base = input;
+        llvm::SmallVector<mlir::Value> indices{selector};
+        if (auto previous = input.getDefiningOp<riscv::ExtractOp>(); previous &&
+            previous.getInput().getType().getAxisIds() == type.getAxisIds() &&
+            previous.getSelectors().size() == shape.size() &&
+            llvm::all_of(previous.getSelectors(), [](mlir::Attribute attribute) {
+              auto name = mlir::cast<mlir::StringAttr>(attribute).getValue();
+              return name == "all" || name == "domain";
+            })) {
+          // A PhysicalPoint uses the logical axis' absolute coordinate. The
+          // atom refines the existing saved domain; adding a second domain
+          // extract would make terminal field access interpret it as a relative
+          // offset. Keep every other selected axis and replace only K.
+          base = previous.getInput();
+          selectors.assign(previous.getSelectors().begin(), previous.getSelectors().end());
+          indices.clear();
+          unsigned cursor = 0;
+          for (size_t dimension = 0; dimension < shape.size(); ++dimension) {
+            bool selected = mlir::cast<mlir::StringAttr>(selectors[dimension]).getValue() == "domain";
+            if (dimension == position) {
+              selectors[dimension] = rewriter.getStringAttr("domain");
+              indices.push_back(selector);
+            } else if (selected) {
+              indices.push_back(previous.getIndices()[cursor]);
+            }
+            cursor += selected;
+          }
+        }
+        auto extract = riscv::ExtractOp::create(rewriter, operation->getLoc(), target, base,
+            indices, rewriter.getArrayAttr(selectors),
             accessOf(input) ? accessOf(input) : unassignedAccess(rewriter), unselectedLeaf(rewriter));
         copyOrigin(operation, extract); result = extract.getResult();
       }
