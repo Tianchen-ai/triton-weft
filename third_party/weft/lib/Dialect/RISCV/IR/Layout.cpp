@@ -925,6 +925,14 @@ bool weft::riscv::preferRepeatedTileBroadcast(ValueType input, ValueType result)
   auto repeat = repeatedTileBroadcastFactor(input, result);
   auto parts = rvvCarrierCount(result.getLayout());
   auto gather = axisBroadcastInstructionCount(input, result);
+  if (repeat && result.getLayout().getSew() == 8) {
+    auto inputLanes = rvvLaneCount(input), outputLanes = rvvLaneCount(result);
+    // The generic byte gather constructs its index with an 8-bit vid. A
+    // wrapped vid preserves a repeated tile only when its period divides 256.
+    if (inputLanes && outputLanes &&
+        (*inputLanes > 256 || (*outputLanes > 256 && 256 % *inputLanes)))
+      return true;
+  }
   // The repeated-tile leaf initializes its destination, then issues one slide
   // for each additional tile. Legality alone does not make that dependent
   // chain cheaper than building an index and issuing one gather.

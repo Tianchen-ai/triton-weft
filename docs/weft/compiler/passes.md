@@ -1473,6 +1473,8 @@ tail 的逻辑有效域；数值与存储边界仍由原始程序约束。
 合法 tile 重复仍须比较完整局部工作：目的初始化加每个重复 tile 的 slide，必须少于
 已有索引构造和 gather 的指令工作才选中。坐标关系合法不等于重复序列更便宜；相同
 工作量保留 gather，临时寄存器仍由对应 leaf 和正式资源分析核算。
+byte gather 的索引必须可表示；超出 8-bit `vid` 域时，只有重复周期整除 256 才能保留
+其坐标关系。否则仍选择已证明合法的 tile 重复，成本不能放行会回绕的索引。
 
 index residue 折叠后成为常量且按 layer 对齐的 base，若窗口完全位于一个 layer，可将其
 layer 坐标移入既有 decode map，base 保留 group origin。实际 byte 地址与读取范围不变，
