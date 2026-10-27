@@ -20,6 +20,25 @@ LogicalResult riscv_internal::materializeNumericConversions(ModuleOp module, IRR
     auto source = dyn_cast<riscv::ValueType>(op->getOperand(0).getType());
     auto result = dyn_cast<riscv::ValueType>(op->getResult(0).getType());
     if (!source || !result || result.getLayout().getCarrier() != "rvv") continue;
+    if (source.getElementType().isF16() && result.getElementType().isF64()) {
+      // RVV widens floating elements by one machine width per instruction.
+      // Both steps are exact, including subnormals and signed zero; the
+      // intermediate retains the source coordinates and active domain.
+      b.setInsertionPoint(op);
+      auto intermediate = riscv::ValueType::get(b.getContext(), b.getF32Type(),
+          source.getShape(), source.getAxisIds(), source.getLayout());
+      auto layout = projectLayout(b, intermediate, source.getLayout(),
+          op->getParentOfType<riscv::KernelOp>().getTarget());
+      if (!layout) return op->emitError("floating widening has no legal intermediate layout");
+      intermediate = cast<riscv::ValueType>(withLayout(intermediate, layout));
+      Value wide = riscv::WidenOp::create(b, op->getLoc(), intermediate,
+          op->getOperand(0), unselectedLeaf(b));
+      Value converted = riscv::WidenOp::create(b, op->getLoc(), result, wide, unselectedLeaf(b));
+      inherit(op, wide.getDefiningOp());
+      inherit(op, converted.getDefiningOp());
+      b.replaceOp(op, converted);
+      continue;
+    }
     auto integer = dyn_cast<IntegerType>(source.getElementType());
     if (!integer) continue;
     b.setInsertionPoint(op);

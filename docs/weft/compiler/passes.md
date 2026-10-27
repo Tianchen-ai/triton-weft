@@ -271,6 +271,8 @@ shaped store 物化为有界坐标遍历和受谓词控制的真实写入，不�
 
 闭合物理数值转换的机器宽度步骤。composite lowering 与晚期 leaf selection 共用同一
 实现：后续 Value program 新产生的 RVV 转换也必须显式形成合法 narrowing 链。
+F16→F64 的 RVV 扩宽显式形成 F16→F32→F64 两步，保留相同坐标和有效域；两步均为精确
+扩宽，中间寄存器布局及其活跃区间进入正常指令选择和资源分析。terminal 不合成转换链。
 signless Boolean predicate 转为数值时物化同坐标的 0/1 select。Encoding `ui1` 的普通
 数值表示已是规范的 unsigned byte 0/1，沿用 zero extension，避免 byte→mask→数值的往返。
 已规范符号扩展到 byte carrier 的有限有符号整数扩大到 i8 时保留原 carrier；转成 u8
