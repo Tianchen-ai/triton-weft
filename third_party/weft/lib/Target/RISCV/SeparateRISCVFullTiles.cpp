@@ -2,12 +2,15 @@
 #include "Weft/Target/RISCVPasses.h"
 #include "Weft/Analysis/PhysicalDependence.h"
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
+#include "Weft/Dialect/RISCV/IR/Memory.h"
 #include "RISCVPhysicalSupport.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/Matchers.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 using namespace mlir;
 namespace {
@@ -49,7 +52,27 @@ public:
         kernel.emitError("complete-tile separation requires open physical resources");
         invalid = true; return;
       }
-      auto growth = weft::separateFullTiles(kernel, true, guardedFieldPayloads);
+      llvm::SmallPtrSet<Operation *, 16> snapshotConsumers;
+      kernel.walk([&](weft::riscv::LoadOp load) {
+        auto type = dyn_cast<weft::riscv::ValueType>(load.getResult().getType());
+        if (!type ||
+            !llvm::any_of(type.getShape().asArrayRef(), [](int64_t extent) { return extent < 0; }) ||
+            !weft::riscv_internal::needsReadSnapshot(load)) return;
+        llvm::SmallVector<Value> pending{load.getResult()};
+        llvm::DenseSet<Value> visited;
+        while (!pending.empty()) {
+          Value value = pending.pop_back_val();
+          if (!visited.insert(value).second) continue;
+          for (OpOperand &use : value.getUses()) {
+            for (Operation *scope = use.getOwner(); scope && scope != kernel;
+                 scope = scope->getParentOp())
+              if (isa<scf::ForOp>(scope)) snapshotConsumers.insert(scope);
+            weft::riscv::appendStorageAliases(use, pending);
+          }
+        }
+      });
+      auto growth = weft::separateFullTiles(kernel, true, guardedFieldPayloads,
+          [&](Operation *scope) { return snapshotConsumers.contains(scope); });
       if (failed(growth)) { invalid = true; return; }
       Builder b(&getContext());
       for (Operation *full : growth->fullDomains)
@@ -70,6 +93,7 @@ public:
       kernel->setAttr("weft.riscv.full_tile_operation_budget", b.getI64IntegerAttr(growth->budget));
       kernel->setAttr("weft.riscv.full_tile_added_operations", b.getI64IntegerAttr(growth->operations));
       kernel->setAttr("weft.riscv.full_domain_versions", b.getI64IntegerAttr(growth->domainVersions));
+      kernel->setAttr("weft.riscv.full_tile_snapshot_scopes", b.getI64IntegerAttr(snapshotConsumers.size()));
     });
     if (invalid) signalPassFailure();
   }

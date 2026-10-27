@@ -18,6 +18,7 @@ struct FullTileGrowth {
 // effects and masked remainder. Unsigned coordinates retain their full range.
 mlir::FailureOr<FullTileGrowth> separateFullTiles(mlir::Operation *function,
     bool unsignedIndices,
-    llvm::function_ref<int64_t(mlir::Operation *)> guardedPayloads = {});
+    llvm::function_ref<int64_t(mlir::Operation *)> guardedPayloads = {},
+    llvm::function_ref<bool(mlir::Operation *)> jointGuardedDomains = {});
 } // namespace weft
 #endif

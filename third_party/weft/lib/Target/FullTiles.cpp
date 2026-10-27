@@ -236,7 +236,8 @@ void foldCompleteBounds(scf::ForOp loop, int64_t step, IRRewriter &b, bool unsig
 } // namespace
 
 FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
-    bool unsignedIndices, llvm::function_ref<int64_t(Operation *)> guardedPayloads) {
+    bool unsignedIndices, llvm::function_ref<int64_t(Operation *)> guardedPayloads,
+    llvm::function_ref<bool(Operation *)> jointGuardedDomains) {
     MLIRContext *context = function->getContext();
     SmallVector<scf::ForOp> loops;
     function->walk([&](scf::ForOp loop) { loops.push_back(loop); });
@@ -284,9 +285,8 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
     // original nest once when its bounds are already available at the entry.
     // The alternate branch keeps the exact original traversal and carries.
     SmallVector<scf::ForOp> domainRoots;
-    // Prefer the smallest scope that can close several independent axes in
-    // one version. Peeling its innermost axis first would leave the other
-    // payload guards live and prevent their removal under ownsVersion().
+    // Shared computation frames need their independent payload bounds closed
+    // together. Other traversals retain the smallest specialization scope.
     if (guardedPayloads)
       for (auto loop : loops)
         if (loop->getParentOfType<scf::ForOp>() && guardedPayloads(loop) > 0)
@@ -294,8 +294,11 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
     for (auto loop : llvm::reverse(loops))
       if (!llvm::is_contained(domainRoots, loop)) domainRoots.push_back(loop);
     auto independentAxes = [&](scf::ForOp root) {
+      bool guarded = guardedPayloads && guardedPayloads(root) > 0;
+      bool joint = jointGuardedDomains && jointGuardedDomains(root);
       SmallVector<scf::ForOp> axes;
       root.walk<WalkOrder::PreOrder>([&](scf::ForOp axis) {
+        if (!joint && guarded && root->getParentOfType<scf::ForOp>() && axis != root) return;
         auto step = tileStep(axis);
         if (!step || !root.isDefinedOutsideOfLoop(axis.getUpperBound())) return;
         bool useful = false;
@@ -307,21 +310,17 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
       return axes;
     };
     llvm::DenseMap<Operation *, SmallVector<scf::ForOp>> axesForRoot;
-    for (auto root : domainRoots)
-      axesForRoot[root] = independentAxes(root);
-    if (guardedPayloads) {
+    for (auto root : domainRoots) axesForRoot[root] = independentAxes(root);
+    if (guardedPayloads && jointGuardedDomains) {
       llvm::DenseMap<Operation *, std::pair<bool, int64_t>> priorities;
       for (auto root : domainRoots) {
         const auto &axes = axesForRoot[root];
         int64_t operations = 0;
         root.walk([&](Operation *) { ++operations; });
-        // Output-store loops may repeat the same bound without supplying a
-        // second input dimension. They must not make a single guarded input
-        // axis preempt the enclosing jointly guarded computation.
         auto payloadAxes = llvm::count_if(axes, [&](scf::ForOp axis) {
           return guardedPayloads(axis) > 0;
         });
-        priorities[root] = {payloadAxes > 1 && axes.front() == root, operations};
+        priorities[root] = {jointGuardedDomains(root) && payloadAxes > 1 && axes.front() == root, operations};
       }
       llvm::stable_sort(domainRoots, [&](scf::ForOp lhs, scf::ForOp rhs) {
         auto a = priorities.lookup(lhs), b = priorities.lookup(rhs);
