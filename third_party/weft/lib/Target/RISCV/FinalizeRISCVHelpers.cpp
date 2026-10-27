@@ -47,8 +47,12 @@ public:
             if (uint64_t(candidate) <= *trips && groups && *groups <= kernel.getTarget().getVectorRegisters())
               count = candidate;
           }
-        loop->setAttr("weft.riscv.native_unroll_count",
-                      IntegerAttr::get(IntegerType::get(&getContext(), 64), count));
+        // Closing an isolated computation frame needs a bounded issue window.
+        // Original kernel loops retain the native optimizer's established
+        // decision; full-domain versioning alone does not request a new bound.
+        if (loop->getParentOfType<riscv::HelperOp>())
+          loop->setAttr("weft.riscv.native_unroll_count",
+                        IntegerAttr::get(IntegerType::get(&getContext(), 64), count));
         loop->removeAttr("weft.riscv.bound_native_unroll");
       }
       bool vectorBody = false;

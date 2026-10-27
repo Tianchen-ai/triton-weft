@@ -6,6 +6,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include <algorithm>
 #include <array>
@@ -283,25 +284,18 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
     // original nest once when its bounds are already available at the entry.
     // The alternate branch keeps the exact original traversal and carries.
     SmallVector<scf::ForOp> domainRoots;
-    // Deferred field guards should be specialized at the smallest owning
-    // traversal. Cloning an ancestor also duplicates unrelated staging and
-    // exposes several independent masked dimensions to native full unrolling.
+    // Prefer the smallest scope that can close several independent axes in
+    // one version. Peeling its innermost axis first would leave the other
+    // payload guards live and prevent their removal under ownsVersion().
     if (guardedPayloads)
       for (auto loop : loops)
         if (loop->getParentOfType<scf::ForOp>() && guardedPayloads(loop) > 0)
           domainRoots.push_back(loop);
     for (auto loop : llvm::reverse(loops))
       if (!llvm::is_contained(domainRoots, loop)) domainRoots.push_back(loop);
-    for (auto root : domainRoots) {
-      if (ownsVersion(root) || !tileStep(root)) continue;
-      bool guarded = guardedPayloads && guardedPayloads(root) > 0;
-      if (root->getParentOfType<scf::ForOp>() && !guarded) continue;
+    auto independentAxes = [&](scf::ForOp root) {
       SmallVector<scf::ForOp> axes;
-      int64_t operations = 0;
-      root.walk([&](Operation *) { ++operations; });
-      if (operations > 24000) continue;
       root.walk<WalkOrder::PreOrder>([&](scf::ForOp axis) {
-        if (guarded && root->getParentOfType<scf::ForOp>() && axis != root) return;
         auto step = tileStep(axis);
         if (!step || !root.isDefinedOutsideOfLoop(axis.getUpperBound())) return;
         bool useful = false;
@@ -310,6 +304,39 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
         });
         if (useful) axes.push_back(axis);
       });
+      return axes;
+    };
+    llvm::DenseMap<Operation *, SmallVector<scf::ForOp>> axesForRoot;
+    for (auto root : domainRoots)
+      axesForRoot[root] = independentAxes(root);
+    if (guardedPayloads) {
+      llvm::DenseMap<Operation *, std::pair<bool, int64_t>> priorities;
+      for (auto root : domainRoots) {
+        const auto &axes = axesForRoot[root];
+        int64_t operations = 0;
+        root.walk([&](Operation *) { ++operations; });
+        // Output-store loops may repeat the same bound without supplying a
+        // second input dimension. They must not make a single guarded input
+        // axis preempt the enclosing jointly guarded computation.
+        auto payloadAxes = llvm::count_if(axes, [&](scf::ForOp axis) {
+          return guardedPayloads(axis) > 0;
+        });
+        priorities[root] = {payloadAxes > 1 && axes.front() == root, operations};
+      }
+      llvm::stable_sort(domainRoots, [&](scf::ForOp lhs, scf::ForOp rhs) {
+        auto a = priorities.lookup(lhs), b = priorities.lookup(rhs);
+        if (a.first != b.first) return a.first;
+        return a.second < b.second;
+      });
+    }
+    for (auto root : domainRoots) {
+      if (ownsVersion(root) || !tileStep(root)) continue;
+      bool guarded = guardedPayloads && guardedPayloads(root) > 0;
+      if (root->getParentOfType<scf::ForOp>() && !guarded) continue;
+      auto axes = axesForRoot[root];
+      int64_t operations = 0;
+      root.walk([&](Operation *) { ++operations; });
+      if (operations > 24000) continue;
       if (axes.empty() || axes.front() != root || (axes.size() == 1 && !guarded)) continue;
       b.setInsertionPoint(root);
       auto full = cast<scf::ForOp>(b.clone(*root.getOperation()));
