@@ -437,7 +437,12 @@ public:
           levelScaledDots.contains(dot.getOperation())) {
         kind = "level_scaled";
         partialSlots = dot.getPartialUnroll();
-        combineArity = partialSlots % 2 == 0 ? 2 : partialSlots;
+        // Output replicas already provide independent integer accumulation
+        // chains. Keep their final joins in vector carriers rather than
+        // extracting each chain separately. The shared add-tree pass can still
+        // shorten a long MAC chain before that single final extraction.
+        combineArity = outputReplicas > 1 ? 1 :
+                       (partialSlots % 2 == 0 ? 2 : partialSlots);
         resources = levelScaledResources;
       }
       auto topologyResultElement = mlir::dyn_cast<mlir::IntegerType>(

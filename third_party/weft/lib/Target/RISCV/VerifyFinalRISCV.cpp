@@ -1,6 +1,7 @@
 #include "Weft/Target/RISCVPasses.h"
 #include "PhysicalLoopControl.h"
 #include "ReductionBounds.h"
+#include "ValueLiveness.h"
 
 #include "RISCVPhysicalSupport.h"
 
@@ -219,10 +220,13 @@ public:
     llvm::DenseSet<std::pair<int64_t, int64_t>> partialBirths;
     getOperation().walk([&](mlir::Operation *operation) {
       if (auto helper = mlir::dyn_cast<riscv::HelperOp>(operation)) {
+        auto restricted = helper->getAttrOfType<mlir::DenseI64ArrayAttr>("native_restrict_captures");
+        if (!restricted || restricted.asArrayRef() != llvm::ArrayRef<int64_t>(riscv::helperRestrictCaptures(helper))) {
+          helper.emitError("native helper pointer qualifiers require complete capture and payload disjointness proofs");
+          failed = true;
+        }
         auto abi = helper->getAttrOfType<mlir::StringAttr>("native_abi");
-        if (!abi || (abi.getValue() != "selected-parts" && abi.getValue() != "scalar-result") ||
-            (abi.getValue() == "scalar-result" && (helper.getNumResults() != 1 ||
-             !mlir::isa<mlir::IntegerType, mlir::IndexType, mlir::FloatType>(helper.getResult(0).getType())))) {
+        if (!abi || abi.getValue() != "selected-parts") {
           helper.emitError("native helper requires a closed ABI matching its result types");
           failed = true;
         }
@@ -804,6 +808,21 @@ public:
           failed = true;
         }
       if (auto loop = mlir::dyn_cast<mlir::scf::ForOp>(operation)) {
+        if (auto count = loop->getAttrOfType<mlir::IntegerAttr>("weft.riscv.native_unroll_count")) {
+          auto kernel = loop->getParentOfType<riscv::KernelOp>();
+          auto groups = riscv_internal::nativeUnrollRegisterGroups(loop, count.getInt());
+          auto restriction = loop->getAttrOfType<mlir::StringAttr>("weft.riscv.system_unroll");
+          if (!kernel || !llvm::is_contained(llvm::ArrayRef<int64_t>{1, 2, 4}, count.getInt()) ||
+              !groups || *groups > kernel.getTarget().getVectorRegisters() ||
+              (restriction && count.getInt() != 1)) {
+            loop.emitError("native unroll count exceeds the closed physical issue budget");
+            failed = true;
+          }
+        }
+        if (loop->hasAttr("weft.riscv.bound_native_unroll")) {
+          loop.emitError("native unroll bound was not closed after resource analysis");
+          failed = true;
+        }
         if (auto alignment = loop->getAttr("weft.riscv.code_alignment")) {
           auto integer = mlir::dyn_cast<mlir::IntegerAttr>(alignment);
           const int64_t bytes = integer && integer.getType().isInteger(64) ? integer.getInt() : 0;

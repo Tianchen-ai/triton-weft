@@ -5,9 +5,12 @@
 #include "RISCVPhysicalSupport.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Transforms/RegionUtils.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
 #include <algorithm>
@@ -54,6 +57,77 @@ bool hasVectorStorageConsumer(mlir::Value value) {
     }
   }
   return false;
+}
+
+void isolateSnapshotComputation(riscv::KernelOp kernel, mlir::IRRewriter &b) {
+  llvm::SmallVector<mlir::Operation *> scopes;
+  kernel.walk([&](riscv::LoadOp load) {
+    auto storage = load.getSnapshotStorage();
+    auto local = storage ? mlir::dyn_cast<riscv::LocalType>(storage.getType()) : riscv::LocalType();
+    if (!local || local.getSizeBytes() >= 0) return;
+    llvm::SmallVector<mlir::Value> pending{load.getResult()};
+    llvm::SmallPtrSet<void *, 32> visited;
+    llvm::SmallPtrSet<mlir::Operation *, 8> consumers;
+    while (!pending.empty()) {
+      mlir::Value value = pending.pop_back_val();
+      if (!visited.insert(value.getAsOpaquePointer()).second) continue;
+      for (mlir::OpOperand &use : value.getUses()) {
+        auto root = load->getBlock()->findAncestorOpInBlock(*use.getOwner());
+        if (root) consumers.insert(root);
+        riscv::appendStorageAliases(use, pending);
+      }
+    }
+    for (mlir::Operation &operation : *load->getBlock()) {
+      if (!consumers.contains(&operation) ||
+          !mlir::isa<mlir::scf::ForOp, mlir::scf::IfOp>(operation) ||
+          !load->isBeforeInBlock(&operation) || llvm::is_contained(scopes, &operation)) continue;
+      bool dynamicStorage = false, returns = false, vectorWork = false;
+      operation.walk([&](mlir::Operation *nested) {
+        if (auto allocation = mlir::dyn_cast<riscv::LocalAllocOp>(nested))
+          dynamicStorage |= allocation.getResult().getType().getSizeBytes() < 0;
+        returns |= mlir::isa<riscv::HelperReturnOp>(nested);
+        auto leaf = nested->getAttrOfType<riscv::LeafAttr>("leaf");
+        vectorWork |= leaf && (leaf.getEngine() == "rvv" || leaf.getEngine() == "ime");
+      });
+      if (!dynamicStorage && !returns && vectorWork) {
+        if (auto branch = mlir::dyn_cast<mlir::scf::IfOp>(operation)) {
+          // Leave the domain dispatch next to the snapshot. Each selected
+          // traversal then has its own frame and only its own captures; the
+          // complete-domain body need not carry the masked alternate's state.
+          for (auto &region : branch->getRegions())
+            for (auto &block : region)
+              for (auto &nested : block)
+                if (mlir::isa<mlir::scf::ForOp>(nested) &&
+                    !llvm::is_contained(scopes, &nested)) scopes.push_back(&nested);
+        } else scopes.push_back(&operation);
+      }
+    }
+  });
+  for (mlir::Operation *scope : scopes) {
+    // Outlining must fit the already supported helper ABI. Keep result-bearing
+    // traversals in place until their return carriers have a selected transfer.
+    if (scope->getNumResults()) continue;
+    llvm::SetVector<mlir::Value> captures;
+    for (auto &region : scope->getRegions()) mlir::getUsedValuesDefinedAbove(region, captures);
+    if (llvm::any_of(captures, [](mlir::Value value) {
+          return !mlir::isa<mlir::IntegerType, mlir::IndexType, mlir::FloatType,
+              riscv::ValueType, riscv::MemDescType, riscv::FragmentType,
+              riscv::PointType, riscv::DomainType>(value.getType());
+        })) continue;
+    // Keep the allocation, optional copy and borrowed pointer at their original
+    // read point. Only the already ordered consumer region becomes a closure,
+    // so its native frame does not inherit the parent's dynamic stack object.
+    // Moving instead of cloning preserves partial births and buffer identities.
+    b.setInsertionPoint(scope);
+    auto helper = riscv::HelperOp::create(b, scope->getLoc(), scope->getResultTypes(),
+        mlir::ValueRange{}, b.getStringAttr("snapshot_compute"), b.getBoolAttr(true));
+    riscv_internal::copyOrigin(scope, helper);
+    helper.getBody().emplaceBlock();
+    scope->replaceAllUsesWith(helper.getResults());
+    scope->moveBefore(&helper.getBody().front(), helper.getBody().front().end());
+    b.setInsertionPointAfter(scope);
+    riscv::HelperReturnOp::create(b, scope->getLoc(), scope->getResults());
+  }
 }
 
 class MaterializeRISCVReadSnapshotsPass
@@ -178,6 +252,9 @@ public:
       load.setLeafAttr(
           riscv_internal::readSnapshotLeaf(rewriter, kernel.getTarget(), bytes > 0 ? bytes : kernel.getTarget().getVlenBits() / 8));
     });
+    if (!failed)
+      for (auto kernel : getOperation().getOps<riscv::KernelOp>())
+        isolateSnapshotComputation(kernel, rewriter);
     if (failed)
       signalPassFailure();
   }

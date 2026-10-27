@@ -287,3 +287,13 @@ std::optional<RegisterPeak> riscv_internal::registerPeak(Block &block) {
   auto analysis = BlockRegisterLiveness::get(block);
   return analysis ? analysis->peak() : std::nullopt;
 }
+
+std::optional<int64_t> riscv_internal::nativeUnrollRegisterGroups(Operation *operation, int64_t copies) {
+  auto loop = dyn_cast<scf::ForOp>(operation);
+  if (!loop || copies < 1) return std::nullopt;
+  auto body = registerPeak(*loop.getBody());
+  auto resident = surroundingRegisterGroups(loop);
+  if (!body || !resident || body->total() > (std::numeric_limits<int64_t>::max() - *resident) / copies)
+    return std::nullopt;
+  return *resident + copies * body->total();
+}

@@ -607,6 +607,8 @@ mlir::LogicalResult Emitter::compileFor(mlir::scf::ForOp operation) {
       "weft.riscv.system_unroll");
   if (systemUnroll && systemUnroll.getValue() == "disable")
     line("#pragma GCC unroll 1");
+  else if (auto count = operation->getAttrOfType<mlir::IntegerAttr>("weft.riscv.native_unroll_count"))
+    line("#pragma GCC unroll " + std::to_string(count.getInt()));
   if (auto alignment = operation->getAttrOfType<mlir::IntegerAttr>("weft.riscv.code_alignment"))
     // The GNU statement attribute loses its loop metadata when combined with
     // the unroll pragma in Clang. The standard spelling preserves both hints.

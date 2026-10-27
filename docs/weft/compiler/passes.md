@@ -301,13 +301,14 @@ terminal 以 Clang 23 的 `fmaximum_num` / `fminimum_num` builtin 拼写该已�
 在布局、转换及资源闭合后，收集 helper 真正使用的外部 SSA 和 descriptor 依赖，
 闭合 native helper ABI。返回值转换先由 layout pass 写入 IR；terminal 只按
 已选类型输出函数参数、返回槽和调用。noinline 保留为原生函数属性；内层返回只退出该函数。
-只有一个普通标量结果时，pass 选择 `scalar-result` ABI，经原生整数／浮点返回寄存器交接，
-不生成临时结果槽与额外的存储／读取。其它结果继续使用已选 parts；选择与结果类型由 final
-verifier 核对，terminal 不自行推断调用约定。源级 noinline 和控制流返回语义保持不变。
-descriptor 的常量部分保持为常量，同类型的同一个已求值具名标量只传一次；不把本已相等的
-shape、point 与 stride 分量变成彼此无关的原生参数，也不重算或合并 payload 读取。
-native 参数顺序跟随已冻结的 captures；shape symbol 通过相同参数的局部别名使用，不再
-把所有 kernel 维度额外放在参数列表前端。符号和 descriptor 的相等关系在 helper 内保持可见。
+所有结果使用统一的 `selected-parts` ABI；源级 noinline 和控制流返回语义保持不变。
+参数保留 capture 的已有物理部分、完整 descriptor、坐标及 shape 参数；原生工具链继续
+优化私有函数的传参，不因结果恰好是标量而选择另一套调用约定。
+encoded Record capture 明确传递原读取的指针、byte strides、origins 与 interleave 坐标，
+不能在 helper 中重新读取源 View 代替快照。返回的存储 alias 由共同来源分析追踪。
+可写 capture 只有在独立 captures 和全部真实访存都被证明不重叠时才标记 `restrict`。
+同一 allocation 上的不同指针参数不按同源关系合并；未知地址或 effects 阻止该限定。
+final verifier 重算同一证明，terminal 只拼写已冻结的限定。
 
 同一收尾 pass 为原生 kernel 入口写入 `native_entry_alignment=32`。这是有界的代码放置
 策略，最多增加 30 bytes 对齐填充，不是 VLEN 或 cache-line 大小声明。它避免入口仅按
@@ -1083,6 +1084,13 @@ masked remainder。它只消除由该循环边界证明恒真的比较和 `min(r
 其它独立循环树继续使用剩余预算。该规则限制同一计算体的复制，不删除尾部有效域或改变遍历。
 候选必须实际减少结构化条件、向量谓词工作或存储操作，且不增加另外两类；仅折叠 scalar
 extent/min 算术不能证明复制整份数值循环值得。没有这项收益证明时保留原有带界遍历。
+RISC-V 的 encoded field 可能在较晚的 transfer lowering 才产生 guard；它从真实 point
+的 active/partition 关系计入这些受限访问，在最小所属循环上建立完整版本。
+祖先不会再次复制已经版本化的子树。父域 `base < end` 与子域上界不超过 `end-base`
+共同证明 backing remainder 覆盖该子块，不能只从加法形式假设坐标不溢出。
+完整版本的有限 native 展开量在资源闭合后从 1/2/4 中确定：循环外驻留只计一次，
+重复 issue 的本地 SSA 与 leaf 临时量按副本计入。已有系统展开限制优先；最终 LLVM
+仍负责机器寄存器分配与指令调度。emitter 不重新选择展开量。
 
 候选只来自原循环，新增副本不再次进入本 pass 的选择；按简化后的新增 operation 数扣除
 每个 kernel 的有限预算，并设置绝对代码增长上限。调度、buffer 版本和最终资源分析在
@@ -1272,6 +1280,9 @@ contribution。planner 必须从该 seed 冻结完整 slots、product carrier、
 combine topology 与 resource groups；materializer 再按该 slots 机械展开。scale 可以是
 typed scalar carrier 或已终结的 signed-i32 scalar，两者都必须由 verifier 证明为单一
 replica；不能因展开时的 SSA 拼写不同而重选 topology。
+多个独立输出 replica 的 Level-scaled partial 保留一个向量合并结果，再做最终标量提取，
+避免每条 scale 链分别提取后在标量端重建同宽加法。已有 add-tree pass 仍可在向量内部
+缩短 MAC 依赖链；整数宽度、各项 scale、原浮点更新边界与完整资源核算保持不变。
 
 nested scale 与 indexed operand 共用具体 field 供应时，planner 保留表示转换路线，
 不能仅因 replica 数较多就选择会重新读取字段的 scalar rematerialization。deferred scale
@@ -1560,6 +1571,13 @@ copy leaf 在 target 合法的 m1/m2/m4 中按精确 transfer 次数与 scratch 
 不能把它改回普通 load，清 resource marker 也不改变 snapshot 的归属和读取合同。
 多维完整 record 的别名保护统一由这一 pass 实现；字段规划不再为相同读取另建逐字段
 byte decode 快照。bit-level 非自然布局所需的显式字节投影仍由字段规划处理。
+
+动态快照之后的有序消费者可移入现有 native helper，隔开动态栈分配与纯计算 frame。
+分配、借用条件、copy 和原读取点保持在原作用域；消费者只移动一次，不复制 partial birth
+或 buffer 身份。完整域与 masked 分支分别保留自身 traversal、captures 和 carries。
+快照的两条来源都可证明与被检查 writer 不重叠：借用来源经过原范围检查，copy 来源是私有
+allocation。该事实由共同存储分析提供给后续 alias 查询，而非直接从地址字符串加限定。
+helper return 只在 payload-write 收集时区别于存储写入；跨控制边界移动仍受其退出 effect 限制。
 
 ### `CloseRISCVLeafResources`
 

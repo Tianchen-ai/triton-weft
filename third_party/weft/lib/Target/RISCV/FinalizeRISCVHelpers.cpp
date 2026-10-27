@@ -1,4 +1,5 @@
 #include "RISCVPhysicalSupport.h"
+#include "ValueLiveness.h"
 #include "Weft/Target/RISCVPasses.h"
 #include "Weft/Analysis/PhysicalDependence.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -37,6 +38,19 @@ public:
       auto kernel = loop->getParentOfType<riscv::KernelOp>();
       if (!kernel) return;
       const int64_t alignment = kernel->getAttrOfType<IntegerAttr>("native_loop_alignment").getInt();
+      if (loop->hasAttr("weft.riscv.bound_native_unroll")) {
+        auto trips = analysis::staticTripCount(loop);
+        int64_t count = 1;
+        if (!loop->hasAttr("weft.riscv.system_unroll") && trips)
+          for (int64_t candidate : {2, 4}) {
+            auto groups = riscv_internal::nativeUnrollRegisterGroups(loop, candidate);
+            if (uint64_t(candidate) <= *trips && groups && *groups <= kernel.getTarget().getVectorRegisters())
+              count = candidate;
+          }
+        loop->setAttr("weft.riscv.native_unroll_count",
+                      IntegerAttr::get(IntegerType::get(&getContext(), 64), count));
+        loop->removeAttr("weft.riscv.bound_native_unroll");
+      }
       bool vectorBody = false;
       bool retainedChild = false;
       loop.walk([&](Operation *operation) {
@@ -45,7 +59,9 @@ public:
         if (operation != loop && isa<scf::ForOp>(operation)) {
           auto trips = analysis::staticTripCount(operation);
           auto unroll = operation->getAttrOfType<StringAttr>("weft.riscv.system_unroll");
-          retainedChild |= !trips || *trips > 4 || (unroll && unroll.getValue() == "disable");
+          auto bounded = operation->getAttrOfType<IntegerAttr>("weft.riscv.native_unroll_count");
+          retainedChild |= !trips || *trips > (bounded ? uint64_t(bounded.getInt()) : 4) ||
+                           (unroll && unroll.getValue() == "disable");
         }
       });
       // A finite child traversal can disappear in native code generation.
@@ -72,10 +88,9 @@ public:
           captures.insert(definition->operand_begin(), definition->operand_end());
       }
       helper.getCapturesMutable().assign(captures.getArrayRef());
-      const bool scalarResult = helper.getNumResults() == 1 &&
-          isa<IntegerType, IndexType, FloatType>(helper.getResult(0).getType());
-      helper->setAttr("native_abi", StringAttr::get(&getContext(),
-          scalarResult ? "scalar-result" : "selected-parts"));
+      helper->setAttr("native_restrict_captures",
+          DenseI64ArrayAttr::get(&getContext(), riscv::helperRestrictCaptures(helper)));
+      helper->setAttr("native_abi", StringAttr::get(&getContext(), "selected-parts"));
     });
   }
 };

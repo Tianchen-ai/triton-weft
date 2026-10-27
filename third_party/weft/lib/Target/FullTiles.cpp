@@ -32,6 +32,16 @@ std::optional<bool> fullComparison(Value value, Value iv, Value upper,
   return {};
 }
 
+bool clipsRemaining(Value bound, Value end, Value base, unsigned depth = 0) {
+  if (depth > 16) return false;
+  if (auto remaining = bound.getDefiningOp<arith::SubIOp>())
+    return remaining.getLhs() == end && remaining.getRhs() == base;
+  if (auto minimum = bound.getDefiningOp<arith::MinUIOp>())
+    return clipsRemaining(minimum.getLhs(), end, base, depth + 1) ||
+           clipsRemaining(minimum.getRhs(), end, base, depth + 1);
+  return false;
+}
+
 bool atLeast(Value value, int64_t minimum, Value iv, Value upper,
              int64_t step, bool unsignedIndices, unsigned depth = 0) {
   if (depth > 16) return false;
@@ -40,6 +50,21 @@ bool atLeast(Value value, int64_t minimum, Value iv, Value upper,
     return !constant.isNegative() && constant.getActiveBits() < 63 && constant.getZExtValue() >= uint64_t(minimum);
   if (auto sub = value.getDefiningOp<arith::SubIOp>()) {
     if (sub.getLhs() == upper && sub.getRhs() == iv) return step >= minimum;
+    if (unsignedIndices)
+      if (auto add = sub.getRhs().getDefiningOp<arith::AddIOp>())
+        for (unsigned side = 0; side < 2; ++side) {
+          if (add->getOperand(side) != iv) continue;
+          Value base = add->getOperand(1 - side);
+          auto argument = dyn_cast<BlockArgument>(base);
+          auto parent = argument ? dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp()) : scf::ForOp();
+          // The parent proves base < end, and the child is clipped to
+          // end - base. Thus base + iv cannot wrap and the backing-storage
+          // remainder covers the same complete tile as the local domain.
+          if (parent && parent.getInductionVar() == base &&
+              parent.getUpperBound() == sub.getLhs() &&
+              clipsRemaining(upper, sub.getLhs(), base))
+            return step >= minimum;
+        }
     APInt offset;
     if (matchPattern(sub.getRhs(), m_ConstantInt(&offset)) && !offset.isNegative() &&
         offset.getActiveBits() < 63 && minimum <= INT64_MAX - int64_t(offset.getZExtValue()))
@@ -142,8 +167,10 @@ struct FoldMaskReduction : OpRewritePattern<vector::ReductionOp> {
   }
 };
 
-std::array<int64_t, 3> specializationWork(scf::ForOp loop) {
-  std::array<int64_t, 3> work{};
+std::array<int64_t, 4> specializationWork(scf::ForOp loop,
+    llvm::function_ref<int64_t(Operation *)> guardedPayloads) {
+  std::array<int64_t, 4> work{};
+  if (guardedPayloads) work[3] = guardedPayloads(loop);
   loop.getBody()->walk([&](Operation *op) {
     if (isa<scf::IfOp>(op)) ++work[0];
     if (!isa<arith::ConstantOp>(op) && llvm::any_of(op->getResultTypes(), [](Type type) {
@@ -162,8 +189,10 @@ std::array<int64_t, 3> specializationWork(scf::ForOp loop) {
   return work;
 }
 
-bool simplifiesPayload(scf::ForOp original, scf::ForOp proposal) {
-  auto before = specializationWork(original), after = specializationWork(proposal);
+bool simplifiesPayload(scf::ForOp original, scf::ForOp proposal,
+                       llvm::function_ref<int64_t(Operation *)> guardedPayloads) {
+  auto before = specializationWork(original, guardedPayloads);
+  auto after = specializationWork(proposal, guardedPayloads);
   bool reduced = false;
   for (unsigned i = 0; i < before.size(); ++i) {
     if (after[i] > before[i]) return false;
@@ -206,7 +235,7 @@ void foldCompleteBounds(scf::ForOp loop, int64_t step, IRRewriter &b, bool unsig
 } // namespace
 
 FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
-                                                     bool unsignedIndices) {
+    bool unsignedIndices, llvm::function_ref<int64_t(Operation *)> guardedPayloads) {
     MLIRContext *context = function->getContext();
     SmallVector<scf::ForOp> loops;
     function->walk([&](scf::ForOp loop) { loops.push_back(loop); });
@@ -227,6 +256,12 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
         return pattern->getDebugName().contains("ConvertTrivialIfToSelect");
       });
     FrozenRewritePatternSet patterns(std::move(simplification));
+    if (unsignedIndices)
+      for (auto loop : loops) {
+        APInt step;
+        if (matchPattern(loop.getStep(), m_ConstantInt(&step)) && step.isOne())
+          foldCompleteBounds(loop, 1, b, true);
+      }
     // Bound growth per function relative to the program already present.
     // A fixed module-wide allowance makes independently useful full-tile
     // paths compete when authors compose quantization and contraction.
@@ -235,19 +270,38 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
     function->walk([&](Operation *) { ++original; });
     const int64_t budget = std::clamp<int64_t>(original, 6000, 24000);
     int64_t duplicated = 0, versions = 0;
+    llvm::SmallVector<Operation *> fullDomains;
     llvm::DenseSet<Operation *> versionedAlternates;
+    auto ownsVersion = [&](scf::ForOp root) {
+      bool found = false;
+      root.walk([&](scf::ForOp loop) { found |= versionedAlternates.contains(loop.getOperation()); });
+      return found;
+    };
     // Independent tiled axes can share one complete-domain version. Peeling
     // each inner axis first spends the growth budget before a parent mask can
     // disappear, leaving that mask live across all inner products. Version the
     // original nest once when its bounds are already available at the entry.
     // The alternate branch keeps the exact original traversal and carries.
-    for (auto root : llvm::reverse(loops)) {
-      if (root->getParentOfType<scf::ForOp>() || !tileStep(root)) continue;
+    SmallVector<scf::ForOp> domainRoots;
+    // Deferred field guards should be specialized at the smallest owning
+    // traversal. Cloning an ancestor also duplicates unrelated staging and
+    // exposes several independent masked dimensions to native full unrolling.
+    if (guardedPayloads)
+      for (auto loop : loops)
+        if (loop->getParentOfType<scf::ForOp>() && guardedPayloads(loop) > 0)
+          domainRoots.push_back(loop);
+    for (auto loop : llvm::reverse(loops))
+      if (!llvm::is_contained(domainRoots, loop)) domainRoots.push_back(loop);
+    for (auto root : domainRoots) {
+      if (ownsVersion(root) || !tileStep(root)) continue;
+      bool guarded = guardedPayloads && guardedPayloads(root) > 0;
+      if (root->getParentOfType<scf::ForOp>() && !guarded) continue;
       SmallVector<scf::ForOp> axes;
       int64_t operations = 0;
       root.walk([&](Operation *) { ++operations; });
       if (operations > 24000) continue;
       root.walk<WalkOrder::PreOrder>([&](scf::ForOp axis) {
+        if (guarded && root->getParentOfType<scf::ForOp>() && axis != root) return;
         auto step = tileStep(axis);
         if (!step || !root.isDefinedOutsideOfLoop(axis.getUpperBound())) return;
         bool useful = false;
@@ -256,7 +310,7 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
         });
         if (useful) axes.push_back(axis);
       });
-      if (axes.size() < 2 || axes.front() != root) continue;
+      if (axes.empty() || axes.front() != root || (axes.size() == 1 && !guarded)) continue;
       b.setInsertionPoint(root);
       auto full = cast<scf::ForOp>(b.clone(*root.getOperation()));
       SmallVector<scf::ForOp> fullAxes;
@@ -285,7 +339,7 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
       // loop nest. Require an actual removed mask, branch or storage operation;
       // otherwise code growth can increase native register pressure for no
       // change in the repeated payload work.
-      if (added > budget - duplicated || !simplifiesPayload(root, full)) {
+      if (added > budget - duplicated || !simplifiesPayload(root, full, guardedPayloads)) {
         b.eraseOp(full); continue;
       }
       b.setInsertionPoint(full);
@@ -315,6 +369,7 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
         scf::YieldOp::create(b, root.getLoc(), loop.getResults());
       }
       duplicated += added;
+      fullDomains.push_back(full);
       root.walk([&](scf::ForOp original) {
         versionedAlternates.insert(original.getOperation());
       });
@@ -325,7 +380,7 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
       // alternate. Peeling that alternate again multiplies the same numerical
       // body without improving the selected complete-domain path. Independent
       // original nests still use the remaining shared growth budget.
-      if (versionedAlternates.contains(loop.getOperation())) continue;
+      if (ownsVersion(loop)) continue;
       // A scalar carry can consume a large SIMD body. Its result type does not
       // establish that the body has no vector masks to eliminate; use the
       // actual complete-tile proofs and bounded body size below instead.
@@ -389,7 +444,7 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
       }
       int64_t added = 0;
       full.getBody()->walk([&](Operation *) { ++added; });
-      if (added > budget - duplicatedOperations || !simplifiesPayload(loop, full)) {
+      if (added > budget - duplicatedOperations || !simplifiesPayload(loop, full, {})) {
         b.eraseOp(full); continue;
       }
       duplicatedOperations += added;
@@ -404,5 +459,5 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
       loop.setLowerBound(split);
       loop.getInitArgsMutable().assign(full.getResults());
     }
-    return FullTileGrowth{budget, duplicated, versions};
+    return FullTileGrowth{budget, duplicated, versions, std::move(fullDomains)};
 }

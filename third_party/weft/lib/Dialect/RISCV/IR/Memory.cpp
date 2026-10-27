@@ -76,6 +76,11 @@ bool incomingStorage(Value value, llvm::SmallVectorImpl<Value> &pending) {
   if (auto loop = dyn_cast<LoopOp>(owner)) {
     pending.push_back(loop.getCarried()[position]);
     pending.push_back(loop.getBody().front().getTerminator()->getOperand(position));
+  } else if (auto helper = dyn_cast<HelperOp>(owner)) {
+    helper.walk([&](HelperReturnOp returned) {
+      if (returned->getParentOfType<HelperOp>() == helper)
+        pending.push_back(returned->getOperand(position));
+    });
   } else return false;
   return true;
 }
@@ -145,7 +150,8 @@ bool originsMayAlias(const StorageOrigins &a, const StorageOrigins &b) {
   return false;
 }
 
-bool visitStorageWrites(Operation *operation, llvm::function_ref<bool(Value)> visit) {
+bool visitStorageWrites(Operation *operation, llvm::function_ref<bool(Value)> visit,
+                        bool includeControlBarriers = true) {
   if (isCoordinateIdentity(operation) || storageBarrier(operation)) return true;
   if (auto effects = dyn_cast<MemoryEffectOpInterface>(operation)) {
     SmallVector<MemoryEffects::EffectInstance> instances;
@@ -153,6 +159,8 @@ bool visitStorageWrites(Operation *operation, llvm::function_ref<bool(Value)> vi
     for (const auto &effect : instances) {
       if (isa<MemoryEffects::Read, MemoryEffects::Allocate>(effect.getEffect()) ||
           privateResource(effect.getResource())) continue;
+      if (!includeControlBarriers &&
+          effect.getResource() == weft::kernel::FunctionControlResource::get()) continue;
       if (!visit(effect.getValue())) return false;
     }
   } else if (!operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>() &&
@@ -164,7 +172,7 @@ bool visitStorageWrites(Operation *operation, llvm::function_ref<bool(Value)> vi
     for (Region &region : operation->getRegions())
       for (Block &block : region)
         for (Operation &nested : block)
-          if (!visitStorageWrites(&nested, visit)) return false;
+          if (!visitStorageWrites(&nested, visit, includeControlBarriers)) return false;
   }
   return true;
 }
@@ -598,7 +606,9 @@ FailureOr<SmallVector<Value>> weft::riscv::snapshotInterferingStorage(
     return true;
   };
   for (Operation *next = read->getNextNode(); next; next = next->getNextNode())
-    if (!visitStorageWrites(next, collect)) return failure();
+    // Snapshot borrowing needs the payload writers. A helper's return is a
+    // motion barrier, but cannot overwrite any bytes of this saved value.
+    if (!visitStorageWrites(next, collect, false)) return failure();
   return writes;
 }
 
@@ -711,6 +721,42 @@ LogicalResult DenseElementwiseAliasOp::verify() {
 bool weft::riscv::mayAliasStorageAt(Value lhs, Value rhs, Operation *at) {
   auto a = storageOrigins(lhs), b = storageOrigins(rhs);
   if (!originsMayAlias(a, b)) return false;
+  auto savedDisjoint = [](Value saved, Value other) {
+    Value target = fullArgumentView(other);
+    if (!target) return false;
+    SmallVector<Value> pending{saved};
+    llvm::DenseSet<Value> seen;
+    bool snapshot = false;
+    while (!pending.empty()) {
+      Value value = pending.pop_back_val();
+      if (!seen.insert(value).second) continue;
+      if (seen.size() > 128) return false;
+      if (auto load = value.getDefiningOp<LoadOp>(); load && load.getSnapshotStorage()) {
+        if (!readSnapshotCapacity(load)) return false;
+        snapshot = true;
+        if (!load.getSnapshotBorrow()) continue;
+        Value source = fullArgumentView(load.getRegion());
+        SmallVector<Value> conditions{load.getSnapshotBorrow()};
+        bool matched = false;
+        for (unsigned visited = 0; !conditions.empty() && visited < 64; ++visited) {
+          auto condition = conditions.pop_back_val();
+          if (auto both = condition.getDefiningOp<arith::AndIOp>())
+            conditions.append({both.getLhs(), both.getRhs()});
+          else if (auto proof = condition.getDefiningOp<StorageDisjointOp>())
+            matched |= (proof.getLhs() == source && proof.getRhs() == target) ||
+                       (proof.getRhs() == source && proof.getLhs() == target);
+          else if (auto constant = getConstantIntValue(condition); constant && !*constant)
+            matched = true;
+        }
+        if (!conditions.empty() || !matched) return false;
+      } else if (Value source = borrowedStorage(value)) pending.push_back(source);
+      else if (!incomingStorage(value, pending)) return false;
+    }
+    return snapshot;
+  };
+  // Both outcomes are disjoint from a proved writer: the borrowed pointer is
+  // range-checked, while the copied pointer denotes a private allocation.
+  if (savedDisjoint(lhs, rhs) || savedDisjoint(rhs, lhs)) return false;
   if (!at || a.unknown || b.unknown) return true;
   if (haveDisjointDenseProjectionsAt(lhs, rhs, at)) return false;
   for (Value allocation : a.allocations)
@@ -750,6 +796,56 @@ bool weft::riscv::haveDisjointLocalStorage(Value lhs, Value rhs) {
   return a.isOwnedLocal() && b.isOwnedLocal() && !originsMayAlias(a, b);
 }
 
+SmallVector<int64_t> weft::riscv::helperRestrictCaptures(HelperOp helper) {
+  SmallVector<int64_t> result;
+  auto basedOn = [](Value value, Value capture) {
+    SmallVector<Value> pending{value};
+    llvm::DenseSet<Value> seen;
+    bool reached = false;
+    while (!pending.empty()) {
+      Value next = pending.pop_back_val();
+      if (next == capture) { reached = true; continue; }
+      if (!seen.insert(next).second) continue;
+      if (seen.size() > 128) return false;
+      if (Value source = borrowedStorage(next)) pending.push_back(source);
+      else if (!incomingStorage(next, pending)) return false;
+    }
+    return reached;
+  };
+  for (auto [index, value] : llvm::enumerate(helper.getCaptures())) {
+    auto memory = dyn_cast<MemDescType>(value.getType());
+    if (!memory || memory.getAccess() == "read") continue;
+    bool independent = true, written = false;
+    for (Value other : helper.getCaptures())
+      if (other != value && addressable(other.getType()) && mayAliasStorageAt(value, other, helper))
+        independent = false;
+    if (!independent) continue;
+    helper.getBody().walk([&](Operation *operation) {
+      if (!independent || isCoordinateIdentity(operation) || storageBarrier(operation)) return;
+      if (auto interface = dyn_cast<MemoryEffectOpInterface>(operation)) {
+        SmallVector<MemoryEffects::EffectInstance> effects;
+        interface.getEffects(effects);
+        for (const auto &effect : effects) {
+          if (privateResource(effect.getResource()) ||
+              effect.getResource() == weft::kernel::FunctionControlResource::get() ||
+              isa<MemoryEffects::Allocate>(effect.getEffect())) continue;
+          Value address = effect.getValue();
+          if (!address) { independent = false; break; }
+          if (basedOn(address, value)) {
+            written |= isa<MemoryEffects::Write>(effect.getEffect());
+          } else if (mayAliasStorageAt(value, address, operation)) {
+            independent = false; break;
+          }
+        }
+      } else if (!operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>() && !isMemoryEffectFree(operation)) {
+        independent = false;
+      }
+    });
+    if (independent && written) result.push_back(index);
+  }
+  return result;
+}
+
 void weft::riscv::appendStorageAliases(OpOperand &use,
                                      SmallVectorImpl<Value> &aliases) {
   Operation *user = use.getOwner();
@@ -759,6 +855,12 @@ void weft::riscv::appendStorageAliases(OpOperand &use,
   SmallVector<Value> controlAliases;
   if (weft::analysis::outgoingControlAliases(use, controlAliases)) {
     for (Value value : controlAliases) append(value);
+  } else if (auto returned = dyn_cast<HelperReturnOp>(user)) {
+    append(returned->getParentOfType<HelperOp>().getResult(use.getOperandNumber()));
+  } else if (isa<HelperOp>(user)) {
+    // Captures are the existing SSA values, also used directly in the body.
+    // Only the helper's explicit returns introduce new address aliases.
+    return;
   } else if (auto loop = dyn_cast<LoopOp>(user)) {
     unsigned start = loop.getCarried().getBeginOperandIndex();
     if (use.getOperandNumber() >= start) {
@@ -798,7 +900,7 @@ bool weft::riscv::storageAliasesRemainInScope(Value root, Block *scope) {
     [&](OpOperand &use, SmallVectorImpl<Value> &aliases) {
       Operation *user = use.getOwner();
       const bool control = isa<scf::ForOp, scf::WhileOp, scf::IfOp,
-          scf::ConditionOp, scf::YieldOp, LoopOp, YieldOp>(user);
+          scf::ConditionOp, scf::YieldOp, LoopOp, YieldOp, HelperOp, HelperReturnOp>(user);
       if (!control && (user->getNumRegions() ||
           (!isMemoryEffectFree(user) && !isa<MemoryEffectOpInterface>(user))))
         return false;

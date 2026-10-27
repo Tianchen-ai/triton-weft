@@ -15,6 +15,7 @@ class Block;
 namespace weft::riscv {
 class MemDescType;
 class LoadOp;
+class HelperOp;
 
 // One RVV lane axis whose element stride is an explicit ABI/runtime operand.
 // A selected dynamic-stride leaf can test that same operand for unit stride;
@@ -59,6 +60,7 @@ bool mayAliasStorage(mlir::Value lhs, mlir::Value rhs);
 // A dynamic disjointness proof is valid only inside its dominating true arm.
 // It supplements, never replaces, the complete storage provenance query.
 bool mayAliasStorageAt(mlir::Value lhs, mlir::Value rhs, mlir::Operation *at);
+llvm::SmallVector<int64_t> helperRestrictCaptures(HelperOp helper);
 // Full pinned dense view, with explicit ABI extent/stride metadata. Projections
 // remain attached to this storage but cannot themselves assert a full range.
 mlir::Value fullDenseArgumentView(mlir::Value storage);

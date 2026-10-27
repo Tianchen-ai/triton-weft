@@ -61,6 +61,10 @@ private:
 
 std::optional<RegisterPeak> registerPeak(mlir::Block &block);
 
+// Repeated issue bodies share values defined outside the loop. Account for
+// those captures once, rather than multiplying the unrelated kernel peak.
+std::optional<int64_t> nativeUnrollRegisterGroups(mlir::Operation *loop, int64_t copies);
+
 // Complete operands/results plus selected scratch of one physical operation.
 // Bounded value-program selection and materialization must agree on this
 // admission bound, before any input is turned into a private snapshot.
