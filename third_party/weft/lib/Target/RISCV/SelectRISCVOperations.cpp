@@ -908,7 +908,7 @@ private:
       return chooseScalarOrRVV("cast", "scalar.cast", "rvv.convert",
                                op.getResult().getType());
     if (auto op = mlir::dyn_cast<riscv::BitcastOp>(operation))
-      return chooseScalarOrRVV("bitcast", "scalar.bitcast", "rvv.bitcast",
+      return chooseScalarOrRVV("bitcast", riscv::scalarBitcastInstruction(op), "rvv.bitcast",
                                op.getResult().getType());
     if (auto op = mlir::dyn_cast<riscv::NarrowOp>(operation))
       return chooseScalarOrRVV("narrow", "scalar.narrow", "rvv.vnclip",

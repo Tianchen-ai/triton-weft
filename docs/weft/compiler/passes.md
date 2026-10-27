@@ -57,6 +57,9 @@ LMUL 时同时验证 SEW、LMUL 和完整 layout，不能只按 VLEN 能容纳�
 直接交付相同的半精度 bits，避免原生工具链将未对齐 half load 转成栈上的 store/load。
 该局部 transfer 保留读取时点与 NaN payload；能力和 Encoding 条件由选择及 verifier 共同检查，
 emitter 只拼写已选的位传输，不改变累加类型、对齐声明或持久布局。
+普通 scalar F16/16-bit integer `bitcast` 复用同一 Zfhmin 能力判断，分别选择 `fmv.h.x`
+或 `fmv.x.h`；后者按结果的 16-bit 类型保留低位。操作选择和晚期 leaf 收尾调用共同的
+instruction 查询，不能在布局已经闭合后把该位传输重新解释成数值转换或栈中转。
 同一 natural scalar field 沿已声明 interleave cohort 的 RVV 读取也复用已有 unit-byte 或
 indexed-byte transfer；它保持字节对齐，不把未对齐地址强制当作自然对齐的元素指针。
 

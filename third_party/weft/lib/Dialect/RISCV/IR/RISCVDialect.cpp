@@ -3974,6 +3974,16 @@ mlir::LogicalResult AtomicRMWOp::verify() {
   return mlir::success();
 }
 
+namespace {
+bool hasScalarHalfMoves(mlir::Operation *operation) {
+  auto kernel = operation->getParentOfType<KernelOp>();
+  weft::RISCVISAFacts facts;
+  std::string error;
+  return kernel && weft::parseRISCVISAFacts(kernel.getTarget().getMarch(),
+      kernel.getTarget().getVlenBits(), facts, error) && facts.hasExtension("zfhmin");
+}
+}
+
 bool weft::riscv::isScalarHalfBitRead(FieldOp field) {
   auto access = field.getAccess();
   auto encoding = mlir::dyn_cast<weft::kernel::EncodingType>(elementOf(field.getOwner().getType()));
@@ -3982,12 +3992,7 @@ bool weft::riscv::isScalarHalfBitRead(FieldOp field) {
       access.getBitOffset() % 8 || access.getAlignment() != 1)
     return false;
   auto declaration = findEncodingDeclaration(field, baseEncodingFamily(field, encoding));
-  auto kernel = field->getParentOfType<KernelOp>();
-  weft::RISCVISAFacts facts;
-  std::string error;
-  return declaration && declaration.getByteOrder() == "little" && kernel &&
-      weft::parseRISCVISAFacts(kernel.getTarget().getMarch(), kernel.getTarget().getVlenBits(), facts, error) &&
-      facts.hasExtension("zfhmin");
+  return declaration && declaration.getByteOrder() == "little" && hasScalarHalfMoves(field);
 }
 
 mlir::LogicalResult FieldOp::verify() {
@@ -4335,6 +4340,16 @@ mlir::LogicalResult UpdateOp::verify() {
   return verifyLeafOperation(*this);
 }
 
+llvm::StringRef weft::riscv::scalarBitcastInstruction(BitcastOp operation) {
+  auto input = elementOf(operation.getInput().getType());
+  auto result = elementOf(operation.getResult().getType());
+  const bool toHalf = input.isInteger(16) && result.isF16();
+  const bool fromHalf = input.isF16() && result.isInteger(16);
+  if ((toHalf || fromHalf) && hasScalarHalfMoves(operation))
+    return toHalf ? "scalar.bitcast.f16-from-bits" : "scalar.bitcast.f16-to-bits";
+  return "scalar.bitcast";
+}
+
 mlir::LogicalResult BitcastOp::verify() {
   const auto sourceWidth = elementBitWidth(elementOf(getInput().getType()));
   const auto targetWidth = elementBitWidth(elementOf(getResult().getType()));
@@ -4348,6 +4363,11 @@ mlir::LogicalResult BitcastOp::verify() {
     return emitOpError("bitcast requires identical physical coordinates; layout transport must be explicit");
   if (!sameLogicalDomain(getInput().getType(), getResult().getType()))
     return emitOpError("bitcast preserves its complete logical domain");
+  if (getLeaf().getInstruction().starts_with("scalar.bitcast.f16-") &&
+      (getLeaf().getInstruction() != scalarBitcastInstruction(*this) ||
+       (result && result.getLayout().getCarrier() != "scalar") ||
+       !exactLeaf(getLeaf(), "scalar", "bitcast", getLeaf().getInstruction(), "none", "agnostic")))
+    return emitOpError("half register bitcast requires scalar 16-bit integer/float operands and Zfhmin");
   return verifyLeafOperation(*this);
 }
 

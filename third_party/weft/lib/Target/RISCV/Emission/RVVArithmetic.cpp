@@ -1011,6 +1011,18 @@ mlir::LogicalResult Emitter::compileCastImpl(ConversionOp operation) {
       }
       return "((" + *targetCType + ")(" + expression + "))";
     }
+    if (selected == "scalar.bitcast.f16-from-bits") {
+      const std::string result = fresh("bitcast_half");
+      line("_Float16 " + result + ";");
+      line("__asm__(\"fmv.h.x %0, %1\" : \"=f\"(" + result + ") : \"r\"(" + expression + "));");
+      return result;
+    }
+    if (selected == "scalar.bitcast.f16-to-bits") {
+      const std::string result = fresh("bitcast_bits");
+      line("uintptr_t " + result + ";");
+      line("__asm__(\"fmv.x.h %0, %1\" : \"=r\"(" + result + ") : \"f\"(" + expression + "));");
+      return "((" + *targetCType + ")" + result + ")";
+    }
     if (selected == "scalar.bitcast") {
       auto sourceCType = scalarCType(source);
       if (!sourceCType) return mlir::failure();

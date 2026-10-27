@@ -1507,7 +1507,7 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
     return carrierOf(select.getResult().getType()) == "rvv" ? "rvv.select" : "scalar.select";
   }
   if (auto bitcast = mlir::dyn_cast<riscv::BitcastOp>(operation))
-    return carrierOf(bitcast.getResult().getType()) == "rvv" ? "rvv.bitcast" : "scalar.bitcast";
+    return carrierOf(bitcast.getResult().getType()) == "rvv" ? "rvv.bitcast" : riscv::scalarBitcastInstruction(bitcast).str();
   if (mlir::isa<riscv::CastOp, riscv::NarrowOp,
                 riscv::WidenOp>(operation)) {
     mlir::Type source = logicalElement(operation->getOperand(0).getType());
