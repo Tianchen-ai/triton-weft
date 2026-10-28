@@ -4325,7 +4325,7 @@ private:
         isa<VectorType>(mapped(op.getOperand(1)).getType()) &&
         volume(shape(result.getType())) <= 4096;
     bool integerMatrix = *selected == weft::x86::ContractionEngine::MatrixInteger &&
-        scalar(op.getOperand(0).getType()).isInteger(8) && scalar(op.getOperand(1).getType()).isInteger(8) &&
+        scalar(op.getOperand(0).getType()).isInteger(8) &&
         isa<MemRefType>(mapped(op.getOperand(0)).getType()) && isa<MemRefType>(mapped(op.getOperand(1)).getType());
     if (integerMatrix || fixedRightMatrix) {
       Value complete = constant(loc, b.getI1Type(), b.getBoolAttr(true));
@@ -4391,21 +4391,8 @@ private:
           // Read each private result only after both tile computations finish.
           // Their packet-wise modular combination needs no wide live vector
           // across the second contraction's packing and tile transfers.
-          int64_t count = leftStatic[0] * rightStatic[0];
-          int64_t packet = std::gcd(int64_t(target.vectorBits / 32), count);
-          auto payload = VectorType::get({packet}, b.getI32Type());
-          auto combine = scf::ForOp::create(b, loc, indexConstant(loc, 0), indexConstant(loc, count),
-                                           indexConstant(loc, packet));
-          {
-            OpBuilder::InsertionGuard combineGuard(b);
-            b.setInsertionPointToStart(combine.getBody());
-            Value offset = combine.getInductionVar();
-            Value lo = vector::LoadOp::create(b, loc, payload, output.data, offset);
-            Value hi = vector::LoadOp::create(b, loc, payload, upper.data, offset);
-            hi = arith::ShLIOp::create(b, loc, hi, constant(loc, payload, b.getI32IntegerAttr(8)));
-            Value sum = arith::AddIOp::create(b, loc, lo, hi);
-            vector::StoreOp::create(b, loc, sum, output.data, offset);
-          }
+          weft::x86::combineAMXIntegerHalves(b, loc, target, output, upper,
+                                            leftStatic[0] * rightStatic[0]);
         }
       } else {
         weft::x86::ArrayStorage right{mapped(op.getOperand(1)), valid(op.getOperand(1), loc), arrayExtents(op.getOperand(1), loc)};

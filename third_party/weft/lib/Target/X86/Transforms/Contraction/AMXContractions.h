@@ -17,8 +17,9 @@ void materializeAMXBFloat(mlir::ModuleOp module, mlir::OpBuilder &b,
                           const ArrayStorage &output,
                           int64_t rows, int64_t columns, int64_t terms,
                           bool leftReductionFirst = false, bool rightReductionFirst = false);
-// Byte snapshots. Signedness selects the exact modular I32 dot. The masked
-// plan zeroes inactive saved lanes; its caller materializes pairwise validity.
+// An I8 left snapshot and an integer right snapshot up to I16. Wide right
+// operands use two exact byte products combined modulo I32. The masked plan
+// zeroes inactive saved lanes; its caller materializes pairwise validity.
 void materializeAMXInteger(mlir::ModuleOp module, mlir::OpBuilder &b,
                           mlir::Location loc, const X86Target &target,
                           const ArrayStorage &left, const ArrayStorage &right,
@@ -27,6 +28,9 @@ void materializeAMXInteger(mlir::ModuleOp module, mlir::OpBuilder &b,
                           bool leftUnsigned, bool rightUnsigned,
                           bool leftReductionFirst = false, bool rightReductionFirst = false,
                           bool maskInputs = false);
+void combineAMXIntegerHalves(mlir::OpBuilder &b, mlir::Location loc,
+                             const X86Target &target, const ArrayStorage &low,
+                             const ArrayStorage &high, int64_t count);
 // Return the row-major SSA result of the closed fixed contraction. Tiled output
 // uses the private destination as tile-major scratch; array consumers must keep
 // row-major storage.

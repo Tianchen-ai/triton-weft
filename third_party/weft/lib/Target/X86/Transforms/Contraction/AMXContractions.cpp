@@ -106,7 +106,8 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
                            int64_t rows, int64_t columns, int64_t terms,
                            bool integerDot, bool leftUnsigned, bool rightUnsigned, Value rightSnapshot,
                            bool tiledOutput = false, bool leftReductionFirst = false,
-                           bool rightReductionFirst = false, bool maskInputs = false) {
+                           bool rightReductionFirst = false, bool maskInputs = false,
+                           int rightByteShift = -1) {
   int64_t group = integerDot ? 4 : 2;
   int64_t bytesPerElement = integerDot ? 1 : 2;
   int64_t reductionTile = !integerDot ? 32 : terms % 64 == 0 ? 64 : terms % 32 == 0 ? 32 : 16;
@@ -119,6 +120,17 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
     Value zero = arith::ConstantOp::create(b, loc, type,
         DenseElementsAttr::get(type, b.getZeroAttr(type.getElementType())));
     return arith::SelectOp::create(b, loc, mask, payload, zero);
+  };
+  auto rightPayload = [&](Value payload) -> Value {
+    if (rightByteShift < 0) return payload;
+    auto type = cast<VectorType>(payload.getType());
+    if (rightByteShift) {
+      Value shift = arith::ConstantOp::create(b, loc, type,
+          DenseElementsAttr::get(type, b.getIntegerAttr(type.getElementType(), rightByteShift)));
+      payload = rightUnsigned ? Value(arith::ShRUIOp::create(b, loc, payload, shift))
+                              : Value(arith::ShRSIOp::create(b, loc, payload, shift));
+    }
+    return arith::TruncIOp::create(b, loc, type.clone(b.getI8Type()), payload);
   };
   Value leftData = left.data;
   if (leftReductionFirst) {
@@ -221,6 +233,7 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
           arith::MulIOp::create(b, loc, k, index(b, loc, columns)), columnLoop.getInductionVar());
       Value payload = vector::LoadOp::create(b, loc, VectorType::get({tileColumns}, payloadType), right.data, offset);
       payload = maskPayload(payload, right, offset);
+      payload = rightPayload(payload);
       if (!integerDot) payload = arith::BitcastOp::create(b, loc, VectorType::get({tileColumns}, bits), payload);
       rectangle = vector::InsertStridedSliceOp::create(b, loc, payload, rectangle,
           ArrayRef<int64_t>{member * tileColumns}, ArrayRef<int64_t>{1});
@@ -253,9 +266,10 @@ static void materializeAMX(ModuleOp module, OpBuilder &b, Location loc,
         for (int64_t column = 0; column < width; ++column) {
           Value source = arith::AddIOp::create(b, loc, index(b, loc, (first + column) * terms),
               arith::MulIOp::create(b, loc, packing.getInductionVar(), index(b, loc, group)));
-          Type inputType = integerDot ? Type(b.getI8Type()) : Type(b.getBF16Type());
+          Type inputType = cast<MemRefType>(right.data.getType()).getElementType();
           Value pairs = vector::LoadOp::create(b, loc, VectorType::get({pairsPerPacket * group}, inputType), right.data, source);
           pairs = maskPayload(pairs, right, source);
+          pairs = rightPayload(pairs);
           Value bits = integerDot ? pairs : Value(arith::BitcastOp::create(b, loc,
               VectorType::get({pairsPerPacket * group}, b.getI16Type()), pairs));
           Value words = vector::BitCastOp::create(b, loc, VectorType::get({pairsPerPacket}, b.getI32Type()), bits);
@@ -387,8 +401,36 @@ void weft::x86::materializeAMXInteger(ModuleOp module, OpBuilder &b, Location lo
                                     int64_t rows, int64_t columns, int64_t terms,
                                     bool leftUnsigned, bool rightUnsigned,
                                     bool leftReductionFirst, bool rightReductionFirst, bool maskInputs) {
+  auto element = cast<IntegerType>(cast<MemRefType>(right.data.getType()).getElementType());
+  if (element.getWidth() > 8) {
+    // Split while packing the immutable snapshot. There is no persistent
+    // layout change and no extra full-size low/high byte array.
+    auto upper = allocateArray(b, loc, b.getI32Type(), output.extents);
+    materializeAMX(module, b, loc, target, left, right, output, rows, columns, terms,
+        true, leftUnsigned, true, {}, false, leftReductionFirst, rightReductionFirst, maskInputs, 0);
+    materializeAMX(module, b, loc, target, left, right, upper, rows, columns, terms,
+        true, leftUnsigned, rightUnsigned, {}, false, leftReductionFirst, rightReductionFirst, maskInputs, 8);
+    combineAMXIntegerHalves(b, loc, target, output, upper, rows * columns);
+    return;
+  }
   materializeAMX(module, b, loc, target, left, right, output, rows, columns, terms, true, leftUnsigned, rightUnsigned, {},
                  false, leftReductionFirst, rightReductionFirst, maskInputs);
+}
+
+void weft::x86::combineAMXIntegerHalves(OpBuilder &b, Location loc,
+                                       const X86Target &target, const ArrayStorage &low,
+                                       const ArrayStorage &high, int64_t count) {
+  int64_t packet = std::gcd(int64_t(target.vectorBits / 32), count);
+  auto payload = VectorType::get({packet}, b.getI32Type());
+  auto combine = scf::ForOp::create(b, loc, index(b, loc, 0), index(b, loc, count), index(b, loc, packet));
+  OpBuilder::InsertionGuard guard(b);
+  b.setInsertionPointToStart(combine.getBody());
+  Value offset = combine.getInductionVar();
+  Value lo = vector::LoadOp::create(b, loc, payload, low.data, offset);
+  Value hi = vector::LoadOp::create(b, loc, payload, high.data, offset);
+  Value shift = arith::ConstantOp::create(b, loc, payload, DenseElementsAttr::get(payload, b.getI32IntegerAttr(8)));
+  hi = arith::ShLIOp::create(b, loc, hi, shift);
+  vector::StoreOp::create(b, loc, arith::AddIOp::create(b, loc, lo, hi), low.data, offset);
 }
 
 Value weft::x86::materializeAMXIntegerFixed(ModuleOp module, OpBuilder &b, Location loc,
