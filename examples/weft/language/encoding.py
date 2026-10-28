@@ -9,7 +9,6 @@ from __future__ import annotations
 import numpy as np
 import triton
 import triton.language as tl
-from triton.runtime.weft.buffer import Buffer
 
 
 @triton.encoding
@@ -30,11 +29,13 @@ def unpack(X: tl.View[PackedNibbles, (N,)], Y: tl.View[tl.u8, (N,)]):
 def main():
     logical = (np.arange(64, dtype=np.uint8) % 16).reshape(2, 32)
     storage = logical[:, :16] | (logical[:, 16:] << 4)
-    x = Buffer(storage, shape=(logical.size,), encoding="PackedNibbles")
+    # Host preparation and kernel consumption share the declared layout identity.
+    x = tl.View(storage, shape=(logical.size,), encoding=PackedNibbles)
     y = np.empty(logical.size, dtype=np.uint8)
     compiled = unpack[(1,)](x, y)
-    print("Packed bytes:", storage[0])
-    print("Logical values:", y[:32])
+    print("Storage: 2 records, 16 bytes per record, 32 logical u4 values per record")
+    print("Packed bytes in the first record:", storage[0])
+    print("Unpacked u8 values in the first record:", y[:32])
     print("Storage contract:", compiled.metadata.kernel_abi["arguments"][0]["encoding"])
 
 

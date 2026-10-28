@@ -7,7 +7,7 @@
 
 `lib/Dialect/Kernel` 保存作者语义，`lib/Analysis` 与 `lib/Transforms` 保存共同机制。
 `lib/Target/{RISCV,X86}` 均按 Backend、Platform、Analysis、Conversion、Transforms、Emission
-组织；RISC-V 的自定义物理方言与 x86 复用的 MLIR 方言有不同表示，见[源码地图](../../docs/weft/development/upstream.md)。
+组织；RISC-V 的自定义物理方言与 x86 复用的 MLIR 方言有不同表示，见[源码地图](../../docs/weft/development/upstream.zh.md)。
 
-从[工具书](../../docs/weft/index.md)、[安装说明](../../docs/weft/getting-started/installation.md)和
-[native SDK](../../docs/weft/compiler/native-sdk.md)开始。Weft 原代码保留 [Apache-2.0](LICENSE) 归属。
+从[工具书](../../docs/weft/index.zh.md)、[安装说明](../../docs/weft/getting-started/installation.zh.md)和
+[native SDK](../../docs/weft/compiler/native-sdk.zh.md)开始。Weft 原代码保留 [Apache-2.0](LICENSE) 归属。

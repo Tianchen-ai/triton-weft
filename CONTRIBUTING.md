@@ -4,7 +4,8 @@ Describe the concrete behavior changed, its reason and the relevant validation.
 Keep changes focused on compiler, language, runtime or application contracts.
 
 For the Weft model, start with the [component contribution guide](third_party/weft/CONTRIBUTING.md)
-and [compiler handbook](docs/weft/index.md). Weft and Triton share
+and [bilingual handbook](docs/weft/index.md). Detailed contracts are in the
+[design specifications](docs/specification/index.md). Weft and Triton share
 one LLVM/MLIR SDK, build and Python package. The Canonical IR preserves the
 author's program; physical passes select target representations and operations.
 

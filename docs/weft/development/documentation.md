@@ -1,48 +1,48 @@
-# Build and publish documentation
+# Maintain the bilingual handbook
 
-The handbook uses Material for MkDocs. Documentation builds need Python only;
-LLVM, MLIR and RISC-V hardware are not required.
+The handbook uses MkDocs Material and static language files.
+English pages use `topic.md`; Chinese counterparts use `topic.zh.md`.
+They share code, images and a corresponding navigation structure.
+
+## Build and preview
+
+From the repository root:
 
 ```sh
-python3 -m venv /tmp/weft-docs-env
-. /tmp/weft-docs-env/bin/activate
 python -m pip install -r third_party/weft/requirements-docs.txt
-python -m mkdocs build --strict -f mkdocs.yml --site-dir /tmp/weft-docs
+python -m mkdocs build --strict -f mkdocs.yml --site-dir /tmp/weft-handbook
 python -m mkdocs serve -f mkdocs.yml
 ```
 
-Open the local URL printed by the server. Build output belongs outside the
-checkout; the default directory is `/tmp/weft-docs-site`, overridable through
-`WEFT_DOCS_SITE_DIR` or `--site-dir`.
+English builds at the site root; Chinese builds under `/zh/`.
+The language selector links corresponding chapters.
+Strict builds check internal pages and anchors.
 
-## Document structure
+## Update both editions
 
-| Directory | Audience and responsibility |
-|---|---|
-| `getting-started/` | Installation and the first real compiled call |
-| `programming-model/` | Author/compiler boundary and execution model |
-| `dsl/` | Language constructs, storage, numerical semantics and canonical IR |
-| `compiler/` | Physical machine, IR, passes, local operations and runtime contracts |
-| `integrations/` | Practical application and framework entry points |
-| `development/` | Hardware extension, numerical validation, measurement and documentation |
+1. Edit both language versions for the same behavior and code.
+2. Link internal pages by their neutral name, such as `../compiler/runtime.md`;
+   the localization plugin resolves the active language.
+3. Use source links for repository files outside the handbook.
+4. Update both navigation labels in `mkdocs.yml` when adding a chapter.
+5. Open both rendered pages and check code, tables, figures and narrow screens.
 
-Use relative `.md` links within the handbook and GitHub links for source files.
-When moving a page, update its incoming links and the navigation together. The
-strict build checks page links and anchors. Keep runnable snippets aligned with
-the public package and the `examples/weft/` modules listed in
-[Runnable examples](../getting-started/examples.md).
+Describe available behavior directly. Put installation requirements and
+measurement settings beside the commands or results they explain.
 
-Stable design belongs in specifications; transient measurements, internal
-instructions and historical work records are not part of the public handbook.
+## Figures and specifications
 
-## Hosting
+Shared assets live in `docs/weft/assets`. Paper figures have bilingual captions
+and an entry in [figure sources](../experiments/results.md).
+Public measured CSV tables live in Bench's `docs/paper`; execution outputs remain
+in Bench's ignored `output` directory.
 
-The Build workflow checks the handbook for pull requests and pushes. A successful
-handbook build on the repository's default branch uploads and deploys the site
-through GitHub Pages. Pull requests and other branches only build the handbook.
-The repository Pages setting must select GitHub Actions as its build source.
+Detailed semantic and pass contracts live in `docs/specification`.
+The handbook teaches usage and structure. Approved semantic changes update
+the corresponding contract and implementation together.
 
-The configured public address is `https://tianchen-ai.github.io/triton-weft/`. A successful
-local build alone does not establish that deployment completed; check the Pages
-workflow and the resulting URL. Moving the repository requires updating
-`site_url`, `repo_url`, package metadata and README links together.
+## Publish
+
+`Build Triton and Weft` runs the strict bilingual build.
+Its default-branch handbook job deploys through GitHub Pages to
+`https://tianchen-ai.github.io/triton-weft/`.

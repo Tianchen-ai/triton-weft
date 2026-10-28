@@ -1,35 +1,44 @@
-# From a Python kernel to a llama.cpp call
+# Deploy into llama.cpp
 
-Python supplies compiler input. GGML workers execute an exported native library.
-There is no Python interpreter, compiler subprocess or additional OpenMP team
-inside the replaced call.
+The deployment path is:
 
-The complete tutorial is `examples/weft/deployment/llama_cpp.py`. It declares Q8_0 storage,
-reduces each 32-element signed byte block into I32, applies both FP16 scales in
-F32, and accumulates a row. Its public arguments are `W[K], X[K], Y[1]` with one
-dynamic K, matching the `ggml.vec_dot/q8_0` role. It is a readable deployment
-example, not a promise of acceleration over an optimized native dot.
+**Triton Python source → native library and typed ABI → GGML role binding → worker call.**
 
-## Compile and bind
+The tutorial exports a Q8_0 row dot. GGML prepares the model data and assigns worker
+chunks; the bound function computes the matching local dot.
+
+## 1. Read the role's source program
+
+[`deployment/llama_cpp.py`](https://github.com/Tianchen-ai/triton-weft/blob/main/examples/weft/deployment/llama_cpp.py)
+imports `Q8_0` from `triton.integrations.ggml_formats`.
+For each 32-element block it computes an I32 dot of the signed-byte fields,
+multiplies the two FP16 scales in F32 and updates the row total.
+
+Its signature is `W[K], X[K], Y[1]`, matching `ggml.vec_dot/q8_0`.
+Both arguments carry the actual GGML Encoding.
+
+## 2. Compile and bind
 
 ```sh
-python -m examples.weft.deployment.llama_cpp /path/to/new-package --profile native
+python -m examples.weft.deployment.llama_cpp /tmp/q8-package --profile native
 ```
 
-For a cross build, pass `--profile k1` (or the selected target) and `--toolchain`
-with the declared compiler/sysroot JSON. The script calls `triton.compile`, then
-`triton.integrations.llama_cpp.create_package`. The integration checks Encoding,
-parameter order, strides, numerical extent and target requirements before export.
-An arbitrary matmul cannot be bound to this row-dot role.
+For cross compilation select, for example, `--profile k1 --toolchain toolchain.json`.
+The script calls `triton.compile`, then:
 
-The package contains the `.so`, typed header, ABI/target metadata and required
-native libraries. Generated C and IR are inspection material. Deployment loads
-the existing `.so` and does not rebuild that C.
+```python
+create_package(output, {"q8_dot": compiled},
+               bindings={"ggml.vec_dot": {"q8_0": "q8_dot"}})
+```
 
-## Build the adapter into the application
+The integration validates layout, shape, argument order and target requirements.
+The package contains the compiled library and the metadata needed at the call site.
 
-Choose the supported llama.cpp source version documented by Bench's reference
-catalog. Keep its normal CPU, repack, vendor and OpenMP options.
+## 3. Build the application adapter
+
+Choose the llama.cpp revision registered by Bench's
+[reference catalog](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/src/weft_bench/catalogs/references.json).
+Install the integration into that selected checkout:
 
 ```python
 from triton.integrations.llama_cpp import install_source
@@ -38,24 +47,28 @@ install_source("/path/to/llama.cpp")
 print(sdk_prefix())
 ```
 
+Keep the application's normal backend settings and add the adapter:
+
 ```sh
 cmake -S /path/to/llama.cpp -B /path/to/llama-build \
   -DGGML_WEFT=ON -DWeft_DIR=/printed/sdk/path/lib/cmake/Weft
 cmake --build /path/to/llama-build --target llama-cli llama-bench
-WEFT_GGML_PACKAGE=/path/to/new-package \
+WEFT_GGML_PACKAGE=/tmp/q8-package \
   /path/to/llama-build/bin/llama-cli -m /path/to/q8-model.gguf -p 'Hello'
 ```
 
-The adapter validates the actual GGML record layout, loads the package during
-initialization, and binds the named row-dot call. GGML still prepares weights,
-quantizes activations and assigns work to its existing workers. A backend that
-uses a different packed matrix call needs its corresponding IME/AMX role instead.
+GGML loads and binds the package during initialization. Its workers call the
+native function using the existing input layout, output contract and thread pool.
 
-## Check actual replacement
+## 4. Inspect actual calls and performance
 
-Use the independent Bench `prepare-model` and `e2e` commands to reuse a configured
-model protocol, logit oracle, role mapping and normal baseline. Its observer reads
-the adapter counters before and after each phase. A loaded package with no calls
-does not demonstrate a model replacement or acceleration. Prefill and decode are
-reported separately. The detailed [native SDK contract](../compiler/native-sdk.md)
-lists supported hooks, layouts, counter APIs and thread boundaries.
+The adapter exposes counters for the registered roles. Bench records differences
+within each measurement window and checks registered logits separately.
+Use [prepare-model and e2e](../experiments/reproduce.md) to run the selected package
+with matching normal references and separate prefill/decode measurements.
+
+The optimized corpus also provides multi-row, IME and AMX programs with their
+specific packed role contracts. Choose roles from `weft-bench list --kind replacements`
+and the model's package recipe.
+
+[Full role, layout and worker contracts](https://github.com/Tianchen-ai/triton-weft/blob/main/docs/specification/compiler/native-sdk.md).

@@ -1,143 +1,42 @@
-# Extending RISC-V support
+# Add a hardware extension
 
-The extended Triton exposes three distinct capability queries:
+Weft separates capability facts, local instruction contracts, physical transforms,
+emission and runtime checks. Use these interfaces for a RISC-V extension or an
+x86 instruction family.
 
-```python
-from triton.backends.compiler import CPUTarget
-from triton.backends.weft.target import (
-    extension_catalog, target_capabilities, native_capabilities,
-)
+## Machine facts and local contracts
 
-catalog = extension_catalog()
-target = CPUTarget("weft", "riscv64", "rv64gcv", "lp64d", 256)
-rvv = target_capabilities(target)
-matrix = target_capabilities(target, matrix_extension="spacemit-ime1")
-# On a RISC-V execution host:
-native = native_capabilities()
-```
+Describe ISA features, operand/accumulator types, supported dimensions, alignment
+and resources. A named CPU profile expands to those facts.
+Define each local operation's numerical behavior, logical coverage, operand
+representation, effects, transfers and temporary resources. Legality checks reuse
+shared integer, axis and storage proofs.
 
-`extension_catalog()` lists the local extensions built into this compiler and
-SDK, including numerical types, packing, finite atom repetitions, resources,
-clobbers and native identity matches. `target_capabilities()` uses the same
-target validator as compilation and returns the capabilities admitted for an
-explicit ISA/ABI/VLEN and optional matrix extension. Both work on a cross-build
-host without a C compiler, sysroot or device. An unknown extension, incompatible
-VLEN or unsupported ISA is an error, not an empty successful capability set.
+The author program supplies traversal, source groups, state and reuse scopes.
+An extension implements a local part of that physical program.
 
-`native_capabilities()` reports the current host ISA, allowed CPU set and
-`native_matrix_extensions`: the CPU IDs eligible for each detected extension.
-It does not bind threads or enable an extension. Native discovery on an
-unsupported host fails explicitly. The SDK still checks each executing worker;
-the catalog alone never authorizes an instruction on a CPU.
+## Integrate the pipeline
 
-Compilation continues through the ordinary Triton API. For an author program
-whose typed contract can use a registered matrix atom:
-
-```python
-compiled = kernel[(1,)](
-    W, X, Y,
-    backend_options={
-        "matrix_extension": "spacemit-ime1",
-        "required_extensions": ("spacemit-ime1",),
-    },
-)
-print(compiled.metadata.kernel_abi["used_extensions"])
-print(compiled.asm["riscvir"])
-```
-
-`matrix_extension` admits a physical implementation. `required_extensions`
-requires the final program to actually use it; it cannot turn an unrelated
-program into a matrix operation. `triton.Config(..., backend_options=...)` uses
-the same options during tuning. The C toolchain must assemble the selected
-instruction, and deployment must provide qualifying execution CPUs.
-
-## Where an extension belongs
-
-Standard ISA parsing uses LLVM's RISC-V ISA machinery. Vendor local operations
-use built-in extension modules, with typed fragment contracts where needed.
-The registry is fixed at build time; there is no Python registration, runtime
-library search or mutable global instruction registry.
-
-| Responsibility | Implementation entry |
+| Step | Responsibility |
 |---|---|
-| Build-time module list | `lib/Target/Extensions/CMakeLists.txt` |
-| Extension identity, native matches and local atom contracts | `lib/Target/Extensions/<Module>/Contracts.cpp` |
-| Shared registry validation and tile admission | `lib/Target/RISCVExtensions.cpp`, `lib/Target/RISCVFragment.cpp` |
-| Target profile and native discovery | `lib/Target/RISCVTargetProfile.cpp`, `lib/Target/RISCVNativeTarget.cpp` |
-| Fragment IR verification | `lib/Dialect/RISCV/IR/FragmentOps.cpp` |
-| Selected local operation materialization | `lib/Target/IME/FragmentMaterialization.cpp` |
-| Extension's selected MMA spelling | `lib/Target/Extensions/<Module>/Emission.cpp` |
-| Shared terminal dispatch and register/memory transfers | `lib/Target/IME/FragmentEmission.cpp`, `lib/Target/Emission/` |
-| Shared pipeline | `lib/Target/RISCVPipeline.cpp` |
+| Capability | Platform description and native discovery |
+| Legality | Typed numerical, layout and effect requirements |
+| Selection | Respect the contraction engine and finite legal options |
+| Materialization | Transfers, packing, conversion and the selected operation |
+| Resources | Live registers/fragments, local buffers and schedule |
+| Emission | The selected intrinsic, assembly or LLVM operation |
+| Runtime | Artifact requirements checked on actual workers |
 
-For another matrix extension using the existing shared-RVV fragment contract:
+RISC-V modules live in `Target/RISCV/Extensions/SpacemitIME1` and `SpacemitIME2`.
+x86 AMX belongs to its contraction and platform modules.
+Common numerical and storage semantics stay in Canonical IR and `lib/Analysis`.
 
-1. Add `Extensions/<Module>/Contracts.cpp`, defining
-   `weft::get<Module>Extension()`. Its returned `RISCVExtension` has stable
-   lifetime and owns distinct extension/instruction names, native matches and
-   atom contracts. Define numerical types, logical/active shape, packing,
-   register groups, temporary bytes, clobbers and finite row/column/product
-   repetition limits together. A partial-row atom cannot repeat along M.
-2. Add `Extensions/<Module>/Emission.cpp`, implementing
-   `weft::riscv_emission::emit<Module>MMA` with the signature in
-   `IME/FragmentEmission.cpp`. It consumes an already selected, verified
-   `IMEFragmentMMAOp` and typed operand names. It only spells that local op
-   through `FragmentEmission::fresh` and `line`; it cannot change layout,
-   choose an algorithm or introduce a loop or ABI.
-3. Add the module identifier to `extension_modules` in the module list.
-   CMake derives both source lists and a shared registry include from it.
-   `WeftRISCVContracts` contains only MLIR-free descriptions and validators;
-   `WeftRISCVTarget` adds compiler-only emission. Runtime-only SDK builds
-   consume the same descriptions without linking MLIR or emission code.
+## Run the author program
 
-The `SpacemitIME1` module supplies M4/M1 i8 atoms at VLEN256. `SpacemitIME2`
-supplies M8/M4/M1 signed i8 atoms and signed/unsigned I4 atom combinations
-at VLEN1024, together with registered chunk-split
-and row-merge permutation instructions. The latter transfer capabilities are
-selected by physical storage/coordinate proofs and do not own outer loops.
-Adding a module does not require editing a public instruction enum or a
-vendor-specific switch in the shared emitter. Missing module sources or symbols
-fail the build. Duplicate names, incomplete resource/packing contracts and
-invalid repetition domains fail registry validation. Generic physical passes
-still choose legal atom repetitions and account for their live resources.
+Write a DSL program using the operation and compile through the ordinary Triton
+frontend. Bench checks numerical boundaries, tails and real target execution,
+then compares the affected workload with its matched reference.
+Inspect actual artifact extensions and observed calls.
 
-Native identity matches must establish vendor/architecture, XLEN and VLEN on
-each execution CPU. A module can require an additional reported ISA token, as
-IME1 does, or use an exact documented CPU identity whose kernel omits that
-token, as IME2 does for A100. An empty token is not a wildcard for vendor,
-architecture or VLEN. Unknown capability is not permission to emit or execute
-an instruction.
-
-A mechanism introducing new effects or residency needs a corresponding general
-IR contract. Adding a name to a table cannot implement those semantics. Read the
-[local leaf specification](../compiler/leaves.md) and
-[physical machine](../compiler/physical-machine.md) before changing these boundaries.
-The current module interface covers matrix MMA atoms with the existing carrier
-and transfer semantics. A DSP instruction with different effects, an independent
-tile register file or a new asynchronous engine needs its own physical contract
-and lowering support. An x86 backend remains a separate target lowering from
-Canonical IR; it is not registered as a RISC-V extension.
-
-## Keep the author program intact
-
-An extension leaf represents a closed local operation. It does not own outer
-traversal, kernel ABI, workspace, persistent packing or the author program's
-levels. Physical passes select and record representations; terminal emission
-spells the selected operation and rejects missing decisions.
-
-If exploiting hardware changes numerical grouping, persistent layout or the
-value/effect graph, express that choice in a source/std program before lowering.
-The [programming model](../programming-model/index.md) defines this distinction.
-
-## Inspect and exercise the result
-
-Inspect `CompiledKernel.asm["weftir"]`, `asm["riscvir"]`, `asm["c"]` and
-`CompiledKernel.metadata.compilation` for selected operations and resources.
-Use the existing Bench source/repro for the affected primitive to run
-the full DSL → IR → C → native call path. Check the declared numerical contract,
-then measure the affected workload on the actual target with matching input and
-toolchain. State exactly where validation stopped if hardware is unavailable.
-
-Compilation for a target and runtime discovery are separate evidence. The
-[pass specification](../compiler/passes.md) and
-[measurement protocol](validation.md) provide the detailed contracts.
+[Complete extension contract](https://github.com/Tianchen-ai/triton-weft/blob/main/docs/specification/development/extensions.md) ·
+[Source map](upstream.md) · [Bench workflow](../experiments/reproduce.md).

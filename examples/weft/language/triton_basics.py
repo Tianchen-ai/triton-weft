@@ -87,6 +87,10 @@ def main():
         histogram[(triton.cdiv(indices.size, 32),)](indices, y, indices.size, B=32, **launch)
     print(args.operation, y.shape, y.dtype)
     print(y.reshape(-1)[:16])
+    if args.operation == "softmax":
+        print("Each row sums to one:", y.sum(axis=1))
+    elif args.operation == "histogram":
+        print("Total observations:", int(y.sum()))
 
 
 if __name__ == "__main__":

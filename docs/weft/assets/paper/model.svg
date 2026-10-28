@@ -1,0 +1,310 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="808" viewBox="0 0 1536 808">
+<title>Composition of the Q4_K projection as nested updates</title>
+<desc>Within one nc-kc panel a staged weight panel wp feeds two independent output-group chains whose f32 state is loaded from Y, updated once per input block and stored to Y. One f32 update is magnified: a fresh i32 state is updated once per 32-input subtile, and only the completed i32 value with the min_term correction forms the f32 update. One i32 update is magnified for one output component: groups of four products form i16 partials, which are widened, reduced over all groups, scaled by w.sc[s] and added.</desc>
+<rect id="canvas" x="0" y="0" width="1536" height="808" fill="#FFFFFF" stroke="none"/>
+<text id="rail-panel-0" x="2.00" y="30.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">nc</text>
+<text id="rail-panel-1" x="44.72" y="30.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">·</text>
+<text id="rail-panel-2" x="60.86" y="30.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">kc</text>
+<text id="rail-panel-3" x="104.17" y="30.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">panel</text>
+<polyline id="guide-0" points="8.00,40.00 8.00,800.00" fill="none" stroke="#CCD2D6" stroke-width="2"/>
+<polyline id="tick-1-0" points="8.00,66.00 18.00,66.00" fill="none" stroke="#CCD2D6" stroke-width="2"/>
+<text id="rail-mb0-0" x="22.00" y="76.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">(</text>
+<text id="rail-mb0-1" x="33.70" y="76.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">mb</text>
+<text id="rail-mb0-2" x="81.36" y="82.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="rail-mb0-3" x="95.70" y="76.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">,</text>
+<text id="rail-mb0-4" x="114.77" y="76.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">nb</text>
+<text id="rail-mb0-5" x="153.30" y="76.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">)</text>
+<polyline id="tick-1-1" points="8.00,278.00 18.00,278.00" fill="none" stroke="#CCD2D6" stroke-width="2"/>
+<text id="rail-mb1-0" x="22.00" y="288.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">(</text>
+<text id="rail-mb1-1" x="33.70" y="288.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">mb</text>
+<text id="rail-mb1-2" x="81.36" y="294.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="rail-mb1-3" x="95.70" y="288.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">,</text>
+<text id="rail-mb1-4" x="114.77" y="288.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">nb</text>
+<text id="rail-mb1-5" x="153.30" y="288.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">)</text>
+<polyline id="guide-1" points="22.00,298.00 22.00,800.00" fill="none" stroke="#CCD2D6" stroke-width="2"/>
+<polyline id="tick-2" points="22.00,466.00 36.00,466.00" fill="none" stroke="#CCD2D6" stroke-width="2"/>
+<text id="rail-kb-0" x="40.00" y="476.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">kb</text>
+<text id="rail-kb-1" x="77.38" y="482.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="rail-256" x="40.00" y="510.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#747D84">256 inputs</text>
+<polyline id="guide-2" points="36.00,522.00 36.00,800.00" fill="none" stroke="#CCD2D6" stroke-width="2"/>
+<polyline id="tick-3" points="36.00,581.00 46.00,581.00" fill="none" stroke="#CCD2D6" stroke-width="2"/>
+<text id="rail-s7-0" x="50.00" y="590.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="rail-s7-1" x="65.40" y="596.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">7</text>
+<text id="rail-s7-2" x="79.74" y="590.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">,</text>
+<text id="rail-one-0" x="50.00" y="622.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#747D84">one</text>
+<text id="rail-one-1" x="104.50" y="622.00" font-family="DejaVu Serif" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#747D84">(</text>
+<text id="rail-one-2" x="115.42" y="622.00" font-family="DejaVu Serif" font-size="28" font-weight="normal" font-style="italic" text-anchor="start" fill="#747D84">m</text>
+<text id="rail-one-3" x="141.97" y="622.00" font-family="DejaVu Serif" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#747D84">,</text>
+<text id="rail-one-4" x="159.77" y="622.00" font-family="DejaVu Serif" font-size="28" font-weight="normal" font-style="italic" text-anchor="start" fill="#747D84">n</text>
+<text id="rail-one-5" x="177.80" y="622.00" font-family="DejaVu Serif" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#747D84">)</text>
+<text id="rail-32" x="50.00" y="652.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#747D84">32 inputs</text>
+<rect id="load-0" x="210.00" y="44.00" width="115.00" height="44.00" fill="#FFFFFF" stroke="#747D84" stroke-width="1.8"/>
+<text id="load-0-t" x="267.50" y="76.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">load Y</text>
+<rect id="f32-0-0" x="371.86" y="44.00" width="146.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2"/>
+<text id="f32-0-0-t" x="444.86" y="76.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">f32_acc</text>
+<rect id="f32-0-1" x="645.57" y="44.00" width="146.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2"/>
+<text id="f32-0-1-t" x="718.57" y="76.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">f32_acc</text>
+<rect id="f32-0-2" x="919.29" y="44.00" width="146.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2"/>
+<text id="f32-0-2-t" x="992.29" y="76.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">f32_acc</text>
+<circle id="plus-0-0" cx="581.71" cy="66.00" r="17" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<path id="plus-0-0-sign" d="M 572.36 66.00 L 591.06 66.00 M 581.71 56.65 L 581.71 75.35" fill="none" stroke="#25292D" stroke-width="2"/>
+<circle id="plus-0-1" cx="855.43" cy="66.00" r="17" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<path id="plus-0-1-sign" d="M 846.08 66.00 L 864.78 66.00 M 855.43 56.65 L 855.43 75.35" fill="none" stroke="#25292D" stroke-width="2"/>
+<polyline id="b1-a0-0" points="325.00,66.00 360.86,66.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a0-0-head" points="371.86,66.00 359.86,60.50 359.86,71.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a1-0" points="517.86,66.00 553.71,66.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a1-0-head" points="564.71,66.00 552.71,60.50 552.71,71.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a2-0" points="598.71,66.00 634.57,66.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a2-0-head" points="645.57,66.00 633.57,60.50 633.57,71.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a3-0" points="791.57,66.00 827.43,66.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a3-0-head" points="838.43,66.00 826.43,60.50 826.43,71.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a4-0" points="872.43,66.00 908.29,66.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a4-0-head" points="919.29,66.00 907.29,60.50 907.29,71.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a5-0" points="1065.29,66.00 1099.14,66.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a5-0-head" points="1110.14,66.00 1098.14,60.50 1098.14,71.50" fill="#25292D" stroke="none"/>
+<text id="b1-dots-0" x="1127.14" y="74.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">…</text>
+<polyline id="b1-a6-0" points="1144.14,66.00 1178.00,66.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a6-0-head" points="1189.00,66.00 1177.00,60.50 1177.00,71.50" fill="#25292D" stroke="none"/>
+<rect id="store-0" x="1189.00" y="44.00" width="125.00" height="44.00" fill="#FFFFFF" stroke="#747D84" stroke-width="1.8"/>
+<text id="store-0-t" x="1251.50" y="76.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">store Y</text>
+<text id="next-kc-0" x="1524.00" y="76.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="end" fill="#747D84">next kc loads Y</text>
+<rect id="load-1" x="210.00" y="256.00" width="115.00" height="44.00" fill="#FFFFFF" stroke="#747D84" stroke-width="1.8"/>
+<text id="load-1-t" x="267.50" y="288.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">load Y</text>
+<rect id="f32-1-0" x="371.86" y="256.00" width="146.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2"/>
+<text id="f32-1-0-t" x="444.86" y="288.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">f32_acc</text>
+<rect id="f32-1-1" x="645.57" y="256.00" width="146.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2"/>
+<text id="f32-1-1-t" x="718.57" y="288.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">f32_acc</text>
+<rect id="f32-1-2" x="919.29" y="256.00" width="146.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2"/>
+<text id="f32-1-2-t" x="992.29" y="288.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">f32_acc</text>
+<circle id="plus-1-0" cx="581.71" cy="278.00" r="20" fill="#FFFFFF" stroke="#25292D" stroke-width="4.5"/>
+<path id="plus-1-0-sign" d="M 570.71 278.00 L 592.71 278.00 M 581.71 267.00 L 581.71 289.00" fill="none" stroke="#25292D" stroke-width="2"/>
+<circle id="plus-1-1" cx="855.43" cy="278.00" r="17" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<path id="plus-1-1-sign" d="M 846.08 278.00 L 864.78 278.00 M 855.43 268.65 L 855.43 287.35" fill="none" stroke="#25292D" stroke-width="2"/>
+<polyline id="b1-a0-1" points="325.00,278.00 360.86,278.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a0-1-head" points="371.86,278.00 359.86,272.50 359.86,283.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a1-1" points="517.86,278.00 550.71,278.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a1-1-head" points="561.71,278.00 549.71,272.50 549.71,283.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a2-1" points="601.71,278.00 634.57,278.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a2-1-head" points="645.57,278.00 633.57,272.50 633.57,283.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a3-1" points="791.57,278.00 827.43,278.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a3-1-head" points="838.43,278.00 826.43,272.50 826.43,283.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a4-1" points="872.43,278.00 908.29,278.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a4-1-head" points="919.29,278.00 907.29,272.50 907.29,283.50" fill="#25292D" stroke="none"/>
+<polyline id="b1-a5-1" points="1065.29,278.00 1099.14,278.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a5-1-head" points="1110.14,278.00 1098.14,272.50 1098.14,283.50" fill="#25292D" stroke="none"/>
+<text id="b1-dots-1" x="1127.14" y="286.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">…</text>
+<polyline id="b1-a6-1" points="1144.14,278.00 1178.00,278.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b1-a6-1-head" points="1189.00,278.00 1177.00,272.50 1177.00,283.50" fill="#25292D" stroke="none"/>
+<rect id="store-1" x="1189.00" y="256.00" width="125.00" height="44.00" fill="#FFFFFF" stroke="#747D84" stroke-width="1.8"/>
+<text id="store-1-t" x="1251.50" y="288.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">store Y</text>
+<text id="next-kc-1" x="1524.00" y="288.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="end" fill="#747D84">next kc loads Y</text>
+<text id="tag-B" x="366.86" y="50.00" font-family="Liberation Sans" font-size="27" font-weight="bold" font-style="normal" text-anchor="end" fill="#25292D">B</text>
+<rect id="wp-strip" x="210.00" y="152.00" width="1104.00" height="40.00" fill="#EDF4F8" stroke="#376784" stroke-width="2"/>
+<path id="wp-div" d="M 444.86 152.00 L 444.86 192.00 M 718.57 152.00 L 718.57 192.00 M 992.29 152.00 L 992.29 192.00" fill="none" stroke="#376784" stroke-width="1.8"/>
+<text id="tag-A" x="248.00" y="182.00" font-family="Liberation Sans" font-size="27" font-weight="bold" font-style="normal" text-anchor="end" fill="#25292D">A</text>
+<text id="wp-name" x="258.00" y="182.00" font-family="Liberation Mono" font-size="31" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">wp</text>
+<text id="wp-seg-0-0" x="488.14" y="182.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">wp[nb, kb</text>
+<text id="wp-seg-0-1" x="644.76" y="188.38" font-family="Liberation Mono" font-size="20.9" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">0</text>
+<text id="wp-seg-0-2" x="657.89" y="182.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">]</text>
+<text id="wp-seg-1-0" x="761.85" y="182.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">wp[nb, kb</text>
+<text id="wp-seg-1-1" x="918.48" y="188.38" font-family="Liberation Mono" font-size="20.9" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">1</text>
+<text id="wp-seg-1-2" x="931.60" y="182.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">]</text>
+<text id="wp-dots" x="1153.14" y="180.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#376784">…</text>
+<rect id="delta-00" x="543.71" y="104.00" width="76.00" height="34.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="delta-00-t-0" x="555.21" y="127.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-00-t-1" x="573.27" y="133.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0,0</text>
+<text id="x-00-0" x="443.84" y="127.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">x</text>
+<text id="x-00-1" x="460.76" y="133.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0,0</text>
+<polyline id="x-00-a" points="499.71,121.00 534.71,121.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="x-00-a-head" points="543.71,121.00 533.71,116.50 533.71,125.50" fill="#25292D" stroke="none"/>
+<polyline id="wp-up-0" points="581.71,152.00 581.71,149.00" fill="none" stroke="#376784" stroke-width="2"/>
+<polygon id="wp-up-0-head" points="581.71,138.00 576.21,150.00 587.21,150.00" fill="#376784" stroke="none"/>
+<polyline id="delta-up-0" points="581.71,104.00 581.71,94.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="delta-up-0-head" points="581.71,83.00 576.21,95.00 587.21,95.00" fill="#25292D" stroke="none"/>
+<rect id="delta-01" x="817.43" y="104.00" width="76.00" height="34.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="delta-01-t-0" x="828.92" y="127.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-01-t-1" x="846.98" y="133.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0,1</text>
+<text id="x-01-0" x="717.56" y="127.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">x</text>
+<text id="x-01-1" x="734.48" y="133.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0,1</text>
+<polyline id="x-01-a" points="773.43,121.00 808.43,121.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="x-01-a-head" points="817.43,121.00 807.43,116.50 807.43,125.50" fill="#25292D" stroke="none"/>
+<polyline id="wp-up-1" points="855.43,152.00 855.43,149.00" fill="none" stroke="#376784" stroke-width="2"/>
+<polygon id="wp-up-1-head" points="855.43,138.00 849.93,150.00 860.93,150.00" fill="#376784" stroke="none"/>
+<polyline id="delta-up-1" points="855.43,104.00 855.43,94.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="delta-up-1-head" points="855.43,83.00 849.93,95.00 860.93,95.00" fill="#25292D" stroke="none"/>
+<rect id="delta-10" x="543.71" y="206.00" width="76.00" height="34.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="delta-10-t-0" x="555.21" y="229.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-10-t-1" x="573.27" y="235.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1,0</text>
+<text id="x-10-0" x="443.84" y="229.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">x</text>
+<text id="x-10-1" x="460.76" y="235.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1,0</text>
+<polyline id="x-10-a" points="499.71,223.00 534.71,223.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="x-10-a-head" points="543.71,223.00 533.71,218.50 533.71,227.50" fill="#25292D" stroke="none"/>
+<polyline id="wp-down-0" points="581.71,192.00 581.71,195.00" fill="none" stroke="#376784" stroke-width="2"/>
+<polygon id="wp-down-0-head" points="581.71,206.00 587.21,194.00 576.21,194.00" fill="#376784" stroke="none"/>
+<polyline id="delta-down-0" points="581.71,240.00 581.71,247.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="delta-down-0-head" points="581.71,258.00 587.21,246.00 576.21,246.00" fill="#25292D" stroke="none"/>
+<rect id="delta-11" x="817.43" y="206.00" width="76.00" height="34.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="delta-11-t-0" x="828.92" y="229.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-11-t-1" x="846.98" y="235.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1,1</text>
+<text id="x-11-0" x="717.56" y="229.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">x</text>
+<text id="x-11-1" x="734.48" y="235.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1,1</text>
+<polyline id="x-11-a" points="773.43,223.00 808.43,223.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="x-11-a-head" points="817.43,223.00 807.43,218.50 807.43,227.50" fill="#25292D" stroke="none"/>
+<polyline id="wp-down-1" points="855.43,192.00 855.43,195.00" fill="none" stroke="#376784" stroke-width="2"/>
+<polygon id="wp-down-1-head" points="855.43,206.00 860.93,194.00 849.93,194.00" fill="#376784" stroke="none"/>
+<polyline id="delta-down-1" points="855.43,240.00 855.43,250.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="delta-down-1-head" points="855.43,261.00 860.93,249.00 849.93,249.00" fill="#25292D" stroke="none"/>
+<polyline id="wedge-1-left" points="581.71,298.00 210.00,336.00" fill="none" stroke="#747D84" stroke-width="1.6" stroke-dasharray="7 6"/>
+<polyline id="wedge-1-right" points="581.71,298.00 1524.00,336.00" fill="none" stroke="#747D84" stroke-width="1.6" stroke-dasharray="7 6"/>
+<rect id="i32-init" x="210.00" y="444.00" width="215.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2"/>
+<text id="i32-init-t" x="317.50" y="476.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">i32_acc = 0</text>
+<text id="tag-C" x="205.00" y="450.00" font-family="Liberation Sans" font-size="27" font-weight="bold" font-style="normal" text-anchor="end" fill="#25292D">C</text>
+<text id="fresh" x="317.50" y="520.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">fresh per kb</text>
+<rect id="i32-mid" x="538.87" y="444.00" width="146.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2"/>
+<text id="i32-mid-t" x="611.87" y="476.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">i32_acc</text>
+<rect id="i32-done" x="948.61" y="444.00" width="146.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2"/>
+<text id="i32-done-t" x="1021.61" y="476.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">i32_acc</text>
+<text id="completed" x="1021.61" y="432.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">completed</text>
+<circle id="b2-p0" cx="481.93" cy="466.00" r="17" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<path id="b2-p0-sign" d="M 472.58 466.00 L 491.28 466.00 M 481.93 456.65 L 481.93 475.35" fill="none" stroke="#25292D" stroke-width="2"/>
+<text id="stub-p0-0" x="467.07" y="423.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="stub-p0-1" x="482.46" y="429.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<polyline id="stub-p0-a" points="481.93,429.00 481.93,440.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="stub-p0-a-head" points="481.93,449.00 486.43,439.00 477.43,439.00" fill="#25292D" stroke="none"/>
+<circle id="b2-p1" cx="741.80" cy="466.00" r="17" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<path id="b2-p1-sign" d="M 732.45 466.00 L 751.15 466.00 M 741.80 456.65 L 741.80 475.35" fill="none" stroke="#25292D" stroke-width="2"/>
+<text id="stub-p1-0" x="726.93" y="423.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="stub-p1-1" x="742.33" y="429.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<polyline id="stub-p1-a" points="741.80,429.00 741.80,440.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="stub-p1-a-head" points="741.80,449.00 746.30,439.00 737.30,439.00" fill="#25292D" stroke="none"/>
+<circle id="b2-p7" cx="888.67" cy="466.00" r="20" fill="#FFFFFF" stroke="#25292D" stroke-width="4.5"/>
+<path id="b2-p7-sign" d="M 877.67 466.00 L 899.67 466.00 M 888.67 455.00 L 888.67 477.00" fill="none" stroke="#25292D" stroke-width="2"/>
+<text id="stub-p7-0" x="873.80" y="420.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="stub-p7-1" x="889.20" y="426.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">7</text>
+<polyline id="stub-p7-a" points="888.67,426.00 888.67,437.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="stub-p7-a-head" points="888.67,446.00 893.17,436.00 884.17,436.00" fill="#25292D" stroke="none"/>
+<polyline id="b2-a0" points="425.00,466.00 453.93,466.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b2-a0-head" points="464.93,466.00 452.93,460.50 452.93,471.50" fill="#25292D" stroke="none"/>
+<polyline id="b2-a1" points="498.93,466.00 527.87,466.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b2-a1-head" points="538.87,466.00 526.87,460.50 526.87,471.50" fill="#25292D" stroke="none"/>
+<polyline id="b2-a2" points="684.87,466.00 713.80,466.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b2-a2-head" points="724.80,466.00 712.80,460.50 712.80,471.50" fill="#25292D" stroke="none"/>
+<polyline id="b2-a3" points="758.80,466.00 785.74,466.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b2-a3-head" points="796.74,466.00 784.74,460.50 784.74,471.50" fill="#25292D" stroke="none"/>
+<text id="b2-dots" x="813.74" y="474.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">…</text>
+<polyline id="b2-a4" points="830.74,466.00 857.67,466.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b2-a4-head" points="868.67,466.00 856.67,460.50 856.67,471.50" fill="#25292D" stroke="none"/>
+<polyline id="b2-a5" points="908.67,466.00 937.61,466.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b2-a5-head" points="948.61,466.00 936.61,460.50 936.61,471.50" fill="#25292D" stroke="none"/>
+<polyline id="b2-a6" points="1094.61,466.00 1123.54,466.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="b2-a6-head" points="1134.54,466.00 1122.54,460.50 1122.54,471.50" fill="#25292D" stroke="none"/>
+<rect id="f32-update" x="1134.54" y="388.00" width="389.46" height="100.00" fill="#FFFFFF" stroke="#25292D" stroke-width="4.2"/>
+<text id="upd-1-0" x="1146.54" y="417.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">f32_acc += x.ds *</text>
+<text id="upd-2-0" x="1163.94" y="448.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">(</text>
+<text id="upd-2-1" x="1181.35" y="448.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">w.d</text>
+<text id="upd-2-2" x="1250.96" y="448.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">* i32_acc</text>
+<text id="upd-3-0" x="1163.94" y="479.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">-</text>
+<text id="upd-3-1" x="1198.75" y="479.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">w.dmin</text>
+<text id="upd-3-2" x="1320.57" y="479.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">* min_term)</text>
+<text id="min-term" x="1329.27" y="372.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">min_term</text>
+<polyline id="min-term-a" points="1329.27,378.00 1329.27,377.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="min-term-a-head" points="1329.27,388.00 1334.77,376.00 1323.77,376.00" fill="#25292D" stroke="none"/>
+<rect id="dot" x="1016.23" y="343.00" width="213.43" height="38.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="dot-t-0" x="1027.23" y="372.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">dot(·,</text>
+<text id="dot-t-1" x="1149.05" y="372.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">w.m</text>
+<text id="dot-t-2" x="1201.26" y="372.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">)</text>
+<polyline id="dot-a" points="1229.66,362.00 1242.66,362.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="dot-a-head" points="1253.66,362.00 1241.66,356.50 1241.66,367.50" fill="#25292D" stroke="none"/>
+<rect id="sum-pairs" x="807.60" y="343.00" width="178.63" height="38.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="sum-pairs-t" x="896.92" y="372.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">sum_pairs</text>
+<polyline id="sum-a" points="986.23,362.00 1005.23,362.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="sum-a-head" points="1016.23,362.00 1004.23,356.50 1004.23,367.50" fill="#25292D" stroke="none"/>
+<text id="x-bsum" x="771.60" y="372.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="end" fill="#25292D">x.bsum</text>
+<polyline id="bsum-a" points="779.60,362.00 796.60,362.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="bsum-a-head" points="807.60,362.00 795.60,356.50 795.60,367.50" fill="#25292D" stroke="none"/>
+<polyline id="wedge-2-left" points="888.67,486.00 210.00,552.00" fill="none" stroke="#747D84" stroke-width="1.6" stroke-dasharray="7 6"/>
+<polyline id="wedge-2-right" points="888.67,486.00 1524.00,552.00" fill="none" stroke="#747D84" stroke-width="1.6" stroke-dasharray="7 6"/>
+<text id="row-x" x="210.00" y="614.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">x.q[s]: i8</text>
+<text id="row-w" x="210.00" y="644.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">w.q[s]: u4</text>
+<text id="row-p" x="210.00" y="698.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">p16: i16</text>
+<text id="tag-D" x="205.00" y="698.00" font-family="Liberation Sans" font-size="27" font-weight="bold" font-style="normal" text-anchor="end" fill="#25292D">D</text>
+<text id="row-i" x="210.00" y="754.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">i32</text>
+<text id="g0-0" x="447.23" y="580.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">g</text>
+<text id="g0-1" x="466.43" y="586.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<rect id="x0-0" x="404.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="x0-1" x="434.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="x0-2" x="464.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="x0-3" x="494.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="w0-0" x="404.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<rect id="w0-1" x="434.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<rect id="w0-2" x="464.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<rect id="w0-3" x="494.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<polyline id="mac-0" points="464.00,648.00 464.00,665.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="mac-0-head" points="464.00,674.00 468.50,664.00 459.50,664.00" fill="#25292D" stroke="none"/>
+<rect id="p0" x="430.00" y="674.00" width="68.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="p0-t" x="464.00" y="694.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="middle" fill="#25292D">p</text>
+<polyline id="widen-0" points="464.00,702.00 464.00,717.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="widen-0-head" points="464.00,726.00 468.50,716.00 459.50,716.00" fill="#25292D" stroke="none"/>
+<rect id="i0" x="416.00" y="726.00" width="96.00" height="36.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<polyline id="drop-0" points="464.00,762.00 464.00,782.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<text id="g1-0" x="595.23" y="580.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">g</text>
+<text id="g1-1" x="614.43" y="586.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<rect id="x1-0" x="552.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="x1-1" x="582.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="x1-2" x="612.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="x1-3" x="642.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="w1-0" x="552.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<rect id="w1-1" x="582.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<rect id="w1-2" x="612.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<rect id="w1-3" x="642.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<polyline id="mac-1" points="612.00,648.00 612.00,665.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="mac-1-head" points="612.00,674.00 616.50,664.00 607.50,664.00" fill="#25292D" stroke="none"/>
+<rect id="p1" x="578.00" y="674.00" width="68.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="p1-t" x="612.00" y="694.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="middle" fill="#25292D">p</text>
+<polyline id="widen-1" points="612.00,702.00 612.00,717.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="widen-1-head" points="612.00,726.00 616.50,716.00 607.50,716.00" fill="#25292D" stroke="none"/>
+<rect id="i1" x="564.00" y="726.00" width="96.00" height="36.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<polyline id="drop-1" points="612.00,762.00 612.00,782.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<text id="g7-0" x="785.23" y="580.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">g</text>
+<text id="g7-1" x="804.43" y="586.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">7</text>
+<rect id="x7-0" x="742.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="x7-1" x="772.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="x7-2" x="802.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="x7-3" x="832.00" y="590.00" width="30.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6"/>
+<rect id="w7-0" x="742.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<rect id="w7-1" x="772.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<rect id="w7-2" x="802.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<rect id="w7-3" x="832.00" y="620.00" width="30.00" height="28.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.6"/>
+<polyline id="mac-7" points="802.00,648.00 802.00,665.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="mac-7-head" points="802.00,674.00 806.50,664.00 797.50,664.00" fill="#25292D" stroke="none"/>
+<rect id="p7" x="768.00" y="674.00" width="68.00" height="28.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="p7-t" x="802.00" y="694.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="middle" fill="#25292D">p</text>
+<polyline id="widen-7" points="802.00,702.00 802.00,717.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<polygon id="widen-7-head" points="802.00,726.00 806.50,716.00 797.50,716.00" fill="#25292D" stroke="none"/>
+<rect id="i7" x="754.00" y="726.00" width="96.00" height="36.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<polyline id="drop-7" points="802.00,762.00 802.00,782.00" fill="none" stroke="#25292D" stroke-width="1.8"/>
+<text id="g-dots-x" x="707.00" y="612.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">…</text>
+<text id="g-dots-w" x="707.00" y="642.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">…</text>
+<text id="g-dots-p" x="707.00" y="696.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">…</text>
+<text id="g-dots-i" x="707.00" y="752.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">…</text>
+<text id="op-mac" x="888.00" y="671.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">mac_groups(n=4)</text>
+<text id="op-widen" x="888.00" y="724.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">widen</text>
+<polyline id="bus" points="464.00,782.00 993.00,782.00" fill="none" stroke="#25292D" stroke-width="2"/>
+<polygon id="bus-head" points="993.00,782.00 981.00,776.50 981.00,787.50" fill="#25292D" stroke="none"/>
+<text id="reduce-g" x="921.50" y="772.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">reduce g</text>
+<circle id="sigma" cx="1012.00" cy="782.00" r="19" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="sigma-t" x="1012.00" y="792.00" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">Σ</text>
+<polyline id="sigma-a" points="1031.00,782.00 1044.17,782.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="sigma-a-head" points="1055.17,782.00 1043.17,776.50 1043.17,787.50" fill="#25292D" stroke="none"/>
+<text id="r-0" x="1062.00" y="792.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">r</text>
+<polyline id="r-a" points="1081.17,782.00 1096.35,782.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="r-a-head" points="1107.35,782.00 1095.35,776.50 1095.35,787.50" fill="#25292D" stroke="none"/>
+<rect id="scale" x="1107.35" y="760.00" width="180.63" height="44.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.8"/>
+<text id="scale-t-0" x="1119.35" y="792.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">×</text>
+<text id="scale-t-1" x="1154.15" y="792.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#376784">w.sc</text>
+<text id="scale-t-2" x="1223.76" y="792.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[s]</text>
+<polyline id="scale-a" points="1287.97,782.00 1310.97,782.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="scale-a-head" points="1321.97,782.00 1309.97,776.50 1309.97,787.50" fill="#25292D" stroke="none"/>
+<rect id="i32-update" x="1321.97" y="758.00" width="202.03" height="48.00" fill="#FFFFFF" stroke="#25292D" stroke-width="4.2"/>
+<text id="i32-update-t" x="1422.99" y="792.00" font-family="Liberation Mono" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">i32_acc +=</text>
+</svg>

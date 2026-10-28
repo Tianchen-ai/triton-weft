@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="526" viewBox="0 0 1536 526">
+<title>Compiler architecture for Weft programs</title>
+<desc>The Triton front end with Weft semantics produces Canonical Kernel IR that keeps the shared value wp and state s with their scope, axes, types and encoding. Compilation then branches into separate x86 and RISC-V physical programs, each given its own target profile; x86 emits LLVM IR and RISC-V emits intrinsic C with local assembly.</desc>
+<rect id="canvas" x="0" y="0" width="1536" height="526" fill="#FFFFFF" stroke="none"/>
+<text id="weft-program-1" x="67.85" y="276.41" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">Weft</text>
+<text id="weft-program-2" x="67.85" y="312.41" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">program</text>
+<polyline id="to-front-end" points="131.71,284.09 151.71,284.09" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polygon id="to-front-end-head" points="161.71,284.09 150.71,279.09 150.71,289.09" fill="#25292D" stroke="none"/>
+<rect id="front-end" x="161.71" y="190.09" width="255.29" height="188.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="front-end-title" x="289.35" y="225.41" font-family="Liberation Sans" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#25292D">Triton front end</text>
+<polyline id="front-end-rule-1" points="161.71,240.09 417.00,240.09" fill="none" stroke="#25292D" stroke-width="1.6"/>
+<polyline id="front-end-rule-2" points="161.71,309.09 417.00,309.09" fill="none" stroke="#25292D" stroke-width="1.6"/>
+<text id="ast-visitor" x="289.35" y="284.91" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">AST visitor</text>
+<text id="weft-semantics" x="289.35" y="353.91" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">Weft semantics</text>
+<polyline id="to-canonical" points="417.00,284.09 443.00,284.09" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polygon id="to-canonical-head" points="453.00,284.09 442.00,279.09 442.00,289.09" fill="#25292D" stroke="none"/>
+<rect id="canonical" x="453.00" y="190.09" width="319.40" height="188.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="canonical-title" x="612.70" y="225.41" font-family="Liberation Sans" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#25292D">Canonical Kernel IR</text>
+<rect id="canonical-wp" x="498.70" y="242.09" width="92.00" height="44.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.8"/>
+<text id="canonical-wp-label" x="544.70" y="273.97" font-family="Liberation Mono" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">wp</text>
+<rect id="canonical-s" x="634.70" y="242.09" width="92.00" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="1.8"/>
+<text id="canonical-s-label-0" x="672.49" y="272.38" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="canonical-props-1" x="612.70" y="321.73" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">scope · state · axes</text>
+<text id="canonical-props-2" x="612.70" y="357.73" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">types · encoding</text>
+<polyline id="target-boundary" points="807.40,8.00 807.40,518.00" fill="none" stroke="#747D84" stroke-width="1.8" stroke-dasharray="9 8"/>
+<text id="target-independent" x="791.40" y="36.00" font-family="Liberation Sans" font-size="29" font-weight="normal" font-style="normal" text-anchor="end" fill="#747D84">target independent</text>
+<text id="per-target" x="823.40" y="36.00" font-family="Liberation Sans" font-size="29" font-weight="normal" font-style="normal" text-anchor="start" fill="#747D84">per target</text>
+<polyline id="trunk" points="772.40,284.09 842.40,284.09" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polyline id="fork" points="842.40,187.09 842.40,381.09" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polyline id="to-x86" points="842.40,187.09 876.40,187.09" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polygon id="to-x86-head" points="886.40,187.09 875.40,182.09 875.40,192.09" fill="#25292D" stroke="none"/>
+<polyline id="to-riscv" points="842.40,381.09 876.40,381.09" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polygon id="to-riscv-head" points="886.40,381.09 875.40,376.09 875.40,386.09" fill="#25292D" stroke="none"/>
+<rect id="x86-physical" x="886.40" y="118.09" width="412.09" height="138.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="x86-title" x="1092.44" y="151.73" font-family="Liberation Sans" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#25292D">x86 physical program</text>
+<rect id="x86-cell-0" x="898.40" y="168.09" width="97.02" height="44.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.4"/>
+<text id="x86-cell-0-label-0" x="921.30" y="196.09" font-family="Liberation Mono" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">wp</text>
+<text id="x86-cell-0-label-1" x="957.30" y="203.29" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<rect id="x86-cell-1" x="995.42" y="168.09" width="97.02" height="44.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.4"/>
+<text id="x86-cell-1-label-0" x="1018.32" y="196.09" font-family="Liberation Mono" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">wp</text>
+<text id="x86-cell-1-label-1" x="1054.33" y="203.29" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<rect id="x86-cell-2" x="1092.44" y="168.09" width="97.02" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="1.4"/>
+<text id="x86-cell-2-label-0" x="1124.63" y="196.09" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="x86-cell-2-label-1" x="1141.05" y="203.77" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<rect id="x86-cell-3" x="1189.46" y="168.09" width="97.02" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="1.4"/>
+<text id="x86-cell-3-label-0" x="1221.65" y="196.09" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="x86-cell-3-label-1" x="1238.07" y="203.77" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="x86-carriers" x="1092.44" y="244.04" font-family="Liberation Sans" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">fixed vectors</text>
+<rect id="riscv-physical" x="886.40" y="312.09" width="412.09" height="138.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="riscv-title" x="1092.44" y="345.73" font-family="Liberation Sans" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#25292D">RISC-V physical program</text>
+<rect id="riscv-cell-0" x="898.40" y="362.09" width="64.68" height="44.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.4"/>
+<text id="riscv-cell-0-label-0" x="905.13" y="390.09" font-family="Liberation Mono" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">wp</text>
+<text id="riscv-cell-0-label-1" x="941.13" y="397.29" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<rect id="riscv-cell-1" x="963.08" y="362.09" width="64.68" height="44.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.4"/>
+<text id="riscv-cell-1-label-0" x="969.81" y="390.09" font-family="Liberation Mono" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">wp</text>
+<text id="riscv-cell-1-label-1" x="1005.82" y="397.29" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<rect id="riscv-cell-2" x="1027.76" y="362.09" width="64.68" height="44.00" fill="#EDF4F8" stroke="#376784" stroke-width="1.4"/>
+<text id="riscv-cell-2-label" x="1060.10" y="390.09" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">…</text>
+<rect id="riscv-cell-3" x="1092.44" y="362.09" width="64.68" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="1.4"/>
+<text id="riscv-cell-3-label-0" x="1108.46" y="390.09" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="riscv-cell-3-label-1" x="1124.88" y="397.77" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<rect id="riscv-cell-4" x="1157.12" y="362.09" width="64.68" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="1.4"/>
+<text id="riscv-cell-4-label-0" x="1173.14" y="390.09" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="riscv-cell-4-label-1" x="1189.56" y="397.77" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<rect id="riscv-cell-5" x="1221.81" y="362.09" width="64.68" height="44.00" fill="#F8F0DE" stroke="#A38348" stroke-width="1.4"/>
+<text id="riscv-cell-5-label" x="1254.15" y="390.09" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">…</text>
+<text id="riscv-carriers" x="1092.44" y="438.04" font-family="Liberation Sans" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">lanes × issues</text>
+<text id="physical-decisions" x="1092.44" y="294.07" font-family="Liberation Sans" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">layout · supply · resources</text>
+<text id="x86-profile" x="1092.44" y="74.00" font-family="Liberation Sans" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">x86 profile</text>
+<polyline id="x86-profile-arrow" points="1092.44,92.09 1092.44,108.09" fill="none" stroke="#747D84" stroke-width="2"/>
+<polygon id="x86-profile-arrow-head" points="1092.44,118.09 1097.44,107.09 1087.44,107.09" fill="#747D84" stroke="none"/>
+<text id="riscv-profile" x="1092.44" y="508.04" font-family="Liberation Sans" font-size="29" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">RISC-V profile</text>
+<polyline id="riscv-profile-arrow" points="1092.44,476.09 1092.44,460.09" fill="none" stroke="#747D84" stroke-width="2"/>
+<polygon id="riscv-profile-arrow-head" points="1092.44,450.09 1087.44,461.09 1097.44,461.09" fill="#747D84" stroke="none"/>
+<polyline id="to-llvm" points="1298.49,187.09 1328.49,187.09" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polygon id="to-llvm-head" points="1338.49,187.09 1327.49,182.09 1327.49,192.09" fill="#25292D" stroke="none"/>
+<rect id="llvm-output" x="1338.49" y="138.09" width="184.56" height="98.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="llvm-output-0" x="1430.77" y="197.41" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">LLVM IR</text>
+<polyline id="to-intrinsic" points="1298.49,381.09 1328.49,381.09" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polygon id="to-intrinsic-head" points="1338.49,381.09 1327.49,376.09 1327.49,386.09" fill="#25292D" stroke="none"/>
+<rect id="intrinsic-output" x="1338.49" y="332.09" width="184.56" height="98.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="intrinsic-output-0" x="1430.77" y="373.41" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">intrinsic C</text>
+<text id="intrinsic-output-1" x="1430.77" y="409.41" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">+ local asm</text>
+</svg>

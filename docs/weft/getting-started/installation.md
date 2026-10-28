@@ -1,44 +1,49 @@
-# 安装扩展 Triton
+# Install Triton–Weft
 
-本仓库构建一份提供 import triton 的定制 Triton。不要在同一环境同时安装两份覆盖
-triton 模块的发行包。Weft 编译核心位于 third_party/weft，没有需要单独安装的 Weft Python 包。
+Use a dedicated Python environment. This fork builds the `triton` distribution,
+including the Python language, native compiler bindings, CPU runtime and application
+SDK. Choose a wheel for your host architecture and Python ABI, or build current source.
 
-## 安装 wheel
+## Published wheels
 
 ```sh
-python -m venv .venv
-.venv/bin/python -m pip install --index-url https://tianchen-ai.github.io/triton-weft/wheels/ 'triton==3.8.0+weft.2'
-.venv/bin/python -m pip install numpy
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --index-url https://tianchen-ai.github.io/triton-weft/wheels/ 'triton==3.8.0+weft.2'
+python -m pip install numpy
+python -c "import triton; from triton import cpu; print(triton.__version__); print(cpu.target())"
 ```
 
-只安装这一份 `triton`，不要再安装上游同名 wheel 覆盖它。发行资产位于
-[GitHub Releases](https://github.com/Tianchen-ai/triton-weft/releases/tag/v3.8.0-weft.2)。
-首批 wheel 使用 Linux 原生平台标签：x86 CPython 3.10，以及 RISC-V CPython 3.11、3.12、3.14，
-分别面向本项目已使用的 x86、SG2044、K1 和 K3 环境。它们不是通用 manylinux 声明；
-系统 libc、C++ runtime、ABI 和实际 ISA 必须满足 Release 中声明的要求。
-本次资产的动态符号要求如下（这是二进制要求，不代表已验证所有满足版本的发行版）：
+[Release assets](https://github.com/Tianchen-ai/triton-weft/releases/tag/v3.8.0-weft.2)
+contain Clang 23, its resource headers, OpenMP and the native SDK.
 
-| wheel | Python ABI | libc | C++ runtime |
-|---|---|---|---|
-| Linux x86-64 | CPython 3.10 | glibc ≥ 2.34 | GLIBCXX_3.4.30、CXXABI_1.3.13 |
-| Linux RISC-V LP64D | CPython 3.11 / 3.12 / 3.14 | glibc ≥ 2.38 | GLIBCXX_3.4.30、CXXABI_1.3.13 |
+| Host | Python ABI | System libraries required by these wheels |
+|---|---|---|
+| Linux x86-64 | CPython 3.10 | glibc ≥ 2.34, GLIBCXX_3.4.30, CXXABI_1.3.13, libgcc, zlib |
+| Linux RISC-V LP64D | CPython 3.11 / 3.12 / 3.14 | glibc ≥ 2.38, GLIBCXX_3.4.30, CXXABI_1.3.13, libgcc, libatomic |
 
-系统还需提供 libgcc；x86 wheel 需要 zlib，RISC-V wheel 需要 libatomic。
-JIT 使用系统 libc 开发文件、linker 和启动文件；这些不包含在 wheel 中。
-仅安装 wheel 不会令没有 RVV、IME 或 AMX 的核心获得对应能力，kernel 的执行要求由其
-artifact metadata 和当前执行核心共同检查。
-发行包含 Clang 23、resource headers、OpenMP、native runtime 和可选 integration。
-Linux 发行版可能需要先安装对应的 `python3-venv` 包，才能建立含 pip 的独立环境。
+JIT also uses the system linker, libc development headers and startup files.
+Install the distribution's C/C++ development packages. On RISC-V, choose a NumPy
+build matching the same interpreter and architecture. Use the
+[core-selection launcher](hardware.md) before querying a heterogeneous CPU.
 
-## 源码构建
+## Build current source
 
-使用独立 Python 3.10+ 环境、CMake、Ninja 和匹配 LLVM SDK 中的 Clang。
-LLVM/MLIR 必须匹配仓库 cmake/llvm-info.json 指定的 revision；Weft、Triton、
-TableGen 与 native bindings 共用这一份 SDK，不能链接旧的独立 Weft LLVM 产物。
+Clone the product and install its build dependencies:
 
 ```sh
-python -m venv /path/to/environment
-/path/to/environment/bin/python -m pip install -r python/requirements.txt
+git clone https://github.com/Tianchen-ai/triton-weft.git
+cd triton-weft
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r python/requirements.txt build
+```
+
+The compiler, MLIR bindings and TableGen use the LLVM revision recorded in
+[`cmake/llvm-info.json`](https://github.com/Tianchen-ai/triton-weft/blob/main/cmake/llvm-info.json).
+Select that SDK and a host-native Clang 23/OpenMP bundle:
+
+```sh
 CC=/path/to/matched-llvm-sdk/bin/clang \
 CXX=/path/to/matched-llvm-sdk/bin/clang++ \
 LLVM_SYSPATH=/path/to/matched-llvm-sdk \
@@ -47,97 +52,53 @@ TRITON_WEFT_OPENMP_LIBRARY=/path/to/libomp.so \
 TRITON_WEFT_OPENMP_INCLUDE_DIR=/path/to/openmp-headers \
 TRITON_BUILD_DIR=/path/to/build \
 TRITON_BUILD_PROTON=OFF \
-/path/to/environment/bin/python -m pip install --no-build-isolation .
+python -m pip install --no-build-isolation .
 ```
 
-PROTON=OFF 只关闭可选 profiler，不移除标准 GPU 编译路线。
-这份命令同时安装本机 JIT 所需的 Clang 与 OpenMP；路径应选择运行 wheel 的机器架构。
-只构建编译库时可以省略这三个打包参数，但运行 kernel 前需要显式配置目标工具链。
-开发安装可使用 pip install -e .；build、compiler cache 和测量输出使用仓库外目录。
-RISC-V 机器需要适配其 Python ABI、libc 和 C++ runtime 的编译环境。
-交叉构建 Python extension 时可通过 TRITON_TARGET_PYTHON_INCLUDE_DIR 指定目标 headers，
-构建工具仍使用主机 Python；架构 pyconfig.h 必须来自目标 Python。
-交叉 wheel 还必须给出目标实际报告的 TRITON_TARGET_PYTHON_SOABI，并选择
-`bdist_wheel --plat-name linux_riscv64`。打包器核对 SOABI 与目标 headers 的 Python 版本，
-不会把主机 CPython ABI 标签贴到目标扩展上。
+`TRITON_WEFT_CLANG_ROOT` contains `bin/clang`, `LICENSE.TXT` and
+`lib/clang/<version>/include`. OpenMP headers include `omp.h`; the runtime must
+support Clang 23's dispatch ABI. The build checks these components.
+`TRITON_BUILD_PROTON=OFF` selects a build without the optional profiler.
 
-## 发行包中的 C 工具链
+For an editable compiler checkout, use `pip install -e .` with the same environment.
+For distribution, replace the final command with
+`python -m pip wheel --no-build-isolation --no-deps . -w /path/to/wheels`.
+The [CI host wheel](https://github.com/Tianchen-ai/triton-weft/actions/workflows/build.yml)
+also provides a current build; its CPU toolchain is configured separately from the
+bundled release wheels.
 
-发行工具链使用 Clang 23。构建 wheel 时指定完整 Clang 和同架构 OpenMP：
+## Native and cross toolchains
 
-```sh
-TRITON_WEFT_CLANG_ROOT=/path/to/native-clang \
-TRITON_WEFT_OPENMP_LIBRARY=/path/to/libomp.so \
-TRITON_WEFT_OPENMP_INCLUDE_DIR=/path/to/omp-headers \
-CC=/path/to/matched-llvm-sdk/bin/clang \
-CXX=/path/to/matched-llvm-sdk/bin/clang++ \
-LLVM_SYSPATH=/path/to/matched-llvm-sdk \
-TRITON_BUILD_DIR=/path/to/build \
-TRITON_BUILD_PROTON=OFF \
-python -m pip wheel --no-build-isolation --no-deps . -w /path/to/wheels
-```
-
-Clang 目录必须包含 bin/clang、LICENSE.TXT、完整 lib/clang/<version>/include，以及 wheel
-运行架构的 codegen：x86-64 wheel 要求 x86-64 与 immintrin.h，RISC-V wheel 要求 riscv64
-与 riscv_vector.h。交叉构建其它目标时，另行显式配置该目标的工具链和 sysroot。
-OpenMP headers 必须含 omp.h，runtime 必须提供 Clang 23 的 dispatch ABI。
-配置阶段检查实际导出的 fork、static dispatch 和 dispatch deinit 接口，拒绝同名但过旧的
-libomp；这也防止模型集成在链接或进入新调度路径时才暴露版本不匹配。
-构建会将 compiler、resource headers、runtime、
-C/C++ headers、llama.cpp adapter 和许可材料放入同一 Triton wheel。
-
-wheel 是构建平台和 Python ABI 的本地产物，不默认承诺 manylinux 兼容。
-部署到 RISC-V 的 Clang、libtriton 和 runtime 都必须是目标原生机器码；
-主机 x86 Clang 可以用于交叉编译，但不能复制到 RISC-V 当作本机 JIT compiler。
-RISC-V wheel 安装 Weft CPU backend，不携带无法在 RISC-V 执行的 CUDA/ROCm 工具。
-标准 GPU backend 保留在源码以及其支持的主机发行包中。
-
-## 本机 JIT 与交叉构建
-
-本机 JIT 默认使用 wheel 中的 Clang，也可以显式设置 TRITON_WEFT_CC 或传 toolchain 字典。
-JIT、AOT 与模型 package 使用同一工具链描述；不会为了某个算子静默切换旧 Clang。
-系统 libc、headers、linker 与启动文件由声明的目标环境提供。未配置或缺少所需 ISA 支持时报错。
-RISC-V 本机使用 bundled Clang 时，会查询系统 GCC 提供的 ABI、libgcc 和共享库启动文件，
-将经过核对的安装目录传给 Clang，并把运行库身份纳入编译缓存；编译器始终是随包 Clang。
-没有 GCC driver 时，Clang 使用自己的系统运行库发现机制。显式 sysroot/GCC/runtime 参数保持优先。
-若需选择另一套已声明的 GCC 运行库，可传入
-`toolchain={"cflags": ["--gcc-install-dir=/path/to/target/gcc/version"]}`。
-使用 bundled Clang 时，额外 flags 保留随包提供的 OpenMP include、library 和运行依赖；
-显式指定 cc 时则由完整 toolchain 描述这些依赖。不会自动改用系统 GCC 编译 kernel。
-
-交叉构建使用 triton.compile(ASTSource(...), target=CPUTarget(...), options=...)，
-给出 cc、target triple、sysroot、sysroot_identity、cflags、ldflags 和必要 runtime_files。
-这个入口只产生目标代码，不尝试在构建主机运行目标指令，也不依赖 SSH。
+Native JIT discovers its target after core selection and uses the packaged Clang.
+An application can select an explicit toolchain through the launch options.
+RISC-V uses the configured GCC installation's ABI runtime and startup files; Clang
+performs kernel compilation. An explicit example is:
 
 ```python
-from triton.backends.compiler import CPUTarget
-from triton.compiler import ASTSource
-compiled = triton.compile(
-    ASTSource(kernel, signature={}, constexprs={"B": 64}),
-    target=CPUTarget("weft", "riscv64", target_march, target_abi, target_vlen),
-    options={"toolchain": toolchain},
-)
-compiled.export("/application/kernels/selected")
+options = {"toolchain": {
+    "cc": "/opt/llvm/bin/clang",
+    "target": "riscv64-unknown-linux-gnu",
+    "sysroot": "/opt/riscv/sysroot",
+    "sysroot_identity": "application-sdk-v1",
+    "cflags": ["--gcc-install-dir=/opt/riscv/lib/gcc/riscv64-linux-gnu/14"],
+}}
 ```
 
-ABI、ISA、VLEN 和工具链必须与目标实际能力匹配。AOT 加载不需要原 DSL 或现场 Clang。
-SDK 路径通过 triton.runtime.package.sdk_prefix() 取得。
+Give a target and `ASTSource` to `triton.compile` for an explicit cross build.
+The [AOT chapter](../compiler/native-sdk.md) demonstrates a complete export and
+application call. Python extension cross builds additionally specify
+`TRITON_TARGET_PYTHON_INCLUDE_DIR`, `TRITON_TARGET_PYTHON_SOABI` and
+`bdist_wheel --plat-name linux_riscv64` using the target interpreter's headers and ABI.
 
-## 可选应用依赖
+## PyTorch
 
-NumPy 和 PyTorch 由应用选择适配目标的发行包。CPU Tensor eager 走相同 native kernel。
-PyTorch 图接入使用 2.14 的 Triton HOP/Inductor 接口，并提供最小源码接缝安装工具：
+Install a CPU PyTorch package for the same Python ABI. Eager tensors can be passed
+directly to kernels. Graph integration uses the supported PyTorch 2.14 source
+interfaces; apply the supplied seam once in that environment:
 
 ```sh
 python -m triton.tools.pytorch
 ```
 
-在专用环境安装时运行该命令；也可用 --torch-root 指向明确选择的 Torch 源码目录。
-工具在写入前检查所需源码接口的结构和函数签名，接口不匹配时报 unsupported。
-它保留原 Triton HOP，增加模型的 CPU capability、Canonical effects/FakeTensor、alias
-functionalization 与 native launch 接口；用户仍使用 kernel[grid] 和 torch.compile，
-不注册独立 Weft dispatcher。Inductor 的 `cpu_backend="triton"` 通过同一接缝选择 CPU
-模型、编译目标和 native grid launcher，保留原有图调度、融合和候选枚举。
-运行时不 monkey patch。旧 Torch 环境可使用 eager CPU Tensor；
-图接入需要上述接口，不能把 import 成功当作支持。
-数值与性能验证由独立 Weft Bench 承担，不随产品安装测试 runner。
+Then use `torch.compile(..., options={"cpu_backend": "triton"})`.
+See [PyTorch and host composition](../integrations/overview.md).

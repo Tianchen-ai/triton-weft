@@ -1,4 +1,4 @@
-site_name: Triton Weft Model Handbook
+site_name: Triton–Weft Handbook
 site_description: Structured numerical programs and native RISC-V and x86 compilation in Triton
 site_url: https://tianchen-ai.github.io/triton-weft/
 repo_url: https://github.com/Tianchen-ai/triton-weft
@@ -9,6 +9,7 @@ site_dir: !ENV [WEFT_DOCS_SITE_DIR, build/handbook]
 strict: true
 theme:
   name: material
+  language: en
   font: false
   palette:
     - scheme: default
@@ -33,6 +34,73 @@ theme:
     - search.suggest
     - search.highlight
 plugins:
+  - i18n:
+      docs_structure: suffix
+      # Both page editions are provided; unlocalized figures and wheel indexes are shared.
+      fallback_to_default: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: zh
+          name: 中文
+          build: true
+          site_name: Triton–Weft 工具书
+          site_description: 在 Triton 中表达存储、计算分组与复用，编译到 RISC-V 和 x86
+          theme:
+            palette:
+              - scheme: default
+                primary: teal
+                accent: teal
+                toggle:
+                  icon: material/brightness-4
+                  name: 切换到深色模式
+              - scheme: slate
+                primary: teal
+                accent: teal
+                toggle:
+                  icon: material/brightness-7
+                  name: 切换到浅色模式
+          nav_translations:
+            Home: 首页
+            Get started: 开始使用
+            Installation: 安装
+            First kernel: 第一个 kernel
+            Runnable examples: 可运行示例
+            Targets and engines: 目标与 engine
+            Author kernels: 编写 kernel
+            Programming model: 编程模型
+            Responsibility boundaries: 职责分工
+            Encoding and View: Encoding 与 View
+            Level and state: Level 与状态
+            Operations and numerical widths: 运算与数值位宽
+            Worked examples: 示例解读
+            Model programs: 模型程序
+            Run and deploy: 运行与部署
+            JIT and autotune: JIT 与自动调优
+            Native C++ SDK: 原生 C++ SDK
+            PyTorch and composition: PyTorch 与宿主组合
+            llama.cpp deployment: llama.cpp 部署
+            Reproduce experiments: 复现实验
+            Bench workflow: Bench 工作流
+            Results and figure sources: 结果与图片来源
+            Numerical checks: 数值检查
+            References and timing: 参考与计时
+            Compiler: 编译器
+            Pipeline overview: 编译管线
+            Canonical IR: Canonical IR
+            Physical representation: 物理表示
+            RISC-V IR: RISC-V IR
+            Passes and pipelines: Pass 与流水
+            Physical optimization: 物理优化
+            Local instruction contracts: 局部指令合同
+            Code emission: 代码生成
+            x86 compilation: x86 编译
+            Develop: 参与开发
+            Source map and upstream: 源码与上游
+            Hardware extensions: 硬件扩展
+            Documentation: 文档维护
   - search
 markdown_extensions:
   - admonition
@@ -50,37 +118,40 @@ validation:
     anchors: warn
 nav:
   - Home: index.md
-  - Getting started:
+  - Get started:
       - Installation: getting-started/installation.md
-      - Quick start: getting-started/quickstart.md
+      - First kernel: getting-started/quickstart.md
       - Runnable examples: getting-started/examples.md
-      - Targets and execution cores: getting-started/hardware.md
-  - Language:
+      - Targets and engines: getting-started/hardware.md
+  - Author kernels:
       - Programming model: programming-model/index.md
-      - Non-goals: programming-model/non-goals.md
-      - Encoding and artifacts: dsl/encoding-and-artifacts.md
-      - Values and levels: dsl/values-and-levels.md
-      - Functions and operations: dsl/functions-and-operations.md
-      - Examples: dsl/examples.md
+      - Responsibility boundaries: programming-model/non-goals.md
+      - Encoding and View: dsl/encoding-and-artifacts.md
+      - Level and state: dsl/values-and-levels.md
+      - Operations and numerical widths: dsl/functions-and-operations.md
+      - Worked examples: dsl/examples.md
       - Model programs: dsl/programs.md
-      - Canonical IR: dsl/canonical-ir.md
+  - Run and deploy:
+      - JIT and autotune: compiler/runtime.md
+      - Native C++ SDK: compiler/native-sdk.md
+      - PyTorch and composition: integrations/overview.md
+      - llama.cpp deployment: integrations/llama-cpp.md
+  - Reproduce experiments:
+      - Bench workflow: experiments/reproduce.md
+      - Results and figure sources: experiments/results.md
+      - Numerical checks: development/validation.md
+      - References and timing: development/benchmarking.md
   - Compiler:
-      - Overview: compiler/index.md
-      - Physical machine: compiler/physical-machine.md
-      - Physical IR: compiler/riscv-ir.md
-      - Passes: compiler/passes.md
-      - Optimization principles: compiler/optimization-principles.md
-      - Local operations: compiler/leaves.md
+      - Pipeline overview: compiler/index.md
+      - Canonical IR: dsl/canonical-ir.md
+      - Physical representation: compiler/physical-machine.md
+      - RISC-V IR: compiler/riscv-ir.md
+      - Passes and pipelines: compiler/passes.md
+      - Physical optimization: compiler/optimization-principles.md
+      - Local instruction contracts: compiler/leaves.md
       - Code emission: compiler/emission.md
-      - x86 native compilation: compiler/x86.md
-  - Integrations:
-      - Applications: integrations/overview.md
-      - Deploy into llama.cpp: integrations/llama-cpp.md
-      - Runtime reference: compiler/runtime.md
-      - Native SDK and llama.cpp: compiler/native-sdk.md
-  - Development:
-      - Upstream and code organization: development/upstream.md
-      - Extend RISC-V: development/extensions.md
-      - Correctness and measurement: development/validation.md
-      - Baselines and attribution: development/benchmarking.md
-      - Build and publish docs: development/documentation.md
+      - x86 compilation: compiler/x86.md
+  - Develop:
+      - Source map and upstream: development/upstream.md
+      - Hardware extensions: development/extensions.md
+      - Documentation: development/documentation.md
