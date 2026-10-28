@@ -463,19 +463,18 @@ mlir::FailureOr<mlir::Value> cloneWindowSlice(
     auto input = cloneOperand(unary.getInput());
     if (mlir::failed(input))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::UnaryOp>(unary.getLoc(), resultType, *input,
-                                         unary.getKind(), unary.getLeaf())
+    cloned = riscv::UnaryOp::create(rewriter, unary.getLoc(), resultType,
+                                    *input, unary.getKind(), unary.getLeaf())
                  .getResult();
   } else if (auto binary = mlir::dyn_cast<riscv::BinaryOp>(definition)) {
     auto lhs = cloneOperand(binary.getLhs());
     auto rhs = cloneOperand(binary.getRhs());
     if (mlir::failed(lhs) || mlir::failed(rhs))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::BinaryOp>(binary.getLoc(), resultType, *lhs, *rhs,
-                                          binary.getKind(), binary.getLeaf())
-                 .getResult();
+    cloned =
+        riscv::BinaryOp::create(rewriter, binary.getLoc(), resultType, *lhs,
+                                *rhs, binary.getKind(), binary.getLeaf())
+            .getResult();
   } else if (auto cast = mlir::dyn_cast<riscv::CastOp>(definition)) {
     auto input = cloneOperand(cast.getInput());
     if (mlir::failed(input))
@@ -501,27 +500,24 @@ mlir::FailureOr<mlir::Value> cloneWindowSlice(
       riscv_internal::copyOrigin(cast, conversion);
       cloned = conversion.getResult();
     } else {
-      cloned = rewriter
-                   .create<riscv::CastOp>(cast.getLoc(), resultType, *input,
-                                          cast.getLeaf())
+      cloned = riscv::CastOp::create(rewriter, cast.getLoc(), resultType,
+                                     *input, cast.getLeaf())
                    .getResult();
     }
   } else if (auto narrow = mlir::dyn_cast<riscv::NarrowOp>(definition)) {
     auto input = cloneOperand(narrow.getInput());
     if (mlir::failed(input))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::NarrowOp>(narrow.getLoc(), resultType, *input,
-                                          narrow.getRounding(),
-                                          narrow.getSaturate(), narrow.getLeaf())
+    cloned = riscv::NarrowOp::create(rewriter, narrow.getLoc(), resultType,
+                                     *input, narrow.getRounding(),
+                                     narrow.getSaturate(), narrow.getLeaf())
                  .getResult();
   } else if (auto widen = mlir::dyn_cast<riscv::WidenOp>(definition)) {
     auto input = cloneOperand(widen.getInput());
     if (mlir::failed(input))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::WidenOp>(widen.getLoc(), resultType, *input,
-                                         widen.getLeaf())
+    cloned = riscv::WidenOp::create(rewriter, widen.getLoc(), resultType,
+                                    *input, widen.getLeaf())
                  .getResult();
   } else if (auto lookup = mlir::dyn_cast<riscv::LookupOp>(definition)) {
     auto indices = cloneOperand(lookup.getIndices());
@@ -529,19 +525,18 @@ mlir::FailureOr<mlir::Value> cloneWindowSlice(
       lookup.emitError("issue-window projection could not project lookup indices");
       return mlir::failure();
     }
-    cloned = rewriter
-                 .create<riscv::LookupOp>(
-                     lookup.getLoc(), resultType, lookup.getTable(), *indices,
-                     lookup.getBounds(), lookup.getAccess(), lookup.getLeaf())
-                 .getResult();
+    cloned =
+        riscv::LookupOp::create(rewriter, lookup.getLoc(), resultType,
+                                lookup.getTable(), *indices, lookup.getBounds(),
+                                lookup.getAccess(), lookup.getLeaf())
+            .getResult();
   } else if (auto add = mlir::dyn_cast<riscv::RVVWidenAddOp>(definition)) {
     auto lhs = cloneOperand(add.getLhs());
     auto rhs = cloneOperand(add.getRhs());
     if (mlir::failed(lhs) || mlir::failed(rhs))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::RVVWidenAddOp>(add.getLoc(), resultType,
-                                              *lhs, *rhs, add.getLeaf())
+    cloned = riscv::RVVWidenAddOp::create(rewriter, add.getLoc(), resultType,
+                                          *lhs, *rhs, add.getLeaf())
                  .getResult();
   } else if (auto multiply =
                  mlir::dyn_cast<riscv::RVVWidenMultiplyOp>(definition)) {
@@ -549,44 +544,40 @@ mlir::FailureOr<mlir::Value> cloneWindowSlice(
     auto rhs = cloneOperand(multiply.getRhs());
     if (mlir::failed(lhs) || mlir::failed(rhs))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::RVVWidenMultiplyOp>(
-                     multiply.getLoc(), resultType, *lhs, *rhs,
-                     multiply.getLeaf())
+    cloned = riscv::RVVWidenMultiplyOp::create(rewriter, multiply.getLoc(),
+                                               resultType, *lhs, *rhs,
+                                               multiply.getLeaf())
                  .getResult();
   } else if (auto multiply =
                  mlir::dyn_cast<riscv::RVVWidenScalarMultiplyOp>(definition)) {
     auto lhs = cloneOperand(multiply.getLhs());
     if (mlir::failed(lhs))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::RVVWidenScalarMultiplyOp>(
-                     multiply.getLoc(), resultType, *lhs, multiply.getRhs(),
-                     multiply.getLeaf())
+    cloned = riscv::RVVWidenScalarMultiplyOp::create(
+                 rewriter, multiply.getLoc(), resultType, *lhs,
+                 multiply.getRhs(), multiply.getLeaf())
                  .getResult();
   } else if (auto conversion =
                  mlir::dyn_cast<riscv::ConvertLayoutOp>(definition)) {
     auto input = cloneOperand(conversion.getInput());
     if (mlir::failed(input))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::ConvertLayoutOp>(
-                     conversion.getLoc(), resultType, *input,
-                     conversion.getConversion(), conversion.getSourceAccessAttr(),
-                     conversion.getLeaf())
+    cloned = riscv::ConvertLayoutOp::create(
+                 rewriter, conversion.getLoc(), resultType, *input,
+                 conversion.getConversion(), conversion.getSourceAccessAttr(),
+                 conversion.getLeaf())
                  .getResult();
   } else if (auto materialize =
                  mlir::dyn_cast<riscv::RegisterMaterializeOp>(definition)) {
     auto input = cloneOperand(materialize.getInput());
     if (mlir::failed(input))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::RegisterMaterializeOp>(
-                     materialize.getLoc(), resultType, *input,
-                     materialize.getOwnerDomainId(), materialize.getBirthId(),
-                     materialize.getLifetimeEndDomainId(),
-                     materialize.getRealization())
-                 .getResult();
+    cloned =
+        riscv::RegisterMaterializeOp::create(
+            rewriter, materialize.getLoc(), resultType, *input,
+            materialize.getOwnerDomainId(), materialize.getBirthId(),
+            materialize.getLifetimeEndDomainId(), materialize.getRealization())
+            .getResult();
   } else {
     return mlir::failure();
   }
@@ -895,19 +886,18 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
       auto offset = riscv::BinaryOp::create(rewriter,
           load.getLoc(), integer, typedIndex.getResult(), span.getResult(), "mul",
           riscv_internal::unselectedLeaf(rewriter));
-      windowBase = rewriter
-                       .create<riscv::BinaryOp>(
-                           load.getLoc(), integer, base, offset.getResult(),
-                           "add", riscv_internal::unselectedLeaf(rewriter))
-                       .getResult();
+      windowBase =
+          riscv::BinaryOp::create(rewriter, load.getLoc(), integer, base,
+                                  offset.getResult(), "add",
+                                  riscv_internal::unselectedLeaf(rewriter))
+              .getResult();
     } else if (base.getType().isIndex()) {
       auto span = mlir::arith::ConstantIndexOp::create(rewriter,
           load.getLoc(), coordinateSpan);
       auto offset = mlir::arith::MulIOp::create(rewriter,
           load.getLoc(), windowIndex, span.getResult());
-      windowBase = rewriter
-                       .create<mlir::arith::AddIOp>(load.getLoc(), base,
-                                                   offset.getResult())
+      windowBase = mlir::arith::AddIOp::create(rewriter, load.getLoc(), base,
+                                               offset.getResult())
                        .getResult();
     } else {
       return mlir::failure();
@@ -966,19 +956,18 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
       auto offset = riscv::BinaryOp::create(rewriter,
           load.getLoc(), integer, typedIndex.getResult(), span.getResult(),
           "mul", riscv_internal::unselectedLeaf(rewriter));
-      windowBase = rewriter
-                       .create<riscv::BinaryOp>(
-                           load.getLoc(), integer, base, offset.getResult(),
-                           "add", riscv_internal::unselectedLeaf(rewriter))
-                       .getResult();
+      windowBase =
+          riscv::BinaryOp::create(rewriter, load.getLoc(), integer, base,
+                                  offset.getResult(), "add",
+                                  riscv_internal::unselectedLeaf(rewriter))
+              .getResult();
     } else if (base.getType().isIndex()) {
       auto span = mlir::arith::ConstantIndexOp::create(rewriter,
           load.getLoc(), windowBytes);
       auto offset = mlir::arith::MulIOp::create(rewriter,
           load.getLoc(), windowIndex, span.getResult());
-      windowBase = rewriter
-                       .create<mlir::arith::AddIOp>(load.getLoc(), base,
-                                                   offset.getResult())
+      windowBase = mlir::arith::AddIOp::create(rewriter, load.getLoc(), base,
+                                               offset.getResult())
                        .getResult();
     } else {
       return mlir::failure();
@@ -1177,40 +1166,35 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
           auto constant = riscv::ConstantOp::create(rewriter,
               load.getLoc(), integer,
               rewriter.getIntegerAttr(integer, constantOffset));
-          totalOffset = rewriter
-                            .create<riscv::BinaryOp>(
-                                load.getLoc(), integer, totalOffset,
-                                constant.getResult(), "add",
-                                riscv_internal::unselectedLeaf(rewriter))
-                            .getResult();
+          totalOffset =
+              riscv::BinaryOp::create(rewriter, load.getLoc(), integer,
+                                      totalOffset, constant.getResult(), "add",
+                                      riscv_internal::unselectedLeaf(rewriter))
+                  .getResult();
         }
-        issueBase = rewriter
-                        .create<riscv::BinaryOp>(
-                            load.getLoc(), integer, issueBase, totalOffset,
-                            "add", riscv_internal::unselectedLeaf(rewriter))
-                        .getResult();
+        issueBase =
+            riscv::BinaryOp::create(rewriter, load.getLoc(), integer, issueBase,
+                                    totalOffset, "add",
+                                    riscv_internal::unselectedLeaf(rewriter))
+                .getResult();
       } else if (issueBase.getType().isIndex()) {
         auto stride = mlir::arith::ConstantIndexOp::create(rewriter,
             load.getLoc(), issueStride);
         mlir::Value totalOffset =
-            rewriter
-                .create<mlir::arith::MulIOp>(load.getLoc(), windowIndex,
-                                             stride.getResult())
+            mlir::arith::MulIOp::create(rewriter, load.getLoc(), windowIndex,
+                                        stride.getResult())
                 .getResult();
         if (constantOffset) {
           auto constant = mlir::arith::ConstantIndexOp::create(rewriter,
               load.getLoc(), constantOffset);
           totalOffset =
-              rewriter
-                  .create<mlir::arith::AddIOp>(load.getLoc(), totalOffset,
-                                              constant.getResult())
+              mlir::arith::AddIOp::create(rewriter, load.getLoc(), totalOffset,
+                                          constant.getResult())
                   .getResult();
         }
-        issueBase =
-            rewriter
-                .create<mlir::arith::AddIOp>(load.getLoc(), issueBase,
-                                            totalOffset)
-                .getResult();
+        issueBase = mlir::arith::AddIOp::create(rewriter, load.getLoc(),
+                                                issueBase, totalOffset)
+                        .getResult();
       } else {
         return mlir::failure();
       }
@@ -1281,19 +1265,18 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
       auto offset = riscv::BinaryOp::create(rewriter,
           load.getLoc(), integer, typedIndex.getResult(), extent.getResult(),
           "mul", riscv_internal::unselectedLeaf(rewriter));
-      issueBase = rewriter
-                      .create<riscv::BinaryOp>(
-                          load.getLoc(), integer, base, offset.getResult(),
-                          "add", riscv_internal::unselectedLeaf(rewriter))
-                      .getResult();
+      issueBase =
+          riscv::BinaryOp::create(rewriter, load.getLoc(), integer, base,
+                                  offset.getResult(), "add",
+                                  riscv_internal::unselectedLeaf(rewriter))
+              .getResult();
     } else if (base.getType().isIndex()) {
       auto extent = mlir::arith::ConstantIndexOp::create(rewriter,
           load.getLoc(), sourceStep);
       auto offset = mlir::arith::MulIOp::create(rewriter,
           load.getLoc(), windowIndex, extent.getResult());
-      issueBase = rewriter
-                      .create<mlir::arith::AddIOp>(
-                          load.getLoc(), base, offset.getResult())
+      issueBase = mlir::arith::AddIOp::create(rewriter, load.getLoc(), base,
+                                              offset.getResult())
                       .getResult();
     } else {
       return mlir::failure();
@@ -1597,20 +1580,18 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
     auto input = cloneOperand(unary.getInput());
     if (mlir::failed(input))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::UnaryOp>(unary.getLoc(), resultType, *input,
-                                         unary.getKind(),
-                                         riscv_internal::unselectedLeaf(rewriter))
+    cloned = riscv::UnaryOp::create(rewriter, unary.getLoc(), resultType,
+                                    *input, unary.getKind(),
+                                    riscv_internal::unselectedLeaf(rewriter))
                  .getResult();
   } else if (auto binary = mlir::dyn_cast<riscv::BinaryOp>(definition)) {
     auto lhs = cloneOperand(binary.getLhs());
     auto rhs = cloneOperand(binary.getRhs());
     if (mlir::failed(lhs) || mlir::failed(rhs))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::BinaryOp>(
-                     binary.getLoc(), resultType, *lhs, *rhs, binary.getKind(),
-                     riscv_internal::unselectedLeaf(rewriter))
+    cloned = riscv::BinaryOp::create(rewriter, binary.getLoc(), resultType,
+                                     *lhs, *rhs, binary.getKind(),
+                                     riscv_internal::unselectedLeaf(rewriter))
                  .getResult();
   } else if (auto cast = mlir::dyn_cast<riscv::CastOp>(definition)) {
     auto input = cloneOperand(cast.getInput());
@@ -1637,30 +1618,28 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
       riscv_internal::copyOrigin(cast, conversion);
       cloned = conversion.getResult();
     } else {
-      cloned = rewriter
-                   .create<riscv::CastOp>(
-                       cast.getLoc(), resultType, *input,
-                       riscv_internal::unselectedLeaf(rewriter))
-                   .getResult();
+      cloned =
+          riscv::CastOp::create(rewriter, cast.getLoc(), resultType, *input,
+                                riscv_internal::unselectedLeaf(rewriter))
+              .getResult();
     }
   } else if (auto narrow = mlir::dyn_cast<riscv::NarrowOp>(definition)) {
     auto input = cloneOperand(narrow.getInput());
     if (mlir::failed(input))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::NarrowOp>(
-                     narrow.getLoc(), resultType, *input, narrow.getRounding(),
-                     narrow.getSaturate(),
-                     riscv_internal::unselectedLeaf(rewriter))
-                 .getResult();
+    cloned =
+        riscv::NarrowOp::create(rewriter, narrow.getLoc(), resultType, *input,
+                                narrow.getRounding(), narrow.getSaturate(),
+                                riscv_internal::unselectedLeaf(rewriter))
+            .getResult();
   } else if (auto widen = mlir::dyn_cast<riscv::WidenOp>(definition)) {
     auto input = cloneOperand(widen.getInput());
     if (mlir::failed(input))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::WidenOp>(widen.getLoc(), resultType, *input,
-                                         riscv_internal::unselectedLeaf(rewriter))
-                 .getResult();
+    cloned =
+        riscv::WidenOp::create(rewriter, widen.getLoc(), resultType, *input,
+                               riscv_internal::unselectedLeaf(rewriter))
+            .getResult();
   } else if (auto lookup = mlir::dyn_cast<riscv::LookupOp>(definition)) {
     // Project the index domain, not the table: every issue reads the same
     // already selected table representation at its own logical coordinates.
@@ -1703,13 +1682,12 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
       cloned = *input;
     } else {
       auto inputType = mlir::cast<riscv::ValueType>((*input).getType());
-      cloned = rewriter
-                   .create<riscv::ConvertLayoutOp>(
-                       conversion.getLoc(), resultType, *input,
-                       riscv_internal::layoutConversion(
-                           rewriter, inputType.getLayout(), resultType.getLayout()),
-                       conversion.getSourceAccessAttr(),
-                       riscv_internal::unselectedLeaf(rewriter))
+      cloned = riscv::ConvertLayoutOp::create(
+                   rewriter, conversion.getLoc(), resultType, *input,
+                   riscv_internal::layoutConversion(
+                       rewriter, inputType.getLayout(), resultType.getLayout()),
+                   conversion.getSourceAccessAttr(),
+                   riscv_internal::unselectedLeaf(rewriter))
                    .getResult();
     }
   } else if (auto add = mlir::dyn_cast<riscv::RVVWidenAddOp>(definition)) {
@@ -1717,9 +1695,8 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
     auto rhs = cloneOperand(add.getRhs());
     if (mlir::failed(lhs) || mlir::failed(rhs))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::RVVWidenAddOp>(add.getLoc(), resultType,
-                                              *lhs, *rhs, add.getLeaf())
+    cloned = riscv::RVVWidenAddOp::create(rewriter, add.getLoc(), resultType,
+                                          *lhs, *rhs, add.getLeaf())
                  .getResult();
   } else if (auto broadcast =
                  mlir::dyn_cast<riscv::RVVAxisBroadcastOp>(definition)) {
@@ -1733,28 +1710,26 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
     if (mlir::failed(input) || !inputType || inputLanes <= 0 ||
         resultLanes < inputLanes)
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::RVVAxisBroadcastOp>(
-                     broadcast.getLoc(), resultType, *input,
-                     riscv_internal::leaf(
-                         rewriter, "rvv", "axis-broadcast",
-                         "rvv.axis-broadcast", "rvv.axis-broadcast",
-                         inputType.getLayout().getRegisterGroups(),
-                         resultType.getLayout().getRegisterGroups(), 1, 0,
-                         "none", "exact", {inputLanes, resultLanes}))
-                 .getResult();
+    cloned =
+        riscv::RVVAxisBroadcastOp::create(
+            rewriter, broadcast.getLoc(), resultType, *input,
+            riscv_internal::leaf(rewriter, "rvv", "axis-broadcast",
+                                 "rvv.axis-broadcast", "rvv.axis-broadcast",
+                                 inputType.getLayout().getRegisterGroups(),
+                                 resultType.getLayout().getRegisterGroups(), 1,
+                                 0, "none", "exact", {inputLanes, resultLanes}))
+            .getResult();
   } else if (auto materialize =
                  mlir::dyn_cast<riscv::RegisterMaterializeOp>(definition)) {
     auto input = cloneOperand(materialize.getInput());
     if (mlir::failed(input))
       return mlir::failure();
-    cloned = rewriter
-                 .create<riscv::RegisterMaterializeOp>(
-                     materialize.getLoc(), resultType, *input,
-                     materialize.getOwnerDomainId(), materialize.getBirthId(),
-                     materialize.getLifetimeEndDomainId(),
-                     materialize.getRealization())
-                 .getResult();
+    cloned =
+        riscv::RegisterMaterializeOp::create(
+            rewriter, materialize.getLoc(), resultType, *input,
+            materialize.getOwnerDomainId(), materialize.getBirthId(),
+            materialize.getLifetimeEndDomainId(), materialize.getRealization())
+            .getResult();
   } else {
     definition->emitError("issue-window projection does not support producer ")
         << definition->getName().getStringRef() << "; source=" << sourceType;

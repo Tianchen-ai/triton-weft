@@ -6,7 +6,7 @@ Triton package; no source overlay or Bench package is required. NumPy examples
 need NumPy; the PyTorch example additionally needs a supported CPU PyTorch build
 and the [framework source seam](installation.md#可选应用依赖).
 
-The [example index](../../../examples/weft/README.md) separates `language/`,
+The [example index](https://github.com/Tianchen-ai/triton-weft/blob/main/examples/weft/README.md) separates `language/`,
 `deployment/` and `frameworks/`. Run modules with `python -m` from the repository
 root so the shared tutorial kernels have explicit package imports.
 

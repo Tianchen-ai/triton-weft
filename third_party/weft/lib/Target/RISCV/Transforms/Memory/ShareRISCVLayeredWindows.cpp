@@ -1840,12 +1840,11 @@ bool materializeReplicaStorageLoad(mlir::IRRewriter &rewriter,
       auto coefficient = riscv::ConstantOp::create(rewriter,
           extract.getLoc(), integer,
           rewriter.getIntegerAttr(integer, affine.scalarBaseCoefficient));
-      scalarBase = rewriter
-                       .create<riscv::BinaryOp>(
-                           extract.getLoc(), integer, scalarBase,
-                           coefficient.getResult(), "mul",
-                           riscv_internal::unselectedLeaf(rewriter))
-                       .getResult();
+      scalarBase =
+          riscv::BinaryOp::create(rewriter, extract.getLoc(), integer,
+                                  scalarBase, coefficient.getResult(), "mul",
+                                  riscv_internal::unselectedLeaf(rewriter))
+              .getResult();
     } else {
       return false;
     }

@@ -32,6 +32,12 @@ optimized kernel programs, baseline recipes and performance outputs live in
 [Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench).
 Compiler code must not import or dispatch by names in that corpus.
 
+`Build Triton and Weft` checks the fork's host wheel and handbook on pushes,
+pull requests and a daily schedule, and deploys the handbook through GitHub Pages.
+The inherited upstream wheel/PyPI and GPU documentation publishing jobs run only
+in `triton-lang/triton`, whose runner labels and publishing credentials they use.
+They do not publish this fork's package or replace its build checks.
+
 Within each target, `Backend` assembles the pipeline, `Platform` describes ISA and
 execution capabilities, `Analysis` interprets that target's physical representation,
 `Conversion` imports Canonical operations, and `Transforms` selects and materializes

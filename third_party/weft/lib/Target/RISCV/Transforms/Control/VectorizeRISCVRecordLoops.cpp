@@ -457,32 +457,27 @@ public:
     mlir::Value cloned;
     auto leaf = weft::riscv_internal::unselectedLeaf(rewriter);
     if (auto operation = mlir::dyn_cast<riscv::CastOp>(definition))
-      cloned = rewriter
-                   .create<riscv::CastOp>(operation.getLoc(), *resultType,
-                                          operands.front(), leaf)
+      cloned = riscv::CastOp::create(rewriter, operation.getLoc(), *resultType,
+                                     operands.front(), leaf)
                    .getResult();
     else if (auto operation = mlir::dyn_cast<riscv::WidenOp>(definition))
-      cloned = rewriter
-                   .create<riscv::WidenOp>(operation.getLoc(), *resultType,
-                                           operands.front(), leaf)
+      cloned = riscv::WidenOp::create(rewriter, operation.getLoc(), *resultType,
+                                      operands.front(), leaf)
                    .getResult();
     else if (auto operation = mlir::dyn_cast<riscv::NarrowOp>(definition))
-      cloned = rewriter
-                   .create<riscv::NarrowOp>(
-                       operation.getLoc(), *resultType, operands.front(),
-                       operation.getRounding(), operation.getSaturate(), leaf)
+      cloned = riscv::NarrowOp::create(
+                   rewriter, operation.getLoc(), *resultType, operands.front(),
+                   operation.getRounding(), operation.getSaturate(), leaf)
                    .getResult();
     else if (auto operation = mlir::dyn_cast<riscv::UnaryOp>(definition))
-      cloned = rewriter
-                   .create<riscv::UnaryOp>(operation.getLoc(), *resultType,
-                                           operands.front(), operation.getKind(),
-                                           leaf)
-                   .getResult();
+      cloned =
+          riscv::UnaryOp::create(rewriter, operation.getLoc(), *resultType,
+                                 operands.front(), operation.getKind(), leaf)
+              .getResult();
     else if (auto operation = mlir::dyn_cast<riscv::BinaryOp>(definition))
-      cloned = rewriter
-                   .create<riscv::BinaryOp>(
-                       operation.getLoc(), *resultType, operands[0], operands[1],
-                       operation.getKind(), leaf)
+      cloned = riscv::BinaryOp::create(rewriter, operation.getLoc(),
+                                       *resultType, operands[0], operands[1],
+                                       operation.getKind(), leaf)
                    .getResult();
     else
       return mlir::failure();

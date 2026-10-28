@@ -29,7 +29,8 @@ checkout; the default directory is `/tmp/weft-docs-site`, overridable through
 Use relative `.md` links within the handbook and GitHub links for source files.
 When moving a page, update its incoming links and the navigation together. The
 strict build checks page links and anchors. Keep runnable snippets aligned with
-the public package and existing `examples/use.py` entry.
+the public package and the `examples/weft/` modules listed in
+[Runnable examples](../getting-started/examples.md).
 
 Stable design belongs in specifications; transient measurements, internal
 instructions and historical work records are not part of the public handbook.

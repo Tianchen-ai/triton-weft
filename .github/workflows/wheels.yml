@@ -12,6 +12,9 @@ permissions: read-all
 jobs:
 
   Build-Wheels:
+    # Upstream runners and PyPI credentials belong to triton-lang/triton.
+    # This fork builds its wheel in build.yml and distributes through its own index.
+    if: github.repository == 'triton-lang/triton'
     timeout-minutes: 180
     runs-on: ${{ matrix.config.runs_on }}
 
