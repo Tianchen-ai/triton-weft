@@ -528,9 +528,10 @@ static mlir::LogicalResult propagateConsumerLayouts(
     bool completeRow = false;
     bool rowPairs = false;
     for (auto anchor : anchors) {
-      auto layout = kernel.getLocalTileStrategy() != "atom-partitioned"
+      const bool partitioned = kernel.getLocalTileStrategy() == "atom-partitioned";
+      auto layout = !partitioned
           ? riscv::fragmentRVVHandoffLayout(anchor.getInput().getType(), kernel.getTarget(), 2)
-          : std::nullopt;
+          : riscv::fragmentRVVHandoffLayout(anchor.getInput().getType(), kernel.getTarget());
       auto domain = anchor.getResult().getType();
       bool paired = false;
       if (kernel.getLocalTileStrategy() == "target-default" && domain.getShape().size() == 2 &&
@@ -546,17 +547,17 @@ static mlir::LogicalResult propagateConsumerLayouts(
           paired = rowPairs = true;
         }
       }
-      grouped |= bool(layout) && !paired;
+      grouped |= bool(layout) && !paired && !partitioned;
       if (!layout && kernel.getLocalTileStrategy() == "register-grouped") {
         rejectRISCVCandidate(kernel, RISCVFailureCategory::Unsupported,
                              "register-grouped strategy is unsupported for the selected tile geometry");
         return mlir::failure();
       }
-      if (!layout) {
+      if (!layout && !partitioned) {
         layout = completeRowHandoffLayout(anchor, kernel.getTarget());
         completeRow |= bool(layout);
       }
-      if (riscv::isGroupedFragmentRVVHandoff(anchor.getInput().getType(), anchor.getResult().getType()) ||
+      if ((!partitioned && riscv::isGroupedFragmentRVVHandoff(anchor.getInput().getType(), anchor.getResult().getType())) ||
           (!layout && riscv::isDirectFragmentRVVHandoff(anchor.getInput().getType(), anchor.getResult().getType())))
         continue;
       if (!layout)
@@ -618,11 +619,12 @@ static mlir::LogicalResult propagateConsumerLayouts(
     // defer that decision; final resource materialization remains mandatory.
     const bool requiresClosure = legal && pressure && baselinePressure && avoidsSpill &&
         pressure->total() <= baselinePressure->total();
+    const bool explicitPartition = kernel.getLocalTileStrategy() == "atom-partitioned";
     const bool selected = (resourceLegal || requiresClosure) && candidate &&
-        (avoidsSpill || preferGrouped || lessWork(*candidate, *baseline));
+        (explicitPartition || avoidsSpill || preferGrouped || lessWork(*candidate, *baseline));
     llvm::errs() << "weft-consumer-layout: candidates=2 requested=" << kernel.getLocalTileStrategy() << " selected="
                  << (selected ? (grouped ? "register-grouped" : rowPairs ? "register-row-pairs" : completeRow ? "complete-row" : "fragment-order") : "existing")
-                 << " reason=" << (!legal ? "unsupported-coordinate-edge" : !resourceLegal && requiresClosure ? "requires-resource-closure" : !resourceLegal ? "resident-budget" : !candidate ? "unknown-local-work" : avoidsSpill ? "fits-resident-budget" : preferGrouped ? "target-register-group-rule" : selected ? "less-inner-issue-work" : "no-issue-work-reduction")
+                 << " reason=" << (!legal ? "unsupported-coordinate-edge" : !resourceLegal && requiresClosure ? "requires-resource-closure" : !resourceLegal ? "resident-budget" : !candidate ? "unknown-local-work" : explicitPartition ? "explicit-atom-partition" : avoidsSpill ? "fits-resident-budget" : preferGrouped ? "target-register-group-rule" : selected ? "less-inner-issue-work" : "no-issue-work-reduction")
                  << " existing-resident-groups=" << (baselinePressure ? baselinePressure->total() : -1)
                  << " resident-groups=" << (pressure ? pressure->total() : -1)
                  << " scope=pointwise+broadcast+conversion+initializer estimate=pre-system-compiler cycle-estimate=unavailable work-by-dynamic-loop-depth(alu,movement)=";
@@ -642,6 +644,11 @@ static mlir::LogicalResult propagateConsumerLayouts(
     if (!rejected.empty()) llvm::errs() << "weft-consumer-layout: rejected=" << rejected << '\n';
     if (grouped && !selected && (!registeredRowMerge || kernel.getLocalTileStrategy() == "register-grouped")) {
       kernel.emitOpError("selected register-grouped realization has no legal closed physical program");
+      return mlir::failure();
+    }
+    if (explicitPartition && !selected) {
+      rejectRISCVCandidate(kernel, RISCVFailureCategory::Unsupported,
+                           "explicit atom-partitioned realization has no legal closed physical program");
       return mlir::failure();
     }
     if (!selected)

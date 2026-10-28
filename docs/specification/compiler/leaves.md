@@ -342,7 +342,9 @@ packing 的逻辑 byte cells。非逻辑行不承诺零填充，也不能经 MMA
 `ime.field-raw-load.grouped`。一次连续读取形成整个 register group，按固定 subregister
 坐标取出原有 fragments；访问字节和 fragment 次序不变，结果本身承载整组，不另占 vector
 temporary。相同几何下，`ime.decode.grouped-bits` 与 `ime.fragment.add/sub.grouped` 对整组
-执行原有 byte-local 运算；后者要求同型 fragment operands，仍遵守显式 lhs copy/reuse。
+执行原有 byte-local 运算；后者的 rhs 为同型 fragment 或相同元素类型的 scalar，分别选择
+逐 lane 或统一标量运算，仍遵守显式 lhs copy/reuse。标量不先展开为 fragment，整组操作
+不增加临时寄存器，也不改变各 atom 的 byte 算术边界。
 `ime.field-raw-load.scalar-prime` 只适用于完整有效的二至四 atom 连续 byte 供给：先 scalar
 读取整个供给的最后一个有效字节，再执行原有 vector loads。读取范围不扩展，原 packing、
 fragment 数与临时资源不变；这是同一局部 load 的固定序列，不跨迭代预取或引入私有 buffer。

@@ -747,8 +747,9 @@ mlir::LogicalResult Emitter::compileIMEFragmentPointwise(riscv::IMEFragmentPoint
     return mlir::success();
   }
   if (operation.getLeaf().getInstruction() == ("ime.fragment." + operation.getKind() + ".grouped").str()) {
-    if (rhs->kind != Binding::Kind::Fragment || rhs->parts.size() != lhs.parts.size())
-      return fail(operation, "grouped fragment pointwise lost its matching fragment operand");
+    const bool scalar = rhs->kind == Binding::Kind::Scalar;
+    if (!scalar && (rhs->kind != Binding::Kind::Fragment || rhs->parts.size() != lhs.parts.size()))
+      return fail(operation, "grouped fragment pointwise lost its matching fragment or scalar operand");
     const int64_t parts = riscv::fragmentPartCount(fragment);
     const std::string group = "m" + std::to_string(parts);
     auto pack = [&](llvm::ArrayRef<std::string> values) {
@@ -759,8 +760,8 @@ mlir::LogicalResult Emitter::compileIMEFragmentPointwise(riscv::IMEFragmentPoint
              std::to_string(part) + ", " + value + ");");
       return packed;
     };
-    const std::string left = pack(lhs.parts), right = pack(rhs->parts);
-    line(left + " = __riscv_v" + operation.getKind().str() + "_vv_i8" + group + "(" +
+    const std::string left = pack(lhs.parts), right = scalar ? rhs->scalar : pack(rhs->parts);
+    line(left + " = __riscv_v" + operation.getKind().str() + (scalar ? "_vx_i8" : "_vv_i8") + group + "(" +
          left + ", " + right + ", " + std::to_string(fragment.getPacking().getRowsPerTile() * columns * parts) + ");");
     for (int64_t part = 0; part < parts; ++part) {
       const bool reuse = operation.getLhsPolicy() == "reuse";

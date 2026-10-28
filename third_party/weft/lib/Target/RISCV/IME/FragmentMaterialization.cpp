@@ -470,7 +470,9 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
     }
     if (!pointwise)
       return supplied;
-    auto instruction = ("ime.fragment." + pointwise.getKind()).str();
+    const bool groupedScalar = grouped && pointwise.getRhs().getType() == fragment.getElementType();
+    auto instruction = ("ime.fragment." + pointwise.getKind()).str() +
+        (groupedScalar ? ".grouped" : "");
     auto computed = riscv::IMEFragmentPointwiseOp::create(rewriter, pointwise.getLoc(), fragment,
         supplied, pointwise.getRhs(), pointwise.getKind(), "copy",
         riscv_internal::leaf(rewriter, "ime", "fragment-pointwise", instruction, instruction,

@@ -733,9 +733,10 @@ mlir::LogicalResult IMEFragmentPointwiseOp::verify() {
     if (!value || value.getValue().getSExtValue() < 0 || value.getValue().getSExtValue() >= 32)
       return emitOpError("accumulator shift requires a scalar constant in [0, 31]");
   }
-  if (grouped && (getRhs().getType() != getLhs().getType() || !kernel ||
+  if (grouped && ((getRhs().getType() != getLhs().getType() &&
+                   getRhs().getType() != getLhs().getType().getElementType()) || !kernel ||
                   !supportsFragmentGroupedLoad(getLhs().getType(), kernel.getTarget())))
-    return emitOpError("grouped fragment pointwise requires two matching complete register groups");
+    return emitOpError("grouped fragment pointwise requires complete register groups and a matching fragment or scalar");
   return mlir::success();
 }
 
