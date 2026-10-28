@@ -1478,7 +1478,8 @@ private:
     return false;
   }
   Value accessDeclaredField(Location loc, Value region, const Memory &view,
-                            Value offsets, Value active, Type domain, Value input = {}) {
+                            Value offsets, Value active, Type domain, Value input = {},
+                            Value physicalRowOffset = {}) {
     Type resultType = physicalType(domain);
     Value descriptor = region;
     int64_t windowOffset = 0, windowElements = 0;
@@ -1625,9 +1626,13 @@ private:
           auto blockPoint = points.find(selection.getIndices()[1]);
           if (rowPoint != points.end() && blockPoint != points.end() &&
               layout->rows % spanRows == 0 &&
-              knownPowerOfTwoMultiple(rowPoint->second.base, spanRows)) {
+              knownPowerOfTwoMultiple(rowPoint->second.base, spanRows) &&
+              (!physicalRowOffset || knownPowerOfTwoMultiple(physicalRowOffset, spanRows))) {
             row = arith::IndexCastOp::create(b, loc, b.getI64Type(), rowPoint->second.base);
             row = arith::AddIOp::create(b, loc, row, number(cohortRowOffset));
+            if (physicalRowOffset)
+              row = arith::AddIOp::create(b, loc, row,
+                  arith::IndexCastOp::create(b, loc, b.getI64Type(), physicalRowOffset));
             column = arith::DivUIOp::create(b, loc,
                 arith::IndexCastOp::create(b, loc, b.getI64Type(), blockPoint->second.base),
                 number(layout->elements()));
@@ -3756,6 +3761,61 @@ private:
     for (auto [result, output] : llvm::zip(op.getResults(), outputs)) bindArray(result, output, loc);
     return success();
   }
+  bool arrayDeclaredField(Operation &op, Value region, const Memory &view,
+                          const weft::x86::ArrayStorage &output) {
+    auto dimensions = shape(op.getResult(0).getType());
+    auto ids = axes(op.getResult(0).getType());
+    if (dimensions.size() != 2 || dimensions[0] <= 0 || dimensions[1] <= 0 ||
+        ids != axes(region.getType()) || view.strides.size() != 2 ||
+        view.limits.size() != 2) return false;
+    Value descriptor = region;
+    if (auto window = descriptor.getDefiningOp<wk::SubviewOp>()) descriptor = window.getBase();
+    auto field = descriptor.getDefiningOp<wk::FieldOp>();
+    if (!field || !memoryType(field.getOwner().getType())) return false;
+    auto layout = weft::analysis::encodingBytes(sourceModule, packedType(field.getOwner().getType()));
+    if (failed(layout) || layout->rows <= 0 || dimensions[0] % layout->rows ||
+        dimensions[1] > 4096 / layout->rows) return false;
+    const int64_t rows = layout->rows, columns = dimensions[1], lanes = rows * columns;
+    auto domain = wk::ValueType::get(b.getContext(), element(op.getResult(0).getType()),
+        b.getDenseI64ArrayAttr({rows, columns}), b.getDenseI64ArrayAttr(ids));
+    auto vectorType = dyn_cast<VectorType>(physicalType(domain));
+    if (!vectorType) return false;
+    Location loc = op.getLoc();
+    OpBuilder::InsertionGuard insertion(b);
+    auto zeroIndex = indexConstant(loc, 0);
+    auto loop = scf::ForOp::create(b, loc, zeroIndex, indexConstant(loc, dimensions[0]), indexConstant(loc, rows));
+    b.setInsertionPointToStart(loop.getBody());
+    auto indexType = VectorType::get({lanes}, b.getIndexType());
+    auto maskType = vectorType.clone(b.getI1Type());
+    auto splat = [&](Value value, Type type) -> Value {
+      return vector::BroadcastOp::create(b, loc, type, value);
+    };
+    Value offset = splat(view.offset, indexType), active = splat(view.guard, maskType);
+    for (unsigned axis = 0; axis != 2; ++axis) {
+      SmallVector<int64_t> indices;
+      for (int64_t lane = 0; lane < lanes; ++lane)
+        indices.push_back(axis == 0 ? lane / columns : lane % columns);
+      Value coordinate = arith::ConstantOp::create(b, loc, indexType,
+          DenseIntElementsAttr::get(indexType, indices));
+      if (axis == 0)
+        coordinate = arith::AddIOp::create(b, loc, coordinate, splat(loop.getInductionVar(), indexType));
+      offset = arith::AddIOp::create(b, loc, offset,
+          arith::MulIOp::create(b, loc, coordinate, splat(view.strides[axis], indexType)));
+      active = arith::AndIOp::create(b, loc, active,
+          arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ult, coordinate, splat(view.limits[axis], indexType)));
+    }
+    offset = arith::IndexCastOp::create(b, loc, indexType.clone(b.getI64Type()), offset);
+    Value data = accessDeclaredField(loc, region, view, offset, active, domain, {}, loop.getInductionVar());
+    if (!data) {
+      loop.erase();
+      return false;
+    }
+    Value linear = arith::MulIOp::create(b, loc, loop.getInductionVar(), indexConstant(loc, columns));
+    vector::StoreOp::create(b, loc, data, output.data, linear);
+    Value bytes = arith::ExtUIOp::create(b, loc, vectorType.clone(b.getI8Type()), active);
+    vector::StoreOp::create(b, loc, bytes, output.valid, linear);
+    return true;
+  }
   LogicalResult arrayMemory(Operation &op, Value region, Value input = {}) {
     Location loc = op.getLoc(); Memory view = memories.at(region);
     Value domain = input ? input : op.getResult(0);
@@ -3774,6 +3834,11 @@ private:
     }
     weft::x86::ArrayStorage output;
     if (!input) output = weft::x86::allocateArray(b, loc, arrayElement(domain.getType()), extents);
+    if (!input && !packedType(domain.getType()) && arrayDeclaredField(op, region, view, output)) {
+      bindArray(op.getResult(0), output, loc);
+      valueOrigins[op.getResult(0)] = view.origins;
+      return success();
+    }
     auto transfer = [&](Value linear, ValueRange coordinates, int64_t lanes) -> LogicalResult {
       Type valueType = arrayElement(domain.getType());
       Type addressType = b.getIndexType(), maskType = b.getI1Type(), accessType = elementType;
