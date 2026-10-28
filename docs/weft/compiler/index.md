@@ -4,7 +4,7 @@ The common Triton frontend constructs a Canonical program with Weft's logical
 relationships. Target passes turn that program into an executable physical
 representation. The final emitter translates the selected representation.
 
-[![Compiler architecture from the paper](../assets/paper/compiler.svg)](../assets/paper/compiler.svg)
+[![Compiler architecture from the paper](../assets/paper/compiler.png)](../assets/paper/compiler.png)
 
 ## Follow one kernel
 

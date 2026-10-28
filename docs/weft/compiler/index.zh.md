@@ -3,7 +3,7 @@
 共同 Triton 前端构造保留 Weft 逻辑关系的 Canonical 程序；
 目标 passes 将其实现为可执行的物理表示，最终 emitter 翻译已经确定的表示。
 
-[![论文中的编译器架构](../assets/paper/compiler.svg)](../assets/paper/compiler.svg)
+[![论文中的编译器架构](../assets/paper/compiler.png)](../assets/paper/compiler.png)
 
 ## 跟随一个 kernel
 

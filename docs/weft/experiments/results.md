@@ -5,7 +5,7 @@ The [reproduction workflow](reproduce.md) runs the corresponding Bench workloads
 
 ## Native kernel performance
 
-[![Kernel heatmap and full speedup distributions](../assets/paper/operators.svg)](../assets/paper/operators.svg)
+[![Kernel heatmap and full speedup distributions](../assets/paper/operators.png)](../assets/paper/operators.png)
 
 | Platform | Cases | Matched comparisons | Geometric mean |
 |---|---:|---:|---:|
@@ -25,7 +25,7 @@ records shape, numerical check, reference, timings and JIT observations.
 
 ## Complete inference
 
-[![Prefill and decode for all nine paired configurations](../assets/paper/models.svg)](../assets/paper/models.svg)
+[![Prefill and decode for all nine paired configurations](../assets/paper/models.png)](../assets/paper/models.png)
 
 The configurations cover Llama 2 7B Q4_0, DeepSeek 8B Q4_K_M and Qwen 2.5
 14B Q4_K_M. All use eight application threads. K3 DeepSeek has separate
@@ -44,6 +44,8 @@ Each plotted configuration uses its own reference policy.
 ## Dataset and figures
 
 The illustrations come from the completed Weft paper V10:
+
+Pages embed the paper's PNG exports. The SVG sources below retain vector detail.
 
 | Handbook asset | Paper source | Purpose |
 |---|---|---|

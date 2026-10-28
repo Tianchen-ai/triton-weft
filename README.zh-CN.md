@@ -2,7 +2,7 @@
 
 **用 Triton 编写 CPU kernel，用 Weft 控制编码数据、计算分组与复用。**
 
-[English](README.md) · [中文工具书](https://tianchen-ai.github.io/triton-weft/zh/) · [English handbook](https://tianchen-ai.github.io/triton-weft/) · [完整示例](examples/weft/README.zh-CN.md) · [实验复现](docs/weft/experiments/reproduce.zh.md)
+[English](README.md) · [中文工具书](https://tianchen-ai.github.io/triton-weft/zh/) · [English handbook](https://tianchen-ai.github.io/triton-weft/) · [完整示例](examples/weft/README.zh-CN.md) · [实验结果](#实验与复现) · [实验复现](docs/weft/experiments/reproduce.zh.md)
 
 Triton–Weft 扩展 Triton 的 Python 语言与编译器，面向 **RISC-V 和 x86 CPU**。
 从熟悉的 `tl.load`、`tl.store`、归约和 `tl.dot` 开始；需要精细控制时，用
@@ -12,7 +12,7 @@ Triton–Weft 扩展 Triton 的 Python 语言与编译器，面向 **RISC-V 和 
 用户使用同一套 Triton 工作流：`@triton.jit(model="weft")`、`kernel[grid](...)`、
 `triton.Config`、自动调优、编译缓存与原生导出。
 
-[![共同 Triton 前端、Canonical IR 与两个物理后端](docs/weft/assets/paper/compiler.svg)](docs/weft/assets/paper/compiler.svg)
+[![共同 Triton 前端、Canonical IR 与两个物理后端](docs/weft/assets/paper/compiler.png)](docs/weft/assets/paper/compiler.png)
 
 *Canonical IR 保存源程序的作用域、逻辑轴、状态和 Encoding；RISC-V 输出 intrinsic C
 与局部汇编，x86 输出 LLVM IR。*
@@ -110,17 +110,43 @@ adapter 把它绑定到匹配的 GGML 调用点，GGML worker 在推理中直接
 [Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench) 复现。**
 Bench 提供作者程序、工作负载形状、参考库构建配方、模型协议、数值检查和计时入口。
 
-[![代表算子与全部 543 项匹配比较的性能分布](docs/weft/assets/paper/operators.svg)](docs/weft/assets/paper/operators.svg)
+[![代表算子与全部 543 项匹配比较的性能分布](docs/weft/assets/paper/operators.png)](docs/weft/assets/paper/operators.png)
 
 *论文数据包含 553 个算子—平台案例，其中 543 项具有匹配的原生参考。
 SG2044、K1、K3 A100 与 Xeon Platinum 8470Q 的几何平均加速分别为
 1.60×、1.55×、1.82×、1.56×。分布图保留全部匹配案例。*
 
-[![九组模型配置的 prefill 与 decode 结果](docs/weft/assets/paper/models.svg)](docs/weft/assets/paper/models.svg)
+| 平台 | 正式用例 | 匹配原生比较 | 几何平均加速 |
+|---|---:|---:|---:|
+| SG2044 · RVV128 | 133 | 132 | **1.60×** |
+| K1 · RVV256／IME1 | 137 | 136 | **1.55×** |
+| K3 A100 · RVV1024／IME2 | 136 | 135 | **1.82×** |
+| Xeon Platinum 8470Q · AVX-512／VNNI／AMX | 147 | 140 | **1.56×** |
+
+倍率为参考耗时除以 Triton–Weft 耗时；匹配参考包含 541 项 GGML 和两项 oneDNN。
+[完整算子测量 CSV](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/operators.csv)。
+
+[![九组模型配置的 prefill 与 decode 结果](docs/weft/assets/paper/models.png)](docs/weft/assets/paper/models.png)
 
 *九组配置覆盖 Llama 2 7B、DeepSeek 8B 与 Qwen 2.5 14B。
 每组分别展示 prefill、decode 相对对应正常 llama.cpp 后端的收益；
 K3 的 CPU–RVV 与厂商 IME2 使用各自的参考策略。*
+
+| 平台 | 模型 | 参考 | Prefill | Decode |
+|---|---|---|---:|---:|
+| x86 | Llama 2 7B Q4_0 | 正常 llama.cpp | 1.75× | 1.20× |
+| x86 | DeepSeek 8B Q4_K_M | 正常 llama.cpp | 1.23× | 1.27× |
+| x86 | Qwen 2.5 14B Q4_K_M | 正常 llama.cpp | 1.18× | 1.25× |
+| SG2044 | Llama 2 7B Q4_0 | 正常 llama.cpp | 1.26× | 1.02× |
+| SG2044 | DeepSeek 8B Q4_K_M | 正常 llama.cpp | 1.15× | 0.957× |
+| K1 | Llama 2 7B Q4_0 | 正常 llama.cpp | 1.62× | 0.997× |
+| K1 | DeepSeek 8B Q4_K_M | 正常 llama.cpp | 1.15× | 1.01× |
+| K3 A100 | DeepSeek 8B Q4_K_M | CPU–RVV | 1.93× | 1.92× |
+| K3 A100 | DeepSeek 8B Q4_K_M | 厂商 IME2 | 0.985× | 1.17× |
+
+模型均使用八线程。SG2044／K1／x86 为 128-token prefill、512-token context 后生成
+32 tokens；K3 为 32-token prefill、32-token context 后生成 8 tokens。
+[完整 18 个模型阶段 CSV](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/models.csv)。
 
 先查看用例，再使用配置好的目标运行：
 

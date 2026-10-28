@@ -13,7 +13,7 @@
 | 哪些消费者共享一个值 | Level 与 stage | 多个输出组消费同一份 staged 权重 panel |
 | 一条更新链存活多久 | Level 与 state | F32 accumulator 跨 panel 内各 block 保留 |
 
-[![Q4_K 投影中独立的存储、分组和状态边界](../assets/paper/model.svg)](../assets/paper/model.svg)
+[![Q4_K 投影中独立的存储、分组和状态边界](../assets/paper/model.png)](../assets/paper/model.png)
 
 论文的 Q4_K 投影中，**A** 是共享权重 panel，**B** 是每个输出组的 F32 state，
 **C** 是单个 256 元素 block 的 I32 state，**D** 是 grouped I16 partial。

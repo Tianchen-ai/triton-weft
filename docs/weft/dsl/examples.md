@@ -38,7 +38,7 @@ The paper's projection combines these ideas at larger scale: encoded weight
 fields, explicit partial widths, a shared panel and nested output states.
 Its author programs are in the installable Bench package.
 
-[![Source scopes and partial arithmetic in projection](../assets/paper/model.svg)](../assets/paper/model.svg)
+[![Source scopes and partial arithmetic in projection](../assets/paper/model.png)](../assets/paper/model.png)
 
 [Model programs](programs.md) gives the corpus map.
 [Physical optimization](../compiler/optimization-principles.md) explains how to

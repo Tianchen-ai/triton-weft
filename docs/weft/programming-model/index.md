@@ -15,7 +15,7 @@ specific vector or matrix machine.
 | Which consumers share a value | Level and stage | Several output groups consume one staged weight panel |
 | How long an update chain lives | Level and state | An F32 accumulator persists across all blocks of a panel |
 
-[![Independent storage, grouping and state boundaries in Q4_K projection](../assets/paper/model.svg)](../assets/paper/model.svg)
+[![Independent storage, grouping and state boundaries in Q4_K projection](../assets/paper/model.png)](../assets/paper/model.png)
 
 In the paper's Q4_K projection, **A** is a shared weight panel; **B** is each
 output group's F32 state; **C** is an I32 state for one 256-element block; **D**

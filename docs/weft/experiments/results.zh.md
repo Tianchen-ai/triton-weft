@@ -5,7 +5,7 @@
 
 ## 原生算子性能
 
-[![算子热图与完整加速分布](../assets/paper/operators.svg)](../assets/paper/operators.svg)
+[![算子热图与完整加速分布](../assets/paper/operators.png)](../assets/paper/operators.png)
 
 | 平台 | 案例 | 匹配比较 | 几何平均 |
 |---|---:|---:|---:|
@@ -24,7 +24,7 @@
 
 ## 完整模型推理
 
-[![九组配对配置的 prefill 与 decode](../assets/paper/models.svg)](../assets/paper/models.svg)
+[![九组配对配置的 prefill 与 decode](../assets/paper/models.png)](../assets/paper/models.png)
 
 配置覆盖 Llama 2 7B Q4_0、DeepSeek 8B Q4_K_M 和 Qwen 2.5 14B Q4_K_M，
 均使用八个应用线程。K3 DeepSeek 分别采用 CPU–RVV、厂商 IME2 参考策略。
@@ -41,6 +41,8 @@
 ## 数据与图片
 
 图片来自已完成的 Weft 论文 V10：
+
+页面使用论文原始 PNG 导出；下表的 SVG 源文件保留矢量细节。
 
 | 工具书资产 | 论文来源 | 内容 |
 |---|---|---|

@@ -2,7 +2,7 @@
 
 **Write CPU kernels in Triton. Control encoded data, computation groups and reuse with Weft.**
 
-[中文](README.zh-CN.md) · [English handbook](https://tianchen-ai.github.io/triton-weft/) · [中文工具书](https://tianchen-ai.github.io/triton-weft/zh/) · [Examples](examples/weft/README.md) · [Experiment reproduction](docs/weft/experiments/reproduce.md)
+[中文](README.zh-CN.md) · [English handbook](https://tianchen-ai.github.io/triton-weft/) · [中文工具书](https://tianchen-ai.github.io/triton-weft/zh/) · [Examples](examples/weft/README.md) · [Results](#experiments-and-reproduction) · [Experiment reproduction](docs/weft/experiments/reproduce.md)
 
 Triton–Weft extends Triton's Python language and compiler for **RISC-V and x86 CPUs**.
 Start with `tl.load`, `tl.store`, reductions and `tl.dot`. Add **Encoding** to describe
@@ -13,7 +13,7 @@ chooses vector or matrix instructions, physical layouts, local storage and sched
 The result is one Triton workflow: `@triton.jit(model="weft")`, `kernel[grid](...)`,
 `triton.Config`, autotuning, cached compilation and native export.
 
-[![Triton frontend, shared Canonical IR and target physical compilation](docs/weft/assets/paper/compiler.svg)](docs/weft/assets/paper/compiler.svg)
+[![Triton frontend, shared Canonical IR and target physical compilation](docs/weft/assets/paper/compiler.png)](docs/weft/assets/paper/compiler.png)
 
 *The compiler keeps source scopes, axes, state and Encoding in Canonical IR.
 RISC-V emits intrinsic C and local assembly; x86 emits LLVM IR.*
@@ -117,17 +117,43 @@ and [Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench).**
 Bench provides the author programs, workload shapes, reference-library recipes,
 model protocols, numerical checks and timing commands.
 
-[![Representative kernels and the distribution of all 543 matched comparisons](docs/weft/assets/paper/operators.svg)](docs/weft/assets/paper/operators.svg)
+[![Representative kernels and the distribution of all 543 matched comparisons](docs/weft/assets/paper/operators.png)](docs/weft/assets/paper/operators.png)
 
 *Paper dataset: 553 operator–platform cases, including 543 matched native comparisons.
 Geometric mean speedups are 1.60× on SG2044, 1.55× on K1, 1.82× on K3 A100 and
 1.56× on Xeon Platinum 8470Q. The distribution includes every matched case.*
 
-[![All nine model configurations, with prefill and decode shown separately](docs/weft/assets/paper/models.svg)](docs/weft/assets/paper/models.svg)
+| Platform | Registered cases | Matched native comparisons | Geometric mean speedup |
+|---|---:|---:|---:|
+| SG2044 · RVV128 | 133 | 132 | **1.60×** |
+| K1 · RVV256 / IME1 | 137 | 136 | **1.55×** |
+| K3 A100 · RVV1024 / IME2 | 136 | 135 | **1.82×** |
+| Xeon Platinum 8470Q · AVX-512 / VNNI / AMX | 147 | 140 | **1.56×** |
+
+Speedup is reference time divided by Triton–Weft time. The matched references
+include 541 GGML cases and two oneDNN cases. [All operator measurements (CSV)](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/operators.csv).
+
+[![All nine model configurations, with prefill and decode shown separately](docs/weft/assets/paper/models.png)](docs/weft/assets/paper/models.png)
 
 *Nine model configurations cover Llama 2 7B, DeepSeek 8B and Qwen 2.5 14B.
 Each pair shows prefill and decode against its matching normal llama.cpp backend.
 K3 CPU–RVV and vendor IME2 are separate reference policies.*
+
+| Platform | Model | Reference | Prefill | Decode |
+|---|---|---|---:|---:|
+| x86 | Llama 2 7B Q4_0 | normal llama.cpp | 1.75× | 1.20× |
+| x86 | DeepSeek 8B Q4_K_M | normal llama.cpp | 1.23× | 1.27× |
+| x86 | Qwen 2.5 14B Q4_K_M | normal llama.cpp | 1.18× | 1.25× |
+| SG2044 | Llama 2 7B Q4_0 | normal llama.cpp | 1.26× | 1.02× |
+| SG2044 | DeepSeek 8B Q4_K_M | normal llama.cpp | 1.15× | 0.957× |
+| K1 | Llama 2 7B Q4_0 | normal llama.cpp | 1.62× | 0.997× |
+| K1 | DeepSeek 8B Q4_K_M | normal llama.cpp | 1.15× | 1.01× |
+| K3 A100 | DeepSeek 8B Q4_K_M | CPU–RVV | 1.93× | 1.92× |
+| K3 A100 | DeepSeek 8B Q4_K_M | vendor IME2 | 0.985× | 1.17× |
+
+All model runs use eight threads. SG2044/K1/x86 use 128-token prefill and
+32-token decode after a 512-token context; K3 uses 32-token prefill and
+8-token decode after a 32-token context. [All 18 model stages (CSV)](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/models.csv).
 
 Start by inspecting a case, then run it with your configured target:
 

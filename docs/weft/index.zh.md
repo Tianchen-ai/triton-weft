@@ -17,7 +17,7 @@ Weft 将这些关系加入语言，经过共同编译主链，在 RISC-V 与 x86
 页面右上方的语言选择器可切换到对应的英文或中文章节。
 两种版本的代码统一使用 `import triton.language as tl`。
 
-[![共同前端和目标编译](assets/paper/compiler.svg)](assets/paper/compiler.svg)
+[![共同前端和目标编译](assets/paper/compiler.png)](assets/paper/compiler.png)
 
 ## 从源程序到执行
 
@@ -28,6 +28,29 @@ Weft 将这些关系加入语言，经过共同编译主链，在 RISC-V 与 x86
 
 [示例教程](getting-started/examples.md)按概念逐步展开，每个示例都包含输入准备、
 可调用 kernel 和宿主应用。
+
+## 论文实验结果
+
+使用 Triton–Weft 与 [Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)
+复现论文中的算子和模型实验。数据集覆盖 553 个算子—平台案例和九组模型配置。
+
+[![代表算子与全部匹配算子比较](assets/paper/operators.png)](assets/paper/operators.png)
+
+| 平台 | 匹配原生比较 | 几何平均加速 |
+|---|---:|---:|
+| SG2044 | 132 | **1.60×** |
+| K1 | 136 | **1.55×** |
+| K3 A100 | 135 | **1.82×** |
+| Xeon Platinum 8470Q | 140 | **1.56×** |
+
+倍率为对应参考耗时除以 Triton–Weft 耗时。
+
+[![九组模型配置，prefill 与 decode 分别展示](assets/paper/models.png)](assets/paper/models.png)
+
+18 个模型阶段覆盖 Llama 2 7B、DeepSeek 8B 和 Qwen 2.5 14B，均使用八线程。
+K3 的 CPU–RVV 和厂商 IME2 采用各自的参考策略。
+查看[复现步骤](experiments/reproduce.md)，或直接阅读
+[图表、完整 CSV 和测量设置](experiments/results.md)。
 
 ## 文档与源码
 

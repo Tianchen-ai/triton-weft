@@ -36,7 +36,7 @@
 编码权重字段、显式 partial 位宽、共享 panel 和嵌套输出 state。
 对应作者程序位于可安装的 Bench package。
 
-[![Projection 的源作用域与部分和算术](../assets/paper/model.svg)](../assets/paper/model.svg)
+[![Projection 的源作用域与部分和算术](../assets/paper/model.png)](../assets/paper/model.png)
 
 [模型程序](programs.md)提供 corpus 地图；
 [物理优化](../compiler/optimization-principles.md)说明如何区分 DSL 改进和编译器改进。
