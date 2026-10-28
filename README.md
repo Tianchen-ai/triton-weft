@@ -151,7 +151,7 @@ K3 CPU–RVV and vendor IME2 are separate reference policies.*
 | K3 A100 | DeepSeek 8B Q4_K_M | CPU–RVV | 1.93× | 1.92× |
 | K3 A100 | DeepSeek 8B Q4_K_M | vendor IME2 | 0.985× | 1.17× |
 
-All model runs use eight threads. SG2044/K1/x86 use 128-token prefill and
+SG2044 model runs use 64 threads; K1, K3 and x86 use eight. SG2044/K1/x86 use 128-token prefill and
 32-token decode after a 512-token context; K3 uses 32-token prefill and
 8-token decode after a 32-token context. [All 18 model stages (CSV)](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/models.csv).
 
