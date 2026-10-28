@@ -245,6 +245,11 @@ RISC-V 与 x86 的 scheduler 从 use-def/effect 写 stage/order，共用 expande
 版本与 prologue/steady/epilogue。显式深度 2/3/4 给出有限 stage 域，scheduler 沿读取和
 数值 use-def 分配操作；carry 更新留在末阶段。每个值的版本数来自其跨阶段活跃区间，
 资源从实际展开程序重新计算。DSL stage 的归属和初始化合同保持。
+寄存器 fragment 的唯一末次使用可以在同一 SSA 依赖链上复用；这不是源存储写入。
+流水展开后按克隆产生的实际 use-def 重新选择 accumulator copy/reuse，并同步资源占用，
+不能把展开前的寄存器别名直接沿用到 prologue、steady 和 epilogue。
+已允许的同块单消费者标量浮点乘加在调度前形成显式 FMA；scheduler 不能将其乘积单独
+提前并经 carry 舍入。向量 FMA 仍在物理布局与资源已确定的收尾阶段选择。
 私有 buffer 的版本区间来自实际 payload 读写；只有平坦地址配方能够按 slot 重建。
 完整 backing 容量参与同一私有存储预算，source state/stage 不因此获得新的 birth 或复用层。
 没有 typed transfer 和 latency 事实时，prefetch 保持不存在。

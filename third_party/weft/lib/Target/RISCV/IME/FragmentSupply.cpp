@@ -257,6 +257,12 @@ mlir::LogicalResult weft::riscv_internal::shareFragmentStorage(
     if (mlir::failed(unrolled))
       return loop.emitError("bounded packed-layer issue group could not be materialized");
   }
+  if (!issues.empty())
+    module.walk([&](riscv::KernelOp kernel) {
+      // Peeling/unrolling can expose a shared outer initializer. Recompute
+      // ties before any verifier or resource query consumes the cloned uses.
+      selectFragmentRegisterReuse(kernel);
+    });
 
   llvm::SmallVector<riscv::IMEFragmentStorageLoadOp> reads;
   module.walk([&](riscv::IMEFragmentStorageLoadOp read) {

@@ -6,6 +6,7 @@
 #include "Analysis/ValueLiveness.h"
 #include "Weft/Analysis/PhysicalDependence.h"
 #include "Weft/Dialect/RISCV/IR/Memory.h"
+#include "Weft/Dialect/RISCV/IR/Fragment.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "Weft/Target/RISCV/RISCVCompilation.h"
 #include "mlir/IR/Dominance.h"
@@ -268,11 +269,15 @@ LogicalResult readonlyUnit(Operation *operation, const PipelineStorage &storage,
     }
     if (!isPipelineShapeBinding(nested) && !riscv::hasOnlyReadEffects(nested)) {
       if (storage.privateEffects(nested)) return WalkResult::advance();
-      // A copied register-fragment accumulator writes only its new SSA result.
-      // It has no external memory effect; stage dependencies preserve the
-      // accumulator chain and later resource closure decides physical reuse.
+      // A register-fragment accumulator writes its SSA result, not source
+      // storage. Reuse is also local when the input has its unique final use
+      // here; the SSA edge carries that ordering across stages. Expansion must
+      // rebind this use-dependent policy for the cloned versions.
       if (auto mma = dyn_cast<riscv::IMEFragmentMMAOp>(nested);
-          mma && !mma.getMemoryClobber() && mma.getAccumulatorPolicy() == "copy")
+          mma && !mma.getMemoryClobber() &&
+          (mma.getAccumulatorPolicy() == "copy" ||
+           (mma.getAccumulatorPolicy() == "reuse" &&
+            riscv::canReuseFragmentAccumulator(mma))))
         return WalkResult::advance();
       if (auto effects = dyn_cast<MemoryEffectOpInterface>(nested)) {
         SmallVector<MemoryEffects::EffectInstance> instances;

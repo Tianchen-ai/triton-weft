@@ -292,6 +292,35 @@ public:
   }
   void runOnOperation() override {
     SmallVector<riscv::BinaryOp> consumers;
+    SmallVector<riscv::IMEFragmentMMAOp> seeded;
+    getOperation().walk([&](riscv::IMEFragmentMMAOp mma) {
+      if (mma.getAccumulator().getDefiningOp<riscv::IMEZeroOp>())
+        seeded.push_back(mma);
+    });
+    for (auto mma : seeded) {
+      auto zero = mma.getAccumulator().getDefiningOp<riscv::IMEZeroOp>();
+      auto kernel = mma->getParentOfType<riscv::KernelOp>();
+      if (!kernel || kernel.getResourcesMaterialized() ||
+          zero->hasAttr("birth_id") ||
+          !mma->getParentOfType<scf::ForOp>() ||
+          (zero->getBlock() == mma->getBlock() && zero.getResult().hasOneUse()))
+        continue;
+      auto width = riscv::fragmentZeroPrefixWidth(zero.getResult().getType(), kernel.getTarget());
+      if (!width) continue;
+      // A physical zero is freely rematerializable. A shared/outer seed would
+      // otherwise copy complete hardware rows for every partial-row MMA, even
+      // though only a short initialized prefix belongs to the logical result.
+      OpBuilder builder(mma);
+      auto local = cast<riscv::IMEZeroOp>(builder.clone(*zero));
+      local.setLeafAttr(leaf(builder, "ime", "fragment-init", "ime.zero.local-prefix",
+                           "ime.zero.local-prefix", 0, 0, 0, 0, "none", "exact", {*width}));
+      mma.getAccumulatorMutable().assign(local.getResult());
+      if (zero.getResult().use_empty()) zero.erase();
+    }
+    if (!seeded.empty())
+      getOperation().walk([&](riscv::KernelOp kernel) {
+        selectFragmentRegisterReuse(kernel);
+      });
     getOperation().walk([&](riscv::IMEZeroOp zero) {
       auto kernel = zero->getParentOfType<riscv::KernelOp>();
       if (!kernel || kernel.getResourcesMaterialized() ||

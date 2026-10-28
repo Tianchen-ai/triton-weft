@@ -17,7 +17,10 @@ class ContractRISCVFloatingPointPass
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ContractRISCVFloatingPointPass)
   ContractRISCVFloatingPointPass() = default;
-  ContractRISCVFloatingPointPass(const ContractRISCVFloatingPointPass &other) : PassWrapper(other) {}
+  explicit ContractRISCVFloatingPointPass(bool scalarOnly) { this->scalarOnly = scalarOnly; }
+  ContractRISCVFloatingPointPass(const ContractRISCVFloatingPointPass &other) : PassWrapper(other) {
+    this->copyOptionValuesFrom(&other);
+  }
   StringRef getArgument() const override { return "weft-riscv-contract-floating-point"; }
   StringRef getDescription() const override {
     return "Contract local single-use floating multiply/add/subtract into typed FMA operations";
@@ -38,6 +41,7 @@ public:
         Value accumulator = add->getOperand(1 - operand);
         Type result = add.getResult().getType();
         auto shaped = dyn_cast<riscv::ValueType>(result);
+        if (scalarOnly && shaped) continue;
         Type element = shaped ? shaped.getElementType() : result;
         if (!element.isF32() && !element.isF64()) continue;
         const StringRef kind = add.getKind() == "add" ? "add" :
@@ -128,6 +132,8 @@ public:
     }
   }
 private:
+  Option<bool> scalarOnly{*this, "scalar-only", llvm::cl::init(false),
+      llvm::cl::desc("Freeze scalar multiply/add contraction before software scheduling")};
   Statistic contracted{this, "weft-pointwise-fma", "Single-use floating multiply/add pairs contracted"};
   Statistic scalarAddendsRetained{this, "weft-fma-scalar-addends-retained",
                                   "Scalar addends retained after accounting for broadcast/copy issue work"};
@@ -138,6 +144,6 @@ private:
 };
 } // namespace
 
-std::unique_ptr<Pass> weft::createContractRISCVFloatingPointPass() {
-  return std::make_unique<ContractRISCVFloatingPointPass>();
+std::unique_ptr<Pass> weft::createContractRISCVFloatingPointPass(bool scalarOnly) {
+  return std::make_unique<ContractRISCVFloatingPointPass>(scalarOnly);
 }

@@ -173,7 +173,7 @@ enum class PassID {
   BindSource, Convert, PointerOffsets, EncodedValues, Reductions, GroupedArithmetic, NumericConversions, Atomics, Select, Layouts, LocalWindows, CanonicalizeLayouts, Memory,
   SharedSupply, PrepareComposites, DenseContractions, Composites, SelectPanelTransfers, PanelTransfers,
   DenseFragments, Values, LocalProjections, Programs, RecordLoops, NestedMemory, Bitplanes,
-  Hoist, FullTiles, Schedule, Pipeline, SCCP, Control, Fragments, ShareWindows,
+  Hoist, FullTiles, ScalarFMA, Schedule, Pipeline, SCCP, Control, Fragments, ShareWindows,
   PartialTopology, PartialAccumulators, Unroll, PartialExtractions,
   DeadLayouts, ConsumerLayouts, ByteProjections, ReplicaLoads,
   SpecializeMemory, DenseTransfers, FMAIssues, PointwiseFMA, IntegerPointwise, IntegerMACs, ScalarPackets, Leaves, ScalarPrimes, Snapshots, ReductionBounds, LeafResources,
@@ -224,6 +224,9 @@ constexpr Entry prefix[] = {
     {PassID::FullTiles, "scheduling"},
     {PassID::SCCP, "scheduling"},
     {PassID::Fragments, "scheduling"},
+    // Keep an approved local FMA atomic across software pipeline stages. A
+    // product carried separately would round before the next iteration's add.
+    {PassID::ScalarFMA, "scheduling"},
     {PassID::Schedule, "scheduling"},
     {PassID::Pipeline, "scheduling"},
     {PassID::SCCP, "scheduling"},
@@ -361,6 +364,7 @@ std::unique_ptr<Pass> makePass(PassID id, const RISCVCompilerOptions &options,
   case PassID::SpecializeMemory: return createSpecializeRISCVMemoryPass();
   case PassID::DenseTransfers: return createSelectRISCVDenseTransfersPass();
   case PassID::FMAIssues: return createSelectRISCVFMAIssuesPass();
+  case PassID::ScalarFMA: return createContractRISCVFloatingPointPass(true);
   case PassID::PointwiseFMA: return createContractRISCVFloatingPointPass();
   case PassID::LocalAlignment: return createAlignRISCVLocalStoragePass();
   case PassID::ScalarPackets: return createSelectRISCVScalarPacketsPass();

@@ -417,10 +417,26 @@ public:
             // of rebuilding one scalar chain per reduced slot.
             combineArity = sourceSlots;
             sourcePlan = std::move(*source);
-          } else if (resources > kernel.getTarget().getVectorRegisters()) {
-            // A smaller direct/reduced set is selected below, before writing
-            // any concrete partial-set operations or changing the dot inputs.
-            kind = "reduced_scaled";
+          } else {
+            if (reduceBeforeScale && partialSlots > 1) {
+              // The replica axis is consumed by this integer reduction. Keep
+              // the scaled singleton lanes in vector MAC chains until their
+              // final join, rather than extracting every coefficient product.
+              // The independent policy retains two chains when the domain
+              // partitions evenly; their types below account for both live
+              // results and the complete original set of terms.
+              combineArity =
+                  kernel.getTarget().getPartialCombinePolicy() ==
+                              "independent-multilevel" &&
+                          partialSlots % 2 == 0
+                      ? 2
+                      : 1;
+            }
+            if (resources > kernel.getTarget().getVectorRegisters()) {
+              // A smaller direct/reduced set is selected below, before writing
+              // any concrete partial-set operations or changing the dot inputs.
+              kind = "reduced_scaled";
+            }
           }
         }
       auto levelScaledPartialGroups = checkedProduct(

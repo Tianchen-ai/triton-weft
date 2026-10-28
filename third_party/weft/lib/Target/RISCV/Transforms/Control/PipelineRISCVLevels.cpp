@@ -1,6 +1,7 @@
 #include "Weft/Target/RISCV/RISCVPasses.h"
 #include "Transforms/Control/PipelineSchedule.h"
 #include "Transforms/Control/PipelineShapeBindings.h"
+#include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
@@ -30,7 +31,8 @@ void copyLoopAttributes(scf::ForOp source, Operation *target, bool levelIdentity
 FailureOr<PipelineExpansion> riscv_internal::expandPipeline(
     const PipelineSchedule &schedule, IRRewriter &b, int64_t &shapeIdentity) {
   if (failed(schedule.verify()) || failed(verifyPipelineShapeStages(schedule.loop))) return failure();
-  return expandPhysicalPipeline(schedule, b, [&](IRRewriter &rewriter, Operation *source, IRMapping &values) {
+  auto kernel = schedule.loop->getParentOfType<riscv::KernelOp>();
+  auto expanded = expandPhysicalPipeline(schedule, b, [&](IRRewriter &rewriter, Operation *source, IRMapping &values) {
     return clonePipelineOperation(rewriter, source, values, shapeIdentity);
   }, copyLoopAttributes,
   [&](IRRewriter &rewriter, const PhysicalPipelineBuffer &buffer) -> FailureOr<Value> {
@@ -49,6 +51,11 @@ FailureOr<PipelineExpansion> riscv_internal::expandPipeline(
         buffer.allocation->getResult(0).getType(), storage, slot,
         rewriter.getI64IntegerAttr(buffer.bytes), rewriter.getI64IntegerAttr(buffer.versions())).getResult();
   });
+  if (succeeded(expanded))
+    // Prologue/steady/epilogue cloning changes accumulator consumers. Recompute
+    // ties and their resource charge before trial or final resource analysis.
+    selectFragmentRegisterReuse(kernel);
+  return expanded;
 }
 
 namespace {
@@ -78,6 +85,9 @@ public:
       auto expanded = expandPipeline(*schedule, b, identity);
       if (failed(expanded)) { signalPassFailure(); return; }
       b.replaceOp(loop, expanded->guard.getResults());
+      getOperation().walk([&](riscv::KernelOp kernel) {
+        selectFragmentRegisterReuse(kernel);
+      });
     }
     bool remaining = false;
     getOperation().walk([&](Operation *operation) {

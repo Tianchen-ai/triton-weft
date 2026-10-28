@@ -426,8 +426,12 @@ mlir::Value exactIntegerExtensionInput(mlir::Value value) {
   auto input = op->getOperand(0);
   auto from = mlir::dyn_cast<mlir::IntegerType>(riscv_internal::logicalElement(input.getType()));
   auto to = mlir::dyn_cast<mlir::IntegerType>(riscv_internal::logicalElement(value.getType()));
-  if (!from || !to || from.isSignless() || from.getSignedness() != to.getSignedness() ||
+  if (!from || !to || from.isSignless() || to.isSignless() ||
       from.getWidth() >= to.getWidth()) return {};
+  if (from.getSignedness() != to.getSignedness()) {
+    auto range = riscv_internal::integerRange(input);
+    if (!range || !range->fits(to)) return {};
+  }
   return input;
 }
 
@@ -457,9 +461,11 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
         auto narrowElement = narrowType ? mlir::dyn_cast<mlir::IntegerType>(narrowType.getElementType())
                                         : mlir::IntegerType();
         auto narrowScale = mlir::dyn_cast<mlir::IntegerType>(narrowScalar.getType());
+        auto scaleRange = narrowScale ? riscv_internal::integerRange(narrowScalar)
+                                     : std::nullopt;
         auto widening = narrowElement && narrowScale &&
-            narrowElement.getSignedness() == narrowScale.getSignedness() &&
-            narrowScale.getWidth() <= narrowElement.getWidth()
+            narrowScale.getWidth() <= narrowElement.getWidth() &&
+            scaleRange && scaleRange->fits(narrowElement)
             ? riscv::pointwiseIntegerMACInstruction(kernel.getTarget(), narrowType, narrowElement, result)
             : llvm::StringRef();
         if (widening == "rvv.vwmacc.vx" || widening == "rvv.vwmaccu.vx") {
@@ -474,8 +480,13 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
       auto rowScale = scalar ? mlir::dyn_cast<riscv::ValueType>(scalar.getType()) : riscv::ValueType();
       auto element = input ? mlir::dyn_cast<mlir::IntegerType>(input.getElementType()) : mlir::IntegerType();
       if (!input || !element) continue;
-      if (!rowScale && (!scale || scale.isSignless() ||
-          scale.getSignedness() != element.getSignedness() || scale.getWidth() > element.getWidth())) continue;
+      if (!rowScale) {
+        if (!scale || scale.isSignless() || scale.getWidth() > element.getWidth()) continue;
+        if (scale.getSignedness() != element.getSignedness()) {
+          auto range = riscv_internal::integerRange(scalar);
+          if (!range || !range->fits(element)) continue;
+        }
+      }
       auto instruction = riscv::pointwiseIntegerMACInstruction(kernel.getTarget(), input,
           rowScale ? mlir::Type(rowScale) : mlir::Type(element), result);
       if (instruction != "rvv.vmacc.vx" && instruction != "rvv.vwmacc.vx" &&
