@@ -1471,6 +1471,9 @@ private:
         return knownPowerOfTwoMultiple(definition->getOperand(0), divisor, depth + 1);
     }
     if (auto arg = dyn_cast<BlockArgument>(value)) {
+      if (auto function = dyn_cast<func::FuncOp>(arg.getOwner()->getParentOp()))
+        if (auto multiple = function.getArgAttrOfType<IntegerAttr>(arg.getArgNumber(), "weft.x86.divisibility"))
+          return multiple.getInt() > 0 && multiple.getInt() % divisor == 0;
       auto loop = dyn_cast_or_null<scf::ForOp>(arg.getOwner()->getParentOp());
       return loop && value == loop.getInductionVar() &&
              knownPowerOfTwoMultiple(loop.getLowerBound(), divisor, depth + 1) &&
@@ -3597,8 +3600,20 @@ private:
     }
     auto results = flattenTypes(op.getResultTypes(), op);
     if (failed(results)) return failure();
+    // A private helper is specialized at this source call site. Keep the
+    // physical descriptor constants (unit strides, layouts, partitions and
+    // validity) as constants, just as in its inlined body. Passing them as
+    // opaque native arguments loses the proofs used by the target passes.
+    auto constantInput = [](Value value) {
+      Operation *definition = value.getDefiningOp();
+      return definition && definition->hasTrait<OpTrait::ConstantLike>() &&
+          !definition->getNumOperands() && !definition->getNumRegions();
+    };
+    SmallVector<Value> callInputs;
+    for (Value value : inputs)
+      if (!constantInput(value)) callInputs.push_back(value);
     SmallVector<Type> argumentTypes;
-    for (Value value : inputs) argumentTypes.push_back(value.getType());
+    for (Value value : callInputs) argumentTypes.push_back(value.getType());
     func::FuncOp function;
     {
       OpBuilder::InsertionGuard guard(b);
@@ -3615,6 +3630,15 @@ private:
       function->setAttr("weft.x86.helper", b.getDictionaryAttr({
           b.getNamedAttr("name", b.getStringAttr(op.getName())),
           b.getNamedAttr("noinline", b.getBoolAttr(op.getNoinline()))}));
+      for (auto [index, value] : llvm::enumerate(callInputs)) {
+        if (!value.getType().isIntOrIndex()) continue;
+        // The declared-field window domain is bounded to 4096 elements. Carry
+        // only power-of-two multiples actually proved at this private call.
+        int64_t multiple = 1;
+        while (multiple < 4096 && knownPowerOfTwoMultiple(value, multiple * 2)) multiple *= 2;
+        if (multiple > 1)
+          function.setArgAttr(index, "weft.x86.divisibility", b.getI64IntegerAttr(multiple));
+      }
       Lowering nested(module, target);
       nested.sourceModule = sourceModule;
       nested.shapeSymbols = shapeSymbols;
@@ -3627,18 +3651,29 @@ private:
       nested.shapeBindings = shapeBindings;
       Block *entry = function.addEntryBlock();
       nested.b.setInsertionPointToStart(entry);
+      IRMapping constants;
+      SmallVector<Value> boundInputs;
+      unsigned argument = 0;
+      for (Value value : inputs) {
+        if (!constantInput(value)) {
+          boundInputs.push_back(entry->getArgument(argument++));
+          continue;
+        }
+        if (!constants.contains(value)) nested.b.clone(*value.getDefiningOp(), constants);
+        boundInputs.push_back(constants.lookup(value));
+      }
       unsigned cursor = 0;
-      for (Value source : sourceInputs) nested.bindCarry(source, entry->getArguments(), cursor);
-      for (auto &shape : shapeInputs) nested.dimensions[shape.first] = entry->getArgument(cursor++);
+      for (Value source : sourceInputs) nested.bindCarry(source, boundInputs, cursor);
+      for (auto &shape : shapeInputs) nested.dimensions[shape.first] = boundInputs[cursor++];
       for (const Point &point : activePoints) {
-        nested.activePoints.push_back({point.domain, entry->getArgument(cursor),
-            entry->getArgument(cursor + 1), entry->getArgument(cursor + 2)});
+        nested.activePoints.push_back({point.domain, boundInputs[cursor],
+            boundInputs[cursor + 1], boundInputs[cursor + 2]});
         cursor += 3;
       }
       if (failed(nested.block(op.getBody().front()))) return failure();
       if (nested.b.getInsertionBlock()) return op.emitError("native helper has a path without a return");
     }
-    auto call = func::CallOp::create(b, op.getLoc(), function, inputs);
+    auto call = func::CallOp::create(b, op.getLoc(), function, callInputs);
     bindRange(op.getResults(), call.getResults());
     return success();
   }
