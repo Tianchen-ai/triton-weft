@@ -1804,6 +1804,14 @@ def WeftRISCV_IMEFragmentChunkSplitLoadOp
   let hasVerifier = 1;
 }
 
+def WeftRISCV_IMEFragmentNibbleSplitLoadOp
+    : WeftRISCV_LeafOp<"ime_fragment_nibble_split_load"> {
+  let arguments = (ins Arg<WeftRISCV_ValueType, "", [MemRead]>:$field,
+                       WeftRISCV_AccessAttr:$access, WeftRISCV_LeafAttr:$leaf);
+  let results = (outs WeftRISCV_FragmentType:$low, WeftRISCV_FragmentType:$high);
+  let hasVerifier = 1;
+}
+
 def WeftRISCV_DenseRowWindowGuardOp
     : WeftRISCV_TerminalOp<"dense_row_window_guard", [Pure]> {
   let arguments = (ins WeftRISCV_MemDescType:$source,

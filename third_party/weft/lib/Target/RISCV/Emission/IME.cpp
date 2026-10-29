@@ -145,6 +145,9 @@ mlir::LogicalResult Emitter::compileIMEPack(riscv::IMEPackOp operation) {
 }
 
 mlir::LogicalResult Emitter::compileIMEFragmentStorageLoad(riscv::IMEFragmentStorageLoadOp operation) {
+  if (operation.getLeaf().getInstruction() == "ime.field-nibble-pack")
+    return compileIMEFragmentNibbles(operation, operation.getInput(), operation->getResults(),
+                                     operation.getLeaf().getParameters().asArrayRef());
   Binding projection = bindings.lookup(operation.getInput());
   auto field = fieldFor(projection);
   if (projection.kind != Binding::Kind::Field || !field || !projection.field.relativeIndices.empty())
@@ -194,47 +197,6 @@ mlir::LogicalResult Emitter::compileIMEFragmentStorageLoad(riscv::IMEFragmentSto
              std::to_string(half * 64) + ", " + std::to_string((half + 1) * 64) + ");");
         if (first) line("}");
       }
-      result.parts.push_back(packed);
-    }
-    bindings[operation.getResult()] = std::move(result);
-    return mlir::success();
-  }
-  if (instruction == "ime.field-nibble-pack") {
-    const auto source = operation.getInput().getDefiningOp<riscv::FieldOp>()
-                            .getOwner().getDefiningOp<riscv::LoadOp>().getRegion();
-    const int64_t rows = fragment.getPacking().getRowsPerTile();
-    auto rowExtent = descriptorExtent(source, fragment.getAxisIds()[fragment.getPacking().getAxisOrder()[0]]);
-    if (!rowExtent) return fail(operation, "nibble packing read lost its active row extent");
-    Binding result;
-    result.kind = Binding::Kind::Fragment;
-    result.fragmentFamily = fragment.getFamily().str();
-    for (int64_t atom = 0; atom < riscv::fragmentPartCount(fragment); ++atom) {
-      llvm::SmallVector<std::string> chunks;
-      for (int64_t half = 0; half < (rows == 8 ? 2 : 1); ++half) {
-        const int64_t first = atom * rows + half * 4;
-        const std::string chunk = fresh("ime_narrow_chunk");
-        line("vint8m1_t " + chunk + " = __riscv_vmv_v_x_i8m1(0, 128);");
-        if (first) line("if ((" + *rowExtent + ") > " + std::to_string(first) + ") {");
-        line(chunk + " = __riscv_vle8_v_i8m1((const int8_t *)" +
-             fieldStorageAddress(owner, *field, storage->byte, std::to_string(first)) + ", " +
-             std::to_string(std::min<int64_t>(rows, 4) * 32) + ");");
-        if (first) line("}");
-        if (operation.getLeaf().getParameters()[0])
-          line(chunk + " = __riscv_vsra_vx_i8m1(" + chunk + ", 4, 128);");
-        chunks.push_back(chunk);
-      }
-      const std::string pair = fresh("ime_narrow_order"), packed = fresh("ime_narrow_fragment");
-      line("vint8m2_t " + pair + ";");
-      line("__asm__ volatile(\"vsetvli t0, zero, e8, m1, ta, ma\\n\\t\"");
-      // vnpack4's 256-bit output chunks consume 512 input bits. Split
-      // pairs of source rows so narrowing restores contiguous row order.
-      line("  \".insn r 0x2b, 7, 0x33, %0, %1, %2\\n\\t\"");
-      line("  : \"=&vr\"(" + pair + ") : \"vr\"(" + chunks[0] + "), \"vr\"(" + chunks[rows == 8 ? 1 : 0] + ") : \"t0\", \"vl\", \"vtype\");");
-      line("vint8m1_t " + packed + ";");
-      line("__asm__ volatile(\"vsetvli t0, zero, e8, m1, ta, ma\\n\\t\"");
-      line("  \".insn r 0x2b, 3, 0x21, %0, %1, %2\\n\\t\"");
-      line("  : \"=&vr\"(" + packed + ") : \"vr\"(__riscv_vget_v_i8m2_i8m1(" + pair + ", 0)),");
-      line("    \"vr\"(__riscv_vget_v_i8m2_i8m1(" + pair + ", 1)) : \"t0\", \"vl\", \"vtype\");");
       result.parts.push_back(packed);
     }
     bindings[operation.getResult()] = std::move(result);
@@ -300,6 +262,73 @@ mlir::LogicalResult Emitter::compileIMEFragmentStorageLoad(riscv::IMEFragmentSto
   line("vint8m1_t " + result.parts.back() + " = " + expression + ";");
   }
   bindings[operation.getResult()] = std::move(result);
+  return mlir::success();
+}
+
+mlir::LogicalResult Emitter::compileIMEFragmentNibbles(mlir::Operation *operation,
+    mlir::Value input, mlir::ValueRange results, llvm::ArrayRef<int64_t> shifts) {
+  Binding projection = bindings.lookup(input);
+  auto field = fieldFor(projection);
+  if (projection.kind != Binding::Kind::Field || !field || !projection.field.relativeIndices.empty())
+    return fail(operation, "nibble read requires its selected field projection binding");
+  Binding owner = bindings.lookup(projection.field.owner);
+  if (owner.kind == Binding::Kind::Slice) {
+    auto record = recordForSlice(projection.field.owner);
+    if (mlir::failed(record)) return mlir::failure();
+    owner = std::move(*record);
+  }
+  if (owner.kind != Binding::Kind::Record || owner.recordElements != 32)
+    return fail(operation, "nibble read requires its declared block32 record binding");
+  auto storage = singleStorageFragment(*field, "0", 8);
+  if (!storage) return fail(operation, "nibble read lost its closed byte projection");
+  auto fragment = mlir::cast<riscv::FragmentType>(results.front().getType());
+  const auto source = input.getDefiningOp<riscv::FieldOp>()
+                          .getOwner().getDefiningOp<riscv::LoadOp>().getRegion();
+  const int64_t rows = fragment.getPacking().getRowsPerTile();
+  auto rowExtent = descriptorExtent(source, fragment.getAxisIds()[fragment.getPacking().getAxisOrder()[0]]);
+  if (!rowExtent) return fail(operation, "nibble read lost its active row extent");
+  llvm::SmallVector<Binding, 0> outputs(results.size());
+  for (auto [value, output] : llvm::zip(results, outputs)) {
+    output.kind = Binding::Kind::Fragment;
+    output.fragmentFamily = mlir::cast<riscv::FragmentType>(value.getType()).getFamily().str();
+  }
+  for (int64_t atom = 0; atom < riscv::fragmentPartCount(fragment); ++atom) {
+    llvm::SmallVector<std::string> chunks;
+    for (int64_t half = 0; half < (rows == 8 ? 2 : 1); ++half) {
+      const int64_t first = atom * rows + half * 4;
+      const std::string chunk = fresh("ime_narrow_chunk");
+      line("vint8m1_t " + chunk + " = __riscv_vmv_v_x_i8m1(0, 128);");
+      if (first) line("if ((" + *rowExtent + ") > " + std::to_string(first) + ") {");
+      line(chunk + " = __riscv_vle8_v_i8m1((const int8_t *)" +
+           fieldStorageAddress(owner, *field, storage->byte, std::to_string(first)) + ", " +
+           std::to_string(std::min<int64_t>(rows, 4) * 32) + ");");
+      if (first) line("}");
+      chunks.push_back(chunk);
+    }
+    const std::string pair = fresh("ime_narrow_order");
+    line("vint8m2_t " + pair + ";");
+    line("__asm__ volatile(\"vsetvli t0, zero, e8, m1, ta, ma\\n\\t\"");
+    // vnpack4 consumes two 512-bit chunks per output chunk. Order the
+    // original rows once before projecting either nibble from each byte.
+    line("  \".insn r 0x2b, 7, 0x33, %0, %1, %2\\n\\t\"");
+    line("  : \"=&vr\"(" + pair + ") : \"vr\"(" + chunks[0] + "), \"vr\"(" + chunks[rows == 8 ? 1 : 0] + ") : \"t0\", \"vl\", \"vtype\");");
+    for (auto [shift, output] : llvm::zip(shifts, outputs)) {
+      std::string ordered = pair;
+      if (shift) {
+        ordered = fresh("ime_narrow_high");
+        line("vint8m2_t " + ordered + " = __riscv_vsra_vx_i8m2(" + pair + ", 4, 256);");
+      }
+      const std::string packed = fresh("ime_narrow_fragment");
+      line("vint8m1_t " + packed + ";");
+      line("__asm__ volatile(\"vsetvli t0, zero, e8, m1, ta, ma\\n\\t\"");
+      line("  \".insn r 0x2b, 3, 0x21, %0, %1, %2\\n\\t\"");
+      line("  : \"=&vr\"(" + packed + ") : \"vr\"(__riscv_vget_v_i8m2_i8m1(" + ordered + ", 0)),");
+      line("    \"vr\"(__riscv_vget_v_i8m2_i8m1(" + ordered + ", 1)) : \"t0\", \"vl\", \"vtype\");");
+      output.parts.push_back(packed);
+    }
+  }
+  for (auto [value, output] : llvm::zip(results, outputs))
+    bindings[value] = std::move(output);
   return mlir::success();
 }
 

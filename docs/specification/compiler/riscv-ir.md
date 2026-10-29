@@ -357,6 +357,9 @@ MMA 可以产生相同的 accumulator 表示。单消费者的零初始 MMA 加�
 不宣称存在 SEW=4。自然 I4 字段可直接供应 fragment，跨两个完整存储 cohort 时分别
 按原地址和有效行读取。显式 I8→I4/U4 截断或右移后截断可选固定窄化 packing leaf；
 读取范围、原读取点、符号、尾部与临时资源由 Physical IR 验证，不能扩大到相邻记录。
+同一读取快照的显式低／高 nibble 投影可以由 `ime_fragment_nibble_split_load` 共同供给。
+两结果各自保留 signedness 与 MMA family，要求相同的轴、shape、packing、有效域和资源几何。
+该操作只共享原 byte 读取与行重排，不合并两条 contraction，也不跨越 snapshot 或 alias 写入。
 
 fragment factors 固定一个硬件 atom，replica factors 固定 M/N 上的有限重复，单 product 最多
 四个 atom 且不重复 K。input/result packing 与完整 resources 由同一 type/leaf 合同约束；

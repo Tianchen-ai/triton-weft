@@ -214,6 +214,59 @@ bool readonlyIssue(mlir::Operation &operation) {
     return mlir::isa<mlir::MemoryEffects::Read>(effect.getEffect());
   });
 }
+
+void shareNibbleReads(mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
+  llvm::SmallVector<riscv::IMEFragmentStorageLoadOp> reads, pending;
+  module.walk([&](riscv::IMEFragmentStorageLoadOp read) {
+    auto kernel = read->getParentOfType<riscv::KernelOp>();
+    if (kernel && !kernel.getResourcesMaterialized() &&
+        read.getLeaf().getInstruction() == "ime.field-nibble-pack")
+      reads.push_back(read);
+  });
+  int64_t shared = 0;
+  for (auto read : reads) {
+    auto field = read.getInput().getDefiningOp<riscv::FieldOp>();
+    auto owner = field ? riscv_internal::sourceLoad(field.getOwner()) : riscv::LoadOp();
+    if (!owner || riscv_internal::needsReadSnapshot(owner) || riscv::readCrossesWrite(owner, read))
+      continue;
+    bool matched = false;
+    for (auto it = pending.begin(); it != pending.end(); ++it) {
+      auto prior = *it;
+      auto priorField = prior.getInput().getDefiningOp<riscv::FieldOp>();
+      auto a = prior.getResult().getType(), b = read.getResult().getType();
+      if (prior->getBlock() != read->getBlock() || !priorField ||
+          priorField.getOwner() != field.getOwner() || priorField.getName() != field.getName() ||
+          priorField.getAccess() != field.getAccess() ||
+          priorField.getResult().getType() != field.getResult().getType() ||
+          prior.getAccess() != read.getAccess() ||
+          prior.getLeaf().getParameters()[0] == read.getLeaf().getParameters()[0] ||
+          a.getRole() != b.getRole() || a.getShape() != b.getShape() ||
+          a.getAxisIds() != b.getAxisIds() || a.getPacking() != b.getPacking() ||
+          a.getLayout() != b.getLayout() || a.getResourceGroups() != b.getResourceGroups())
+        continue;
+      auto low = prior.getLeaf().getParameters()[0] == 0 ? prior : read;
+      auto high = prior.getLeaf().getParameters()[0] == 4 ? prior : read;
+      rewriter.setInsertionPoint(prior);
+      auto split = riscv::IMEFragmentNibbleSplitLoadOp::create(rewriter, prior.getLoc(),
+          low.getResult().getType(), high.getResult().getType(), prior.getInput(), prior.getAccess(),
+          riscv_internal::leaf(rewriter, "ime", "fragment-nibble-split-load",
+              "ime.field-nibble-split", "ime.field-nibble-split", 0, 0, 5,
+              a.getResourceGroups() + b.getResourceGroups(), "none", "agnostic"));
+      riscv_internal::copyOrigin(prior, split);
+      rewriter.replaceOp(low, split.getLow());
+      rewriter.replaceOp(high, split.getHigh());
+      pending.erase(it);
+      ++shared;
+      matched = true;
+      break;
+    }
+    if (!matched) {
+      pending.push_back(read);
+      if (pending.size() > 32) pending.erase(pending.begin());
+    }
+  }
+  if (shared) llvm::errs() << "weft-fragment-supply: nibble-pairs=" << shared << '\n';
+}
 }
 
 mlir::LogicalResult weft::riscv_internal::shareFragmentStorage(
@@ -311,5 +364,6 @@ mlir::LogicalResult weft::riscv_internal::shareFragmentStorage(
   if (eliminated)
     llvm::errs() << "weft-fragment-supply: issue-groups=" << issues.size()
                  << " raw-loads-shared=" << eliminated << '\n';
+  shareNibbleReads(module, rewriter);
   return mlir::success();
 }

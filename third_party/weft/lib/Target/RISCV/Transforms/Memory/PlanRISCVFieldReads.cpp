@@ -39,6 +39,7 @@ bool hasOnlyFragmentSupplyUses(Value field) {
         pending.push_back(projection.getResult());
       } else if (isa<riscv::IMEFragmentStorageLoadOp,
                      riscv::IMEFragmentChunkSplitLoadOp,
+                     riscv::IMEFragmentNibbleSplitLoadOp,
                      riscv::IMEFragmentWindowLoadOp>(user)) {
         observed = true;
       } else if (auto implementation = user->getAttrOfType<riscv::ImplementationAttr>("implementation");

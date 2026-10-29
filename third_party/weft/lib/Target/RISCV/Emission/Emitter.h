@@ -833,6 +833,8 @@ private:
   mlir::LogicalResult compileIMEPack(riscv::IMEPackOp operation);
   mlir::LogicalResult compileIMEZero(riscv::IMEZeroOp operation);
   mlir::LogicalResult compileIMEFragmentStorageLoad(riscv::IMEFragmentStorageLoadOp operation);
+  mlir::LogicalResult compileIMEFragmentNibbles(mlir::Operation *operation, mlir::Value input,
+      mlir::ValueRange results, llvm::ArrayRef<int64_t> shifts);
   mlir::LogicalResult compileIMEFragmentChunkSplitLoad(riscv::IMEFragmentChunkSplitLoadOp operation);
   mlir::LogicalResult compileIMEFragmentWindowLoad(riscv::IMEFragmentWindowLoadOp operation);
   mlir::LogicalResult compileIMEFragmentDenseLoad(riscv::IMEFragmentDenseLoadOp operation);

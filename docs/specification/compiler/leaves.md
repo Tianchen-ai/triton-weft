@@ -313,6 +313,12 @@ handoff 只重排寄存器，实际尾部写入仍由原 store 的 active coordi
 加倍的 LMUL 解码后提取原有 K16 fragments；输入和双宽载体必须都在目标合法 LMUL 集合中。
 跨 cohort 或不足完整 group 的供应保持独立窗口，不能扩大读取范围。
 
+原生 I4 的 `ime.field-nibble-split` 在同一 block32 byte snapshot 中同时形成低四位与高四位
+fragment。两个完整 M4 cohort 各读取一次，在寄存器中只作一次行重排，再分别投影；单个
+cohort 和单行仍保留原有效行与地址。它的两份结果及五组临时载体统一进入资源分析，
+不改变作者显式 shift、截断、signedness 或后续 i32 累加边界。单投影与双投影复用同一
+局部发射实现；共享由供给 pass 决定，emitter 不查找或合并其它 load。
+
 同一 atom 可在 M/N 上组成不超过四个 atom 的完整局部 product，K 仍为 8。FragmentType
 以 fragment factors 保存单 atom 坐标、replica factors 保存有界重复数，shape 和资源组覆盖
 完整 tile；M1 的部分有效硬件 atom 不沿 M 重复。selector 固定 atom 与重复数，pack、MMA 和

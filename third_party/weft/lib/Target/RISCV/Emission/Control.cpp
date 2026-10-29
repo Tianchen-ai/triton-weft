@@ -272,6 +272,8 @@ mlir::LogicalResult Emitter::compileOperation(mlir::Operation &operation) {
     return compileIMEFragmentStorageLoad(load);
   if (auto load = mlir::dyn_cast<riscv::IMEFragmentChunkSplitLoadOp>(operation))
     return compileIMEFragmentChunkSplitLoad(load);
+  if (auto load = mlir::dyn_cast<riscv::IMEFragmentNibbleSplitLoadOp>(operation))
+    return compileIMEFragmentNibbles(load, load.getField(), load->getResults(), {0, 4});
   if (auto load = mlir::dyn_cast<riscv::IMEFragmentWindowLoadOp>(operation))
     return compileIMEFragmentWindowLoad(load);
   if (auto load = mlir::dyn_cast<riscv::IMEFragmentDenseLoadOp>(operation))

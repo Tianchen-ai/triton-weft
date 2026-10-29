@@ -122,6 +122,12 @@ weft::riscv::usedInstructionExtensions(KernelOp kernel) {
     return mlir::WalkResult::advance();
   });
   if (narrowed.wasInterrupted()) return mlir::failure();
+  auto nibblePairs = kernel.walk([&](IMEFragmentNibbleSplitLoadOp split) -> mlir::WalkResult {
+    if (mlir::failed(split.verify())) return mlir::WalkResult::interrupt();
+    extensions.push_back(findRISCVFragmentCapability(split.getLow().getType().getFamily())->extension);
+    return mlir::WalkResult::advance();
+  });
+  if (nibblePairs.wasInterrupted()) return mlir::failure();
   auto unpacks = kernel.walk([&](IMEUnpackOp unpack) -> mlir::WalkResult {
     if (mlir::failed(unpack.verify())) return mlir::WalkResult::interrupt();
     const auto *contract = findRISCVFragmentCapability(unpack.getInput().getType().getFamily());
@@ -356,6 +362,26 @@ mlir::LogicalResult IMEFragmentChunkSplitLoadOp::verify() {
       parameters.size() != 2 || parameters[0] != loadGroups ||
       parameters[1] != fragmentChunkNeedsRowGuard(getField(), fragment))
     return emitOpError("fragment chunk split requires complete block32 row chunks, two exact K16 results and registered packing");
+  return mlir::success();
+}
+
+mlir::LogicalResult IMEFragmentNibbleSplitLoadOp::verify() {
+  auto low = getLow().getType(), high = getHigh().getType();
+  auto lowAccess = fragmentNibblePackReadAccess(getField(), low);
+  auto highAccess = fragmentNibblePackReadAccess(getField(), high);
+  const auto *lowContract = findRISCVFragmentCapability(low.getFamily());
+  const auto *highContract = findRISCVFragmentCapability(high.getFamily());
+  if (!lowAccess || !highAccess || !lowContract || !highContract ||
+      lowContract->extension != highContract->extension ||
+      getAccess() != *lowAccess || *lowAccess != *highAccess ||
+      low.getRole() != high.getRole() || low.getShape() != high.getShape() ||
+      low.getAxisIds() != high.getAxisIds() || low.getPacking() != high.getPacking() ||
+      low.getLayout() != high.getLayout() || low.getResourceGroups() != high.getResourceGroups() ||
+      elementBitWidth(low.getElementType()) != 4 || elementBitWidth(high.getElementType()) != 4 ||
+      !exactLeaf(getLeaf(), "ime", "fragment-nibble-split-load", "ime.field-nibble-split", "none", "agnostic") ||
+      !getLeaf().getParameters().empty() || getLeaf().getTemporaryGroups() != 5 || getLeaf().getLocalBytes() ||
+      getLeaf().getFragmentGroups() != low.getResourceGroups() + high.getResourceGroups())
+    return emitOpError("nibble split requires one block32 byte snapshot and matching low/high 4-bit fragment geometry");
   return mlir::success();
 }
 
