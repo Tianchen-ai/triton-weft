@@ -112,20 +112,23 @@ def validate_ime1(artifact, role):
 
 
 def validate_ime2(artifact, role):
-    if role not in ("i8_decode", "i8_prefill", "i8_prefill_rows8"):
+    if role not in ("i8_decode", "i8_prefill", "i8_prefill_rows8", "i4_affine_prefill_rows8"):
         raise NotImplementedError(f"GGML IME2 has no packed numerical contract for {role}")
     rows = 1 if role == "i8_decode" else 4
+    affine = role == "i4_affine_prefill_rows8"
     interface = _interface(artifact)
-    if len(interface.arguments) != 3 or interface.shape_parameters != ("N", "K", "M"):
-        raise ValueError("GGML IME2 row tile requires W, Xq, Y and N, K, M dimensions")
-    encodings = ("IME2Weight8Rows[32]", f"IME2Activation8Rows[{rows}]", "dense.f32")
+    if len(interface.arguments) != 3 or interface.shape_parameters != (("N", "K") if affine else ("N", "K", "M")):
+        raise ValueError("GGML IME2 row tile requires W, Xq, Y and N,K[,M] dimensions")
+    encodings = ("IME2Weight4AffineRows[32]" if affine else "IME2Weight8Rows[32]",
+                 f"IME2Activation8Rows[{rows}]", "dense.f32")
+    m = "8" if affine else "M"
     for i, arg in enumerate(interface.arguments):
         if (arg.kind, arg.encoding, arg.shape, arg.access, arg.record_elements,
                 arg.storage_bytes, arg.strided, arg.interleave_rows) != (
-                "view", encodings[i], (("N", "K"), ("M", "K"), ("M", "N"))[i],
+                "view", encodings[i], (("N", "K"), (m, "K"), (m, "N"))[i],
                 "write" if i == 2 else "read", 1 if i == 2 else 32,
-                (34, 38, 4)[i], i == 2, (32, rows, 0)[i]) or arg.alignment > (2, 2, 4)[i]:
-            raise ValueError(f"{arg.name} does not match the native IME2 i8 block32 ABI")
+                (19 if affine else 34, 38, 4)[i], i == 2, (32, rows, 0)[i]) or arg.alignment > (2, 2, 4)[i]:
+            raise ValueError(f"{arg.name} does not match the selected native IME2 block32 ABI")
     if tuple(artifact.metadata.single_instance_abi["used_extensions"]) != ("spacemit-ime2",):
         raise ValueError("GGML IME2 binding requires a selected IME2 instruction")
 
@@ -245,6 +248,19 @@ def _spacemit_edits(root):
                     };
                 }
 #endif'''
+    affine_anchor = '                    gemm_kernel        = spacemit_kernels::ime2::gemm_kernel_i8i4;'
+    affine_selected = affine_anchor + '''
+#if defined(GGML_USE_WEFT)
+                    if constexpr (std::is_same_v<BLOC_TYPE, block_q4_K> || std::is_same_v<BLOC_TYPE, block_q4_1>) {
+                        if (auto *binding = ggml_weft_select_ime2(spacemit_kernels::ime2::gemm_kernel_i8i4, src0->type)) {
+                            gemm_kernel = [binding](size_t block, const uint8_t *x,
+                                    const uint8_t *w, const uint8_t *zero, float *y, size_t rows,
+                                    size_t columns, size_t blocks, size_t stride) {
+                                return ggml_weft_call_ime2(binding, block, x, w, zero, y, rows, columns, blocks, stride);
+                            };
+                        }
+                    }
+#endif'''
     graph_anchor = '            for (int i = 0; i < n_nodes; i++) {'
     begin = '''#if defined(GGML_USE_WEFT)
             ggml_weft_begin_graph(n_nodes, nodes, false);
@@ -270,10 +286,16 @@ endif()
     if "ggml_weft_select_ime2" in source:
         if source.count(selected) != 2 or begin not in graph or node_begin not in graph or node_end not in graph or build_hook not in build:
             raise CompilationError("llama.cpp contains an incomplete standalone SpacemiT integration")
-        return {}
-    if source.count(anchor) != 2:
+        if source.count(affine_selected) == 2:
+            return {}
+        if "ggml_weft_select_ime2(spacemit_kernels::ime2::gemm_kernel_i8i4" in source:
+            raise CompilationError("llama.cpp contains an incomplete IME2 affine prefill integration")
+        if source.count(affine_anchor) != 2:
+            raise CompilationError("SpacemiT IME2 MUL_MAT and MUL_MAT_ID affine-i4 boundaries have changed")
+        return {path: source.replace(affine_anchor, affine_selected)}
+    if source.count(anchor) != 2 or source.count(affine_anchor) != 2:
         raise CompilationError("SpacemiT IME2 MUL_MAT and MUL_MAT_ID i8 boundaries have changed")
-    source = header + source.replace(anchor, selected)
+    source = header + source.replace(anchor, selected).replace(affine_anchor, affine_selected)
     graph = header + _once(graph, graph_anchor, begin + graph_anchor)
     graph = _once(graph, node_anchor, node_begin + node_anchor)
     graph = _once(graph, end_anchor, node_end + end_anchor)

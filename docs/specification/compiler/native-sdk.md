@@ -181,6 +181,12 @@ M4/M1 分派及激活布局一致，单行角色也可处理 prefill 的尾行�
 cohort。仅当当前 GGML worker 的剩余行数至少为 8 时调用，并向上游返回已处理 8 行；
 输出 stride 与原调用一致。剩余 4 行使用已绑定的 `i8_prefill` 或原生实现，单行仍遵守
 独立的 M1 storage 合同。该角色不扩大 worker 任务范围，不申请新的线程或重排输入。
+`ggml.ime2/i4_affine_prefill_rows8` 绑定 block32 affine Q4 的整数 prefill 路线：
+`IME2Weight4AffineRows[32]` 的 record 为 19 字节，激活仍为 `IME2Activation8Rows[4]`。
+artifact 固定 M=8，维度 ABI 为 N,K；输出带显式行列 stride。只在当前 worker 至少剩余八行、
+完整 N32 cohort 且上游提供 affine zero-point 标记时调用，返回消费八行。其余调用继续由原
+vendor 函数处理，尤其是 M1 的 HP/f16 数值路线不绑定到整数程序。权重量化、TCM 拷贝和线程
+分工保持原调用合同。`ggml_weft_ime2_i4_calls()` 单独观察该角色的实际命中。
 `install_spacemit_source(...)` 可给已有 CPU package adapter 的源码树安装该独立后端 hooks；
 它逐项核对两个 i8 调用点及 graph/node 边界，并与 CPU backend 共用 package 和 counters。
 构建保留上游 `GGML_SPACEMIT`，运行时仍须启用厂商 backend 并选择具有 IME2 的实际 workers。

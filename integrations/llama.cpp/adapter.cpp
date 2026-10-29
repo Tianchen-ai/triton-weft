@@ -21,8 +21,10 @@ struct ggml_weft_ime1_binding {
 
 struct ggml_weft_ime2_binding {
   void (*selected[3])(const uint8_t *, const uint8_t *, float *, size_t, size_t, size_t, size_t, size_t) = {};
+  void (*affine_prefill)(const uint8_t *, const uint8_t *, float *, size_t, size_t, size_t, size_t) = nullptr;
   ggml_weft_ime1_t original = nullptr;
   uint64_t calls = 0;
+  uint64_t affineCalls = 0;
 };
 
 namespace {
@@ -111,7 +113,7 @@ struct ThreadState {
   std::array<std::array<bool, 2>, GGML_TYPE_COUNT> checkedAMX{};
   std::array<bool, GGML_TYPE_COUNT> checkedDots{}, checkedQuantizers{};
   std::array<std::array<bool, 2>, 2> checkedPacked{};
-  std::array<bool, 3> checkedIME2{};
+  std::array<bool, 4> checkedIME2{};
   void (*quantize)(const float *, uint8_t *, size_t) = nullptr;
   ~ThreadState() { if (registry) registry->detach(&counters); }
 };
@@ -213,29 +215,32 @@ struct PackedIME {
 
 struct PackedIME2 {
   weft::kernel kernel;
-  PackedDot function;
-  PackedIME2(weft::kernel value, size_t rows) : kernel(std::move(value)) {
+  PackedDot function = nullptr;
+  void (*affineFunction)(const uint8_t *, const uint8_t *, float *, size_t, size_t, size_t, size_t) = nullptr;
+  PackedIME2(weft::kernel value, size_t rows, bool affine = false) : kernel(std::move(value)) {
     require(kernel.uses_extension("spacemit-ime2"), "IME2 binding requires an artifact using IME2");
     auto info = kernel.info();
-    require(info.argument_count == 3 && info.dimension_count == 3 &&
+    require(info.argument_count == 3 && info.dimension_count == (affine ? 2 : 3) &&
             std::strcmp(info.dimensions[0], "N") == 0 && std::strcmp(info.dimensions[1], "K") == 0 &&
-            std::strcmp(info.dimensions[2], "M") == 0, "IME2 row tile requires N, K, M dimensions");
-    const char *encodings[] = {"IME2Weight8Rows[32]",
+            (affine || std::strcmp(info.dimensions[2], "M") == 0),
+            "IME2 row tile requires N, K and either a dynamic M or the fixed affine M8 contract");
+    const char *encodings[] = {affine ? "IME2Weight4AffineRows[32]" : "IME2Weight8Rows[32]",
                               rows == 4 ? "IME2Activation8Rows[4]" : "IME2Activation8Rows[1]", "dense.f32"};
     for (size_t index = 0; index < 3; ++index) {
       auto arg = kernel.argument(index);
       require(arg.kind == WEFT_VIEW && arg.rank == 2 && arg.strided == (index == 2) &&
               std::strcmp(arg.encoding, encodings[index]) == 0 &&
-              std::strcmp(arg.shape[0], index ? "M" : "N") == 0 &&
+              std::strcmp(arg.shape[0], index ? (affine ? "8" : "M") : "N") == 0 &&
               std::strcmp(arg.shape[1], index == 2 ? "N" : "K") == 0 &&
               arg.access == (index == 2 ? WEFT_WRITE : WEFT_READ) &&
               arg.interleave_rows == (index == 0 ? 32 : index == 1 ? rows : 0) &&
               arg.record_elements == (index == 2 ? 1 : 32) &&
-              arg.storage_bytes == (index == 0 ? 34 : index == 1 ? 38 : 4) &&
+              arg.storage_bytes == (index == 0 ? (affine ? 19 : 34) : index == 1 ? 38 : 4) &&
               arg.alignment <= (index == 2 ? 4 : 2),
-              "IME2 artifact differs from the native signed i8 block32 row-tile ABI");
+              "IME2 artifact differs from the selected native block32 row-tile ABI");
     }
-    function = reinterpret_cast<decltype(function)>(kernel.entry());
+    if (affine) affineFunction = reinterpret_cast<decltype(affineFunction)>(kernel.entry());
+    else function = reinterpret_cast<decltype(function)>(kernel.entry());
   }
 };
 
@@ -321,7 +326,9 @@ struct Adapter {
   std::array<std::array<std::unique_ptr<PackedIME>, 2>, 2> packed;
   std::atomic<uint64_t> packedCalls{0};
   std::array<std::unique_ptr<PackedIME2>, 3> ime2;
+  std::unique_ptr<PackedIME2> ime2AffinePrefill;
   std::atomic<uint64_t> ime2Calls{0};
+  std::atomic<uint64_t> ime2AffineCalls{0};
   std::array<std::array<std::unique_ptr<PackedAMX>, 2>, GGML_TYPE_COUNT> amx;
   std::atomic<uint64_t> amxCalls{0};
   std::shared_ptr<CounterRegistry> counters = std::make_shared<CounterRegistry>();
@@ -357,6 +364,11 @@ struct Adapter {
       packed[affine][single] = std::make_unique<PackedIME>(package.get_kernel(name), affine, single ? 1 : 4);
     }
     for (const auto &[role, name] : bindings("ggml.ime2")) {
+      if (role == "i4_affine_prefill_rows8") {
+        require(!ime2AffinePrefill, "duplicate IME2 affine prefill role");
+        ime2AffinePrefill = std::make_unique<PackedIME2>(package.get_kernel(name), 4, true);
+        continue;
+      }
       require(role == "i8_prefill" || role == "i8_decode" || role == "i8_prefill_rows8",
               "unsupported IME2 packed role: " + role);
       const size_t slot = role == "i8_decode" ? 1 : role == "i8_prefill_rows8" ? 2 : 0;
@@ -376,6 +388,7 @@ struct Adapter {
     for (const auto &entry : quantizers) any |= bool(entry);
     for (const auto &roles : packed) for (const auto &entry : roles) any |= bool(entry);
     for (const auto &entry : ime2) any |= bool(entry);
+    any |= bool(ime2AffinePrefill);
     for (const auto &roles : amx) for (const auto &entry : roles) any |= bool(entry);
     require(any, "package does not contain supported GGML bindings");
   }
@@ -432,6 +445,7 @@ void ggml_weft_begin_graph(int nodeCount, ggml_tensor *const *nodes, bool extern
 
 uint64_t ggml_weft_ime1_calls(void) { return adapter().packedCalls.load(std::memory_order_relaxed); }
 uint64_t ggml_weft_ime2_calls(void) { return adapter().ime2Calls.load(std::memory_order_relaxed); }
+uint64_t ggml_weft_ime2_i4_calls(void) { return adapter().ime2AffineCalls.load(std::memory_order_relaxed); }
 uint64_t ggml_weft_amx_calls(void) { return adapter().amxCalls.load(std::memory_order_relaxed); }
 
 ggml_weft_amx_binding ggml_weft_select_amx(ggml_type weightType, bool prefill, size_t k) {
@@ -502,6 +516,12 @@ ggml_weft_ime1_binding *ggml_weft_select_ime1(ggml_weft_ime1_t original, ggml_ty
 size_t ggml_weft_call_ime2(ggml_weft_ime2_binding *binding, size_t block,
                         const uint8_t *x, const uint8_t *w, const uint8_t *zero,
                         float *y, size_t rows, size_t columns, size_t blocks, size_t stride) {
+  if (binding->affine_prefill && block == 32 && zero && rows >= 8 && columns > 0 && columns % 32 == 0) {
+    binding->affine_prefill(w, x, y, columns, blocks * 32, stride, 1);
+    ++binding->calls;
+    ++binding->affineCalls;
+    return 8;
+  }
   const size_t tileRows = rows >= 8 && binding->selected[2] ? 8 : rows >= 4 ? 4 : 1;
   const auto selected = binding->selected[tileRows == 8 ? 2 : tileRows == 1 ? 1 : 0];
   if (selected && block == 32 && !zero && rows > 0 && columns > 0 && columns % 32 == 0) {
@@ -513,21 +533,32 @@ size_t ggml_weft_call_ime2(ggml_weft_ime2_binding *binding, size_t block,
 }
 
 ggml_weft_ime2_binding *ggml_weft_select_ime2(ggml_weft_ime1_t original, ggml_type weightType) {
-  require(weightType == GGML_TYPE_Q6_K || weightType == GGML_TYPE_Q8_0,
-          "IME2 signed i8 selection requires Q6_K or Q8_0 packed weights");
+  const bool affine = weightType == GGML_TYPE_Q4_K || weightType == GGML_TYPE_Q4_1;
+  require(affine || weightType == GGML_TYPE_Q6_K || weightType == GGML_TYPE_Q8_0,
+          "IME2 selection requires the registered signed-i8 or affine-i4 packed weights");
   const auto &entries = adapter().ime2;
-  if (!entries[0] && !entries[1] && !entries[2]) return nullptr;
+  const auto &affineEntry = adapter().ime2AffinePrefill;
+  if (affine ? !affineEntry : (!entries[0] && !entries[1] && !entries[2])) return nullptr;
   auto &state = threadState();
   auto &binding = ime2Dispatch;
+  binding.affine_prefill = nullptr;
   for (size_t single = 0; single < entries.size(); ++single) {
     binding.selected[single] = nullptr;
-    if (!entries[single]) continue;
+    if (affine || !entries[single]) continue;
     if (!state.stableGraph || !state.checkedIME2[single]) {
       try { entries[single]->kernel.check_thread(); }
       catch (const std::exception &error) { fail(error.what()); }
       state.checkedIME2[single] = true;
     }
     binding.selected[single] = entries[single]->function;
+  }
+  if (affine) {
+    if (!state.stableGraph || !state.checkedIME2[3]) {
+      try { affineEntry->kernel.check_thread(); }
+      catch (const std::exception &error) { fail(error.what()); }
+      state.checkedIME2[3] = true;
+    }
+    binding.affine_prefill = affineEntry->affineFunction;
   }
   require(original, "missing original IME2 implementation");
   binding.original = original;
@@ -550,6 +581,10 @@ void ggml_weft_end_node(void) {
   if (ime2Dispatch.calls) {
     adapter().ime2Calls.fetch_add(ime2Dispatch.calls, std::memory_order_relaxed);
     ime2Dispatch.calls = 0;
+  }
+  if (ime2Dispatch.affineCalls) {
+    adapter().ime2AffineCalls.fetch_add(ime2Dispatch.affineCalls, std::memory_order_relaxed);
+    ime2Dispatch.affineCalls = 0;
   }
 }
 

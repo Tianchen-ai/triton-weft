@@ -24,6 +24,7 @@ typedef struct ggml_weft_counters {
 WEFT_API void ggml_weft_initialize(void);
 WEFT_API uint64_t ggml_weft_ime1_calls(void);
 WEFT_API uint64_t ggml_weft_ime2_calls(void);
+WEFT_API uint64_t ggml_weft_ime2_i4_calls(void);
 WEFT_API uint64_t ggml_weft_amx_calls(void);
 typedef struct ggml_weft_amx_binding {
     void (*function)(const uint8_t *, const uint8_t *, float *, size_t, size_t);
