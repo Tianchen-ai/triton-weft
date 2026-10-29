@@ -325,6 +325,7 @@ private:
   OpBuilder b;
   IRMapping values;
   func::FuncOp cfgFunction;
+  bool unstructuredHelperControl = false;
   llvm::StringMap<int64_t> sourceParameters;
   DenseMap<int64_t, int64_t> shapeBindings;
   DenseMap<int64_t, Value> localExtents;
@@ -3167,7 +3168,7 @@ private:
     return success();
   }
   LogicalResult level(wk::LevelOp op) {
-    if (cfgFunction) return cfgLevel(op);
+    if (unstructuredHelperControl) return cfgLevel(op);
     auto domain = op.getDomain().getDefiningOp<wk::DomainOp>();
     if (!domain) return op.emitError("x86 Level requires its verified domain definition");
     Location loc = op.getLoc();
@@ -3618,6 +3619,10 @@ private:
       nested.sourceModule = sourceModule;
       nested.shapeSymbols = shapeSymbols;
       nested.cfgFunction = function;
+      op.getBody().walk([&](wk::HelperReturnOp ret) {
+        if (ret->getParentOfType<wk::HelperOp>() == op && ret->getParentOp() != op)
+          nested.unstructuredHelperControl = true;
+      });
       nested.sourceParameters = sourceParameters;
       nested.shapeBindings = shapeBindings;
       Block *entry = function.addEntryBlock();
@@ -4594,7 +4599,7 @@ private:
       b.clearInsertionPoint();
       return success();
     }
-    if (cfgFunction) {
+    if (unstructuredHelperControl) {
       if (auto branch = dyn_cast<scf::IfOp>(op)) return cfgIf(branch);
       if (auto loop = dyn_cast<scf::ForOp>(op)) return cfgFor(loop);
       if (auto loop = dyn_cast<scf::WhileOp>(op)) return cfgWhile(loop);

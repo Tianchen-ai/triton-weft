@@ -36,6 +36,9 @@ bool numeric(Type type) {
 // Intrinsic effects come from LLVM's instruction contracts. A spelling prefix
 // or the fact that a helper preserves AMX state is not a purity proof.
 bool pureIntrinsic(func::CallOp call, llvm::LLVMContext &context) {
+  // LLVM's lookup asserts its reserved namespace even for unknown names.
+  // Ordinary helper calls must reach the effect diagnostic, not abort.
+  if (!call.getCallee().starts_with("llvm.")) return false;
   auto id = llvm::Intrinsic::lookupIntrinsicID(call.getCallee());
   if (id == llvm::Intrinsic::not_intrinsic) return false;
   auto attributes = llvm::Intrinsic::getFnAttributes(context, id);
