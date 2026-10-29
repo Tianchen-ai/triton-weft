@@ -145,7 +145,7 @@ mlir::LogicalResult Emitter::compileIMEPack(riscv::IMEPackOp operation) {
 }
 
 mlir::LogicalResult Emitter::compileIMEFragmentStorageLoad(riscv::IMEFragmentStorageLoadOp operation) {
-  if (operation.getLeaf().getInstruction() == "ime.field-nibble-pack")
+  if (operation.getLeaf().getInstruction() == riscv::fragmentNibbleInstruction(operation.getResult().getType()))
     return compileIMEFragmentNibbles(operation, operation.getInput(), operation->getResults(),
                                      operation.getLeaf().getParameters().asArrayRef());
   Binding projection = bindings.lookup(operation.getInput());
@@ -304,6 +304,22 @@ mlir::LogicalResult Emitter::compileIMEFragmentNibbles(mlir::Operation *operatio
            std::to_string(std::min<int64_t>(rows, 4) * 32) + ");");
       if (first) line("}");
       chunks.push_back(chunk);
+    }
+    if (instructionOf(operation).ends_with(".single-row")) {
+      for (auto [shift, output] : llvm::zip(shifts, outputs)) {
+        std::string value = chunks.front();
+        if (shift) {
+          value = fresh("ime_narrow_high");
+          line("vint8m1_t " + value + " = __riscv_vsra_vx_i8m1(" + chunks.front() + ", 4, 32);");
+        }
+        const std::string packed = fresh("ime_narrow_fragment");
+        line("vint8m1_t " + packed + ";");
+        line("__asm__ volatile(\"vsetvli t0, zero, e16, m1, ta, ma\\n\\t\"");
+        line("  \".insn r 0x2b, 3, 0x21, %0, %1, %1\\n\\t\"");
+        line("  : \"=&vr\"(" + packed + ") : \"vr\"(" + value + ") : \"t0\", \"vl\", \"vtype\");");
+        output.parts.push_back(packed);
+      }
+      continue;
     }
     const std::string pair = fresh("ime_narrow_order");
     line("vint8m2_t " + pair + ";");

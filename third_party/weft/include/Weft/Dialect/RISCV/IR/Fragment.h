@@ -18,6 +18,8 @@ int64_t fragmentPartResourceGroups(FragmentType fragment);
 std::optional<AccessAttr> fragmentFieldReadAccess(mlir::Value input, FragmentType result);
 std::optional<AccessAttr> fragmentChunkReadAccess(mlir::Value field, FragmentType result);
 std::optional<AccessAttr> fragmentNibblePackReadAccess(mlir::Value field, FragmentType result);
+llvm::StringRef fragmentNibbleInstruction(FragmentType fragment, bool split = false);
+int64_t fragmentNibbleTemporaryGroups(FragmentType fragment);
 std::optional<AccessAttr> fragmentNibbleCohortReadAccess(mlir::Value field, FragmentType result);
 bool compatibleFragmentAccumulators(FragmentType lhs, FragmentType rhs);
 int64_t fragmentChunkLoadGroups(mlir::Value field, FragmentType fragment, TargetAttr target);

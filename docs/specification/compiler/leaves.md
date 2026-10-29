@@ -315,7 +315,9 @@ handoff 只重排寄存器，实际尾部写入仍由原 store 的 active coordi
 
 原生 I4 的 `ime.field-nibble-split` 在同一 block32 byte snapshot 中同时形成低四位与高四位
 fragment。两个完整 M4 cohort 各读取一次，在寄存器中只作一次行重排，再分别投影；单个
-cohort 和单行仍保留原有效行与地址。它的两份结果及五组临时载体统一进入资源分析，
+cohort 仍保留原有效行与地址。单行的 `.single-row` leaf 直接将原 32 个 byte 投影为一个
+连续 nibble fragment，不引入多行排列；这一选择由 fragment geometry 决定并写入 leaf。
+两份结果与临时载体统一进入资源分析：多行为五组，单行为两组。
 不改变作者显式 shift、截断、signedness 或后续 i32 累加边界。单投影与双投影复用同一
 局部发射实现；共享由供给 pass 决定，emitter 不查找或合并其它 load。
 

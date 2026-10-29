@@ -116,7 +116,8 @@ weft::riscv::usedInstructionExtensions(KernelOp kernel) {
   });
   if (splits.wasInterrupted()) return mlir::failure();
   auto narrowed = kernel.walk([&](IMEFragmentStorageLoadOp load) -> mlir::WalkResult {
-    if (load.getLeaf().getInstruction() != "ime.field-nibble-pack") return mlir::WalkResult::advance();
+    if (load.getLeaf().getInstruction() != fragmentNibbleInstruction(load.getResult().getType()))
+      return mlir::WalkResult::advance();
     if (mlir::failed(load.verify())) return mlir::WalkResult::interrupt();
     extensions.push_back(findRISCVFragmentCapability(load.getResult().getType().getFamily())->extension);
     return mlir::WalkResult::advance();
@@ -365,6 +366,16 @@ mlir::LogicalResult IMEFragmentChunkSplitLoadOp::verify() {
   return mlir::success();
 }
 
+llvm::StringRef weft::riscv::fragmentNibbleInstruction(FragmentType fragment, bool split) {
+  const bool single = fragment.getPacking().getRowsPerTile() == 1;
+  if (split) return single ? "ime.field-nibble-split.single-row" : "ime.field-nibble-split";
+  return single ? "ime.field-nibble-pack.single-row" : "ime.field-nibble-pack";
+}
+
+int64_t weft::riscv::fragmentNibbleTemporaryGroups(FragmentType fragment) {
+  return fragment.getPacking().getRowsPerTile() == 1 ? 2 : 5;
+}
+
 mlir::LogicalResult IMEFragmentNibbleSplitLoadOp::verify() {
   auto low = getLow().getType(), high = getHigh().getType();
   auto lowAccess = fragmentNibblePackReadAccess(getField(), low);
@@ -378,8 +389,8 @@ mlir::LogicalResult IMEFragmentNibbleSplitLoadOp::verify() {
       low.getAxisIds() != high.getAxisIds() || low.getPacking() != high.getPacking() ||
       low.getLayout() != high.getLayout() || low.getResourceGroups() != high.getResourceGroups() ||
       elementBitWidth(low.getElementType()) != 4 || elementBitWidth(high.getElementType()) != 4 ||
-      !exactLeaf(getLeaf(), "ime", "fragment-nibble-split-load", "ime.field-nibble-split", "none", "agnostic") ||
-      !getLeaf().getParameters().empty() || getLeaf().getTemporaryGroups() != 5 || getLeaf().getLocalBytes() ||
+      !exactLeaf(getLeaf(), "ime", "fragment-nibble-split-load", fragmentNibbleInstruction(low, true), "none", "agnostic") ||
+      !getLeaf().getParameters().empty() || getLeaf().getTemporaryGroups() != fragmentNibbleTemporaryGroups(low) || getLeaf().getLocalBytes() ||
       getLeaf().getFragmentGroups() != low.getResourceGroups() + high.getResourceGroups())
     return emitOpError("nibble split requires one block32 byte snapshot and matching low/high 4-bit fragment geometry");
   return mlir::success();
@@ -676,13 +687,13 @@ mlir::LogicalResult IMEFragmentStorageLoadOp::verify() {
       return emitOpError("packed nibble supply requires two complete four-row cohorts per fragment");
     return mlir::success();
   }
-  if (getLeaf().getInstruction() == "ime.field-nibble-pack") {
+  if (getLeaf().getInstruction() == fragmentNibbleInstruction(getResult().getType())) {
     auto expected = fragmentNibblePackReadAccess(getInput(), getResult().getType());
     auto parameters = getLeaf().getParameters().asArrayRef();
     if (!expected || getAccess() != *expected ||
-        !exactLeaf(getLeaf(), "ime", "fragment-storage-load", "ime.field-nibble-pack", "none", "agnostic") ||
+        !exactLeaf(getLeaf(), "ime", "fragment-storage-load", fragmentNibbleInstruction(getResult().getType()), "none", "agnostic") ||
         parameters.size() != 1 || (parameters[0] != 0 && parameters[0] != 4) ||
-        getLeaf().getTemporaryGroups() != 5 || getLeaf().getLocalBytes() ||
+        getLeaf().getTemporaryGroups() != fragmentNibbleTemporaryGroups(getResult().getType()) || getLeaf().getLocalBytes() ||
         getLeaf().getFragmentGroups() != getResult().getType().getResourceGroups())
       return emitOpError("nibble pack read requires exact block32 byte rows and a low/high nibble selection");
     return mlir::success();

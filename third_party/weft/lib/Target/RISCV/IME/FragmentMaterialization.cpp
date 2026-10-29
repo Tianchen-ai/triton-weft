@@ -499,9 +499,10 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
           mlir::OpBuilder::InsertionGuard guard(rewriter);
           rewriter.setInsertionPointAfter(load);
           auto projection = mlir::cast<riscv::FieldOp>(rewriter.clone(*field));
+          auto instruction = riscv::fragmentNibbleInstruction(fragment);
           auto packed = riscv::IMEFragmentStorageLoadOp::create(rewriter, input.getLoc(), fragment,
               projection.getResult(), *geometry, leaf(rewriter, "ime", "fragment-storage-load",
-                  "ime.field-nibble-pack", "ime.field-nibble-pack", 0, 0, 5,
+                  instruction, instruction, 0, 0, riscv::fragmentNibbleTemporaryGroups(fragment),
                   fragment.getResourceGroups(), "none", "agnostic", {shift}));
           copyOrigin(field, packed);
           return packed.getResult();

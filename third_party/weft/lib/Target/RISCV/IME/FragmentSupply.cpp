@@ -220,7 +220,7 @@ void shareNibbleReads(mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
   module.walk([&](riscv::IMEFragmentStorageLoadOp read) {
     auto kernel = read->getParentOfType<riscv::KernelOp>();
     if (kernel && !kernel.getResourcesMaterialized() &&
-        read.getLeaf().getInstruction() == "ime.field-nibble-pack")
+        read.getLeaf().getInstruction() == riscv::fragmentNibbleInstruction(read.getResult().getType()))
       reads.push_back(read);
   });
   int64_t shared = 0;
@@ -247,10 +247,11 @@ void shareNibbleReads(mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
       auto low = prior.getLeaf().getParameters()[0] == 0 ? prior : read;
       auto high = prior.getLeaf().getParameters()[0] == 4 ? prior : read;
       rewriter.setInsertionPoint(prior);
+      auto instruction = riscv::fragmentNibbleInstruction(a, true);
       auto split = riscv::IMEFragmentNibbleSplitLoadOp::create(rewriter, prior.getLoc(),
           low.getResult().getType(), high.getResult().getType(), prior.getInput(), prior.getAccess(),
           riscv_internal::leaf(rewriter, "ime", "fragment-nibble-split-load",
-              "ime.field-nibble-split", "ime.field-nibble-split", 0, 0, 5,
+              instruction, instruction, 0, 0, riscv::fragmentNibbleTemporaryGroups(a),
               a.getResourceGroups() + b.getResourceGroups(), "none", "agnostic"));
       riscv_internal::copyOrigin(prior, split);
       rewriter.replaceOp(low, split.getLow());
