@@ -383,11 +383,12 @@ void selectWidenBinaries(mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
     if (kernel.getResourcesMaterialized() ||
         !riscv::supportsRVVWidenBinary(kernel.getTarget(), left, right, result))
       return;
-    auto element = mlir::cast<mlir::IntegerType>(left.getElementType());
-    if (multiply && (element.getWidth() > 16 ||
+    auto element = mlir::dyn_cast<mlir::IntegerType>(left.getElementType());
+    if (multiply && (!element || element.getWidth() > 16 ||
                      result.getLayout().getValidity() != "full"))
       return;
     const llvm::StringRef instruction =
+        !element ? "rvv.vfwadd.vv" :
         multiply ? (element.isUnsigned() ? "rvv.vwmulu.vv" : "rvv.vwmul.vv")
                  : (element.isUnsigned() ? "rvv.vwaddu.vv" : "rvv.vwadd.vv");
     rewriter.setInsertionPoint(binary);

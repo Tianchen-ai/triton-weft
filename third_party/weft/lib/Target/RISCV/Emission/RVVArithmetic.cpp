@@ -2452,10 +2452,12 @@ mlir::LogicalResult Emitter::compileRVVWidenAdd(riscv::RVVWidenAddOp operation) 
       lhs->kind != Binding::Kind::Vector || rhs->kind != Binding::Kind::Vector)
     return fail(operation, "RVV widening add requires two selected vectors");
   const llvm::StringRef instruction = instructionOf(operation.getOperation());
-  if (instruction != "rvv.vwadd.vv" && instruction != "rvv.vwaddu.vv")
+  if (instruction != "rvv.vwadd.vv" && instruction != "rvv.vwaddu.vv" &&
+      instruction != "rvv.vfwadd.vv")
     return fail(operation, "RVV widening add has no exact selected instruction");
   const std::string intrinsic =
-      std::string(instruction == "rvv.vwadd.vv" ? "__riscv_vwadd_vv_"
+      std::string(instruction == "rvv.vfwadd.vv" ? "__riscv_vfwadd_vv_" :
+                  instruction == "rvv.vwadd.vv" ? "__riscv_vwadd_vv_"
                                                : "__riscv_vwaddu_vv_") +
       vectorSuffix(operation.getResult());
   Binding result;

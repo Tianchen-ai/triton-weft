@@ -384,6 +384,11 @@ multiply。原结果精度、全部 axes 和 carrier factors 必须闭合，不�
 target 合法性判据，memory reads 和外层 traversal 不变；其 window projection、资源重闭合
 和 terminal part 映射仍必须显式成立。
 
+相同的局部选择也接受两个精确浮点扩宽后相加：F16→F32 或 F32→F64，并要求目标提供
+相应的 widening 浮点指令；F16 输入还要求完整向量 F16 运算能力。`rvv_widen_add`
+以 `vfwadd` 在宽精度执行原加法，省去两个独立转换。它保留两个输入先前的 F16/F32
+舍入结果、原 active VL 和宽精度结果，不穿过 narrow、不重结合表达式或归约。
+
 已计算的一维 RVV value 被静态连续 iota 切片时，selector 证明索引加法无 wrap、窗口在
 原值域内且完整落入已选 carrier，然后物化 `rvv_issue_slice`。索引证明与布局传播共用；
 子域的较小 extent 不反向缩窄父值。该规则不重读 encoded field，也不把任意 gather 当作切片。

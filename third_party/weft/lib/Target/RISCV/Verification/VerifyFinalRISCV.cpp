@@ -132,8 +132,10 @@ mlir::LogicalResult verifyDescriptorFacts(mlir::Operation *owner,
 }
 
 bool requiresIntegerWidening(mlir::Operation *operation) {
+  if (auto add = mlir::dyn_cast<riscv::RVVWidenAddOp>(operation))
+    return mlir::isa<mlir::IntegerType>(add.getLhs().getType().getElementType());
   if (mlir::isa<riscv::RVVGroupedMacStepOp, riscv::RVVWidenDotOp,
-                riscv::RVVWidenAddOp, riscv::RVVNarrowShiftRightOp,
+                riscv::RVVNarrowShiftRightOp,
                 riscv::RVVPartialSetOp,
                 riscv::RVVPartialCaptureOp, riscv::RVVPartialCollectOp,
                 riscv::RVVPartialRepackOp,
@@ -157,6 +159,8 @@ bool requiresIntegerWidening(mlir::Operation *operation) {
 }
 
 bool requiresFloatWidening(mlir::Operation *operation) {
+  if (auto add = mlir::dyn_cast<riscv::RVVWidenAddOp>(operation))
+    return mlir::isa<mlir::FloatType>(add.getLhs().getType().getElementType());
   auto widen = mlir::dyn_cast<riscv::WidenOp>(operation);
   return widen && mlir::isa<mlir::FloatType>(
                       riscv_internal::logicalElement(widen.getInput().getType()));

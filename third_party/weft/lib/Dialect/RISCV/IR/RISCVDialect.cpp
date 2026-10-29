@@ -7668,12 +7668,18 @@ bool weft::riscv::supportsRVVWidenBinary(TargetAttr target, ValueType lhs,
     return false;
   auto narrow = mlir::dyn_cast<mlir::IntegerType>(lhs.getElementType());
   auto wide = mlir::dyn_cast<mlir::IntegerType>(result.getElementType());
+  auto narrowFloat = mlir::dyn_cast<mlir::FloatType>(lhs.getElementType());
+  auto wideFloat = mlir::dyn_cast<mlir::FloatType>(result.getElementType());
+  const bool integers = narrow && wide && !narrow.isSignless() && !wide.isSignless() &&
+      narrow.getSignedness() == wide.getSignedness() && narrow.getWidth() >= 8 &&
+      wide.getWidth() == 2 * narrow.getWidth() && target.getHasWideningInteger();
+  const bool floats = narrowFloat && wideFloat && target.getHasWideningFloat() &&
+      ((narrowFloat.isF16() && wideFloat.isF32() && target.getHasVectorF16()) ||
+       (narrowFloat.isF32() && wideFloat.isF64()));
+  if (!integers && !floats) return false;
   auto source = lhs.getLayout();
   auto destination = result.getLayout();
-  return narrow && wide && !narrow.isSignless() && !wide.isSignless() &&
-         narrow.getSignedness() == wide.getSignedness() &&
-         narrow.getWidth() >= 8 && wide.getWidth() == 2 * narrow.getWidth() &&
-         lhs.getShape() == result.getShape() &&
+  return lhs.getShape() == result.getShape() &&
          lhs.getAxisIds() == result.getAxisIds() &&
          source.getCarrier() == "rvv" && destination.getCarrier() == "rvv" &&
          source.getAxisIds() == destination.getAxisIds() &&
@@ -7684,11 +7690,10 @@ bool weft::riscv::supportsRVVWidenBinary(TargetAttr target, ValueType lhs,
          source.getLocalFactors() == destination.getLocalFactors() &&
          source.getValidity() == destination.getValidity() &&
          (source.getValidity() == "full" || source.getValidity() == "tail") &&
-         source.getSew() == narrow.getWidth() &&
-         destination.getSew() == wide.getWidth() &&
+         source.getSew() == lhs.getElementType().getIntOrFloatBitWidth() &&
+         destination.getSew() == result.getElementType().getIntOrFloatBitWidth() &&
          destination.getLmulEighths() == 2 * source.getLmulEighths() &&
          source.getVl() == destination.getVl() &&
-         target.getHasWideningInteger() &&
          supportsRVVLayout(target, source) &&
          supportsRVVLayout(target, destination);
 }
@@ -7697,15 +7702,15 @@ mlir::LogicalResult RVVWidenAddOp::verify() {
   auto kernel = getOperation()->getParentOfType<KernelOp>();
   auto element = mlir::dyn_cast<mlir::IntegerType>(
       getLhs().getType().getElementType());
-  const llvm::StringRef instruction = element && element.isUnsigned()
-                                          ? "rvv.vwaddu.vv" : "rvv.vwadd.vv";
+  const llvm::StringRef instruction = mlir::isa<mlir::FloatType>(getLhs().getType().getElementType())
+      ? "rvv.vfwadd.vv" : element && element.isUnsigned() ? "rvv.vwaddu.vv" : "rvv.vwadd.vv";
   const llvm::StringRef tail = getResult().getType().getLayout().getValidity() == "tail"
                                    ? "agnostic" : "exact";
   if (!kernel || !supportsRVVWidenBinary(kernel.getTarget(), getLhs().getType(),
                                       getRhs().getType(), getResult().getType()) ||
       !exactLeaf(getLeaf(), "rvv", "widen-add", instruction, "none", tail))
     return emitOpError(
-        "RVV widening add requires identical signedness-qualified narrow vectors and a coordinate-identical doubled-width result");
+        "RVV widening add requires identical narrow integer or floating vectors and a coordinate-identical doubled-width result");
   return mlir::success();
 }
 
