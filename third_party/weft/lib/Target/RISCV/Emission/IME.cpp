@@ -861,7 +861,7 @@ mlir::LogicalResult Emitter::compileIMEFragmentMMA(riscv::IMEFragmentMMAOp opera
   auto valid = [&](const Binding &binding, riscv::FragmentType type) {
     return binding.kind == Binding::Kind::Fragment &&
            binding.parts.size() == static_cast<size_t>(riscv::fragmentPartCount(type)) &&
-           binding.fragmentFamily == family;
+           binding.fragmentFamily == type.getFamily();
   };
   if (!valid(lhs, operation.getLhs().getType()) || !valid(rhs, operation.getRhs().getType()) ||
       !valid(accumulator, operation.getAccumulator().getType()))

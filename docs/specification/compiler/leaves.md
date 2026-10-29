@@ -271,6 +271,11 @@ IME capability和operations共同固定：
 - fragment→RVV handoff；
 - exact asm spelling key、constraints、clobbers与memory effect。
 
+同一扩展的不同 MMA family 可以消费同一 RHS fragment，但必须具有完全相同的元素类型、
+shape、逻辑轴、packing、layout 与资源组；每个 MMA 仍逐项验证自己的指令合同。
+供给 pass 只在同一保存的 record、字段及无干扰写入的读取时点合并这类 RHS。
+流水调度前先合并实际 SSA 供给，避免为相同字节建立两套跨阶段版本；emitter 不再作共享决定。
+
 当前SpaceMIT IME1硬件 atom是 signed-i8 `M4×K8` 与 signed-i8 `K8×N4`
 的带 i32 accumulator contraction。注册的 logical M 为 4 或 1；M1 仅暴露第一行，仍使用
 完整硬件 atom 与两个 accumulator register groups，不虚构 M1 指令。lhs按`[M,K]`排列，rhs按

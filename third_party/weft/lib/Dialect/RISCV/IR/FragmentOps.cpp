@@ -448,6 +448,17 @@ std::optional<AccessAttr> weft::riscv::fragmentWindowReadAccess(
   return access;
 }
 
+bool weft::riscv::compatibleFragmentOperands(FragmentType lhs, FragmentType rhs) {
+  const auto *a = findRISCVFragmentCapability(lhs.getFamily());
+  const auto *b = findRISCVFragmentCapability(rhs.getFamily());
+  return a && b && a->extension == b->extension &&
+      (lhs.getRole() == "lhs" || lhs.getRole() == "rhs") &&
+      lhs.getRole() == rhs.getRole() && lhs.getElementType() == rhs.getElementType() &&
+      lhs.getShape() == rhs.getShape() && lhs.getAxisIds() == rhs.getAxisIds() &&
+      lhs.getPacking() == rhs.getPacking() && lhs.getLayout() == rhs.getLayout() &&
+      lhs.getResourceGroups() == rhs.getResourceGroups();
+}
+
 bool weft::riscv::compatibleFragmentAccumulators(FragmentType lhs, FragmentType rhs) {
   const auto *a = findRISCVFragmentCapability(lhs.getFamily());
   const auto *b = findRISCVFragmentCapability(rhs.getFamily());
@@ -1005,6 +1016,9 @@ mlir::LogicalResult IMEFragmentMMAOp::verify() {
   FragmentType result = getResult().getType();
   auto capability = fragmentCapability(*this, getLeaf().getInstruction());
   const auto *contract = findRISCVFragmentCapability(getLeaf().getInstruction());
+  auto selectedRhs = FragmentType::get(getContext(), getLeaf().getInstruction(),
+      rhs.getRole(), rhs.getPacking(), rhs.getElementType(), rhs.getShape(),
+      rhs.getAxisIds(), rhs.getLayout(), rhs.getResourceGroups());
   const bool reuse = getAccumulatorPolicy() == "reuse";
   if ((getAccumulatorPolicy() != "copy" && !reuse) ||
       (reuse && !canReuseFragmentAccumulator(*this)))
@@ -1012,7 +1026,8 @@ mlir::LogicalResult IMEFragmentMMAOp::verify() {
   if (!capability || !contract ||
       !exactLeaf(getLeaf(), "ime", "fragment-mma",
                  capability.getInstruction(), "none", "exact") ||
-      lhs.getFamily() != rhs.getFamily() || result.getFamily() != lhs.getFamily() ||
+      !fragmentCapability(*this, rhs.getFamily()) ||
+      !compatibleFragmentOperands(rhs, selectedRhs) || result.getFamily() != lhs.getFamily() ||
       lhs.getFamily() != capability.getInstruction() ||
       getAccumulator().getType() != result ||
       lhs.getRole() != "lhs" || rhs.getRole() != "rhs" ||

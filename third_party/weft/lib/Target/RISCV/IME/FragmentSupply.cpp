@@ -270,6 +270,54 @@ void shareNibbleReads(mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
 }
 }
 
+void weft::riscv_internal::shareFragmentOperandReads(
+    mlir::Operation *scope, mlir::IRRewriter &rewriter) {
+  llvm::SmallVector<riscv::IMEFragmentStorageLoadOp> reads, previous;
+  scope->walk([&](riscv::IMEFragmentStorageLoadOp read) {
+    auto kernel = read->getParentOfType<riscv::KernelOp>();
+    if (kernel && !kernel.getResourcesMaterialized() &&
+        read.getResult().getType().getRole() == "rhs")
+      reads.push_back(read);
+  });
+  int64_t eliminated = 0;
+  for (auto read : reads) {
+    auto field = read.getInput().getDefiningOp<riscv::FieldOp>();
+    auto owner = field ? riscv_internal::sourceLoad(field.getOwner()) : riscv::LoadOp();
+    if (!owner || riscv_internal::needsReadSnapshot(owner) ||
+        riscv::readCrossesWrite(owner, read))
+      continue;
+    bool erased = false;
+    for (auto prior : previous) {
+      auto priorField = prior.getInput().getDefiningOp<riscv::FieldOp>();
+      if (prior->getBlock() != read->getBlock() || !priorField ||
+          priorField.getOwner() != field.getOwner() || priorField.getName() != field.getName() ||
+          priorField.getAccess() != field.getAccess() ||
+          priorField.getResult().getType() != field.getResult().getType() ||
+          prior.getAccess() != read.getAccess() || prior.getLeaf() != read.getLeaf() ||
+          !riscv::compatibleFragmentOperands(prior.getResult().getType(), read.getResult().getType()))
+        continue;
+      // Signedness of the other MMA operand can select a different instruction
+      // family without changing this packed RHS. Share its actual SSA supply;
+      // the MMA verifier still checks every packing, type, axis and resource.
+      for (mlir::OpOperand &use : llvm::make_early_inc_range(read.getResult().getUses()))
+        if (mlir::isa<riscv::IMEFragmentMMAOp>(use.getOwner()) && use.getOperandNumber() == 1)
+          use.set(prior.getResult());
+      if (read.getResult().use_empty()) {
+        rewriter.eraseOp(read);
+        erased = true;
+        ++eliminated;
+      }
+      break;
+    }
+    if (!erased) {
+      previous.push_back(read);
+      if (previous.size() > 32) previous.erase(previous.begin());
+    }
+  }
+  if (eliminated)
+    llvm::errs() << "weft-fragment-supply: compatible-operands=" << eliminated << '\n';
+}
+
 mlir::LogicalResult weft::riscv_internal::shareFragmentStorage(
     mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
   llvm::SmallVector<mlir::scf::ForOp> issues;
@@ -366,5 +414,6 @@ mlir::LogicalResult weft::riscv_internal::shareFragmentStorage(
     llvm::errs() << "weft-fragment-supply: issue-groups=" << issues.size()
                  << " raw-loads-shared=" << eliminated << '\n';
   shareNibbleReads(module, rewriter);
+  shareFragmentOperandReads(module, rewriter);
   return mlir::success();
 }

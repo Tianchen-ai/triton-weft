@@ -22,6 +22,7 @@ llvm::StringRef fragmentNibbleInstruction(FragmentType fragment, bool split = fa
 int64_t fragmentNibbleTemporaryGroups(FragmentType fragment);
 std::optional<AccessAttr> fragmentNibbleCohortReadAccess(mlir::Value field, FragmentType result);
 bool compatibleFragmentAccumulators(FragmentType lhs, FragmentType rhs);
+bool compatibleFragmentOperands(FragmentType lhs, FragmentType rhs);
 int64_t fragmentChunkLoadGroups(mlir::Value field, FragmentType fragment, TargetAttr target);
 bool fragmentChunkNeedsRowGuard(mlir::Value field, FragmentType fragment);
 int64_t fragmentChunkTemporaryGroups(mlir::Value field, FragmentType fragment);

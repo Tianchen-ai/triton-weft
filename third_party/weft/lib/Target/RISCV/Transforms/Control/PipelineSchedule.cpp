@@ -4,6 +4,7 @@
 #include "Analysis/LocalMemory.h"
 #include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Analysis/ValueLiveness.h"
+#include "IME/FragmentSupply.h"
 #include "Weft/Analysis/PhysicalDependence.h"
 #include "Weft/Dialect/RISCV/IR/Memory.h"
 #include "Weft/Dialect/RISCV/IR/Fragment.h"
@@ -302,7 +303,12 @@ LogicalResult readonlyUnit(Operation *operation, const PipelineStorage &storage,
 // These operations bind coordinates and views. Moving their construction to
 // the consuming stage does not replay a numeric read or a source birth.
 bool replayableDescriptor(Operation *operation) {
-  return isa<riscv::FieldOp, riscv::FieldViewOp, riscv::SliceOp, riscv::SubviewOp,
+  // A numerical Field is a deferred read of its saved record. Keep it with
+  // that read epoch; a consumer on another stage needs the payload, not a
+  // reconstruction of the record load. FieldView remains an address recipe.
+  if (auto field = dyn_cast<riscv::FieldOp>(operation))
+    return !isa<riscv::ValueType>(field.getResult().getType());
+  return isa<riscv::FieldViewOp, riscv::SliceOp, riscv::SubviewOp,
              riscv::ReaxisOp, riscv::LinearViewOp, riscv::ExtentOp,
              riscv::PhysicalPointOp, riscv::RecordCohortOp>(operation);
 }
@@ -322,6 +328,27 @@ bool contractionConsumer(Operation *operation) {
   return true;
 }
 
+FailureOr<Value> materializePipelineFieldRead(Value input,
+                                              IRRewriter &rewriter) {
+  SmallVector<Value> indices;
+  auto field = riscv::fieldReadProjection(input, &indices);
+  auto type = dyn_cast<riscv::ValueType>(input.getType());
+  if (!field || !type) return input;
+  auto access = input.getDefiningOp()->getAttrOfType<riscv::AccessAttr>("access");
+  if (!access)
+    return field.emitError("pipeline field supply has no memory access"), failure();
+  auto temporary = riscv::fieldReadTemporaryGroups(input, type, access, indices);
+  if (!temporary)
+    return field.emitError("pipeline field supply has no closed numeric read"), failure();
+  auto instruction = riscv::fieldReadInstruction(input, type, access);
+  auto read = riscv::FieldReadOp::create(rewriter, input.getLoc(), type,
+      input, indices, access,
+      leaf(rewriter, "transfer", "field-read", instruction, instruction,
+           0, 0, *temporary, 0, "none", "exact"));
+  copyOrigin(input.getDefiningOp(), read);
+  return read.getResult();
+}
+
 LogicalResult materializeContractionReads(scf::ForOp loop) {
   IRRewriter rewriter(loop.getContext());
   llvm::DenseMap<Value, Value> reads;
@@ -337,21 +364,11 @@ LogicalResult materializeContractionReads(scf::ForOp loop) {
         operand.set(found->second);
         continue;
       }
-      auto access = input.getDefiningOp()->getAttrOfType<riscv::AccessAttr>("access");
-      if (!access)
-        return operation.emitError("contraction pipeline supply has no memory access");
-      auto temporary = riscv::fieldReadTemporaryGroups(input, type, access, indices);
-      if (!temporary)
-        return operation.emitError("contraction pipeline supply has no closed numeric read");
       rewriter.setInsertionPoint(&operation);
-      auto instruction = riscv::fieldReadInstruction(input, type, access);
-      auto read = riscv::FieldReadOp::create(rewriter, operation.getLoc(), type,
-          input, indices, access,
-          leaf(rewriter, "transfer", "field-read", instruction, instruction,
-               0, 0, *temporary, 0, "none", "exact"));
-      copyOrigin(input.getDefiningOp(), read);
-      reads[input] = read.getResult();
-      operand.set(read.getResult());
+      auto read = materializePipelineFieldRead(input, rewriter);
+      if (failed(read)) return failure();
+      reads[input] = *read;
+      operand.set(*read);
     }
   }
   return success();
@@ -501,6 +518,8 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
   result.loop = loop;
   if (failed(loopContract(loop, result.descending, true))) return failure();
   result.depth = loop->getAttrOfType<riscv::ScheduleAttr>("weft.riscv.schedule").getPipelineDepth();
+  IRRewriter supplyRewriter(loop.getContext());
+  shareFragmentOperandReads(loop, supplyRewriter);
   // Freeze actual numeric reads before carrying the supply to another stage;
   // an encoded storage projection is not a buffered value.
   if (failed(materializeContractionReads(loop))) return failure();
@@ -562,6 +581,31 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
   // numerical payload or a new source birth. Rebuild its exact descriptor on
   // the consumer's saved induction coordinate; never replay a memory read.
   IRRewriter rewriter(loop.getContext());
+  llvm::DenseMap<Value, Value> fieldReads;
+  for (Operation *operation : operations) {
+    if (!consumerSet.contains(operation)) continue;
+    for (Value value : analysis::externalOperands(operation)) {
+      auto definition = value.getDefiningOp();
+      if (!definition || definition->getBlock() != loop.getBody() ||
+          consumerSet.contains(definition) || !carryType(value.getType()) ||
+          !riscv::fieldReadProjection(value))
+        continue;
+      Value read;
+      if (auto found = fieldReads.find(value); found != fieldReads.end()) {
+        read = found->second;
+      } else {
+        rewriter.setInsertionPointAfter(definition);
+        auto materialized = materializePipelineFieldRead(value, rewriter);
+        if (failed(materialized)) return failure();
+        read = *materialized;
+        fieldReads[value] = read;
+      }
+      operation->walk([&](Operation *nested) {
+        for (OpOperand &operand : nested->getOpOperands())
+          if (operand.get() == value) operand.set(read);
+      });
+    }
+  }
   IRMapping consumerDescriptors;
   unsigned clonedDescriptors = 0;
   std::function<FailureOr<Value>(Value)> descriptor = [&](Value value) -> FailureOr<Value> {

@@ -1158,6 +1158,9 @@ storage projection 不使用这条前移规则。无 memory clobber、copy accum
 只写入新的私有 SSA fragment，其依赖链保持在 consumer stage；最终物理 reuse 仍归资源闭合。
 它不通过 op 数量、相邻关系或 window family 命名 cluster。闭合的普通 `for/if` 可以作为
 一个 stage 内的有序单元；嵌套作者 Level、外部 write/unknown effect 没有重排合同，仍拒绝。
+消费阶段直接引用的数值 field 同样在原 producer 处物化，再作为数值 SSA 跨阶段传递；
+不能把它当作 `FieldView` 重建，进而重复原 encoded load。具有相同 typed packing 的
+只读 operand 在建立流水 frontier 前使用共同供给合并，避免把同一字节值缓冲两次。
 
 默认以 contraction 建立消费边界。若跨阶段的 numeric values 本身已占满目标向量寄存器，
 scheduler 另枚举由真实循环 carry 依赖确定的边界：把独立算术留在 producer，将其较小结果

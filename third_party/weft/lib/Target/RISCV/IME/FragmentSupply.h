@@ -7,6 +7,7 @@
 
 namespace weft::riscv_internal {
 mlir::LogicalResult shareFragmentStorage(mlir::ModuleOp module, mlir::IRRewriter &rewriter);
+void shareFragmentOperandReads(mlir::Operation *scope, mlir::IRRewriter &rewriter);
 void materializeFragmentRowSupply(riscv::KernelOp kernel, mlir::IRRewriter &rewriter);
 void formFragmentWindowLoads(mlir::ModuleOp module, mlir::IRRewriter &rewriter);
 }
