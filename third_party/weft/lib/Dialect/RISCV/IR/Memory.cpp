@@ -349,6 +349,16 @@ StorageOrigins weft::riscv::storageOrigins(Value root) {
       appendUnique(result.allocations, value);
       continue;
     }
+    if (auto state = value.getDefiningOp<NewOp>();
+        state && addressable(value.getType()) &&
+        (!state.getInitial() || !addressable(state.getInitial().getType()))) {
+      // A private state initialized from a scalar owns storage even before
+      // LocalAlloc materialization. Keep that identity through branch/loop
+      // carries; an empty origin set would turn their cycle into unknown
+      // storage and spuriously alias every external input.
+      appendUnique(result.allocations, value);
+      continue;
+    }
     if (auto load = value.getDefiningOp<LoadOp>();
         load && load.getSnapshotStorage() && load.getSnapshotBorrow())
       pending.push_back(load.getRegion());

@@ -2947,9 +2947,20 @@ void projectScalarRecordFields(mlir::ModuleOp module,
   llvm::SmallVector<riscv::ExtractOp> extracts;
   module.walk([&](riscv::ExtractOp op) { extracts.push_back(op); });
   for (auto extract : extracts) {
-    if (mlir::isa<riscv::ValueType>(extract.getResult().getType()))
-      continue;
-    auto field = extract.getInput().getDefiningOp<riscv::FieldOp>();
+    mlir::Value input = extract.getInput();
+    llvm::SmallVector<riscv::ConvertLayoutOp> conversions;
+    while (auto conversion = input.getDefiningOp<riscv::ConvertLayoutOp>()) {
+      auto source = conversion.getInput().getType();
+      auto result = conversion.getResult().getType();
+      auto effect = conversion.getConversion().getEffect();
+      if (source.getShape() != result.getShape() ||
+          source.getAxisIds() != result.getAxisIds() ||
+          (effect != "pure" && effect != "read"))
+        break;
+      conversions.push_back(conversion);
+      input = conversion.getInput();
+    }
+    auto field = input.getDefiningOp<riscv::FieldOp>();
     auto load = field ? field.getOwner().getDefiningOp<riscv::LoadOp>() : riscv::LoadOp();
     auto owner = load ? mlir::dyn_cast<riscv::ValueType>(load.getResult().getType()) : riscv::ValueType();
     auto facts = field ? riscv_internal::fieldFacts(field) : riscv_internal::FieldFacts();
@@ -3015,6 +3026,11 @@ void projectScalarRecordFields(mlir::ModuleOp module,
       extract.getIndicesMutable().assign(indices);
       extract.setSelectorsAttr(rewriter.getArrayAttr(extract.getSelectors().getValue().drop_front(rank)));
     }
+    for (auto conversion : conversions)
+      if (conversion.getResult().use_empty())
+        rewriter.eraseOp(conversion);
+    if (field.getResult().use_empty())
+      rewriter.eraseOp(field);
   }
 }
 
@@ -3319,11 +3335,14 @@ public:
     mlir::Builder builder(&getContext());
     mlir::IRRewriter rewriter(&getContext());
     bool failed = false;
+    // Select a scalar record before considering a complete numeric field
+    // snapshot. Its remaining field axes can still have vector consumers.
+    // readCrossesWrite above keeps the original saved-value contract.
+    projectScalarRecordFields(getOperation(), rewriter);
     if (mlir::failed(riscv_internal::materializeFieldReads(getOperation(), rewriter))) {
       signalPassFailure();
       return;
     }
-    projectScalarRecordFields(getOperation(), rewriter);
     llvm::SmallVector<riscv::LoadOp> deadTableLoads;
     llvm::SmallVector<riscv::MaterializeOp> deadTableMaterializations;
     llvm::DenseMap<mlir::Value, mlir::Value> tableSnapshots;

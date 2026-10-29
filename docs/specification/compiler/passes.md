@@ -15,6 +15,11 @@ RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改�
 分析在扩展位宽内计算取负，若结果可能跨过机器类型边界则退回完整类型域，
 不能用对 signed-min 无效的绝对值证明允许更多窄累加。
 
+物理标量常量实现 MLIR `ConstantLike` 与 constant materializer。整数 cast 和比较
+通过标准 folding 接口计算相同位宽的 APInt 结果，保留符号扩展、截断回绕和比较的
+signedness；不把浮点转换或动态值当作已知常量。编译器生成、没有作者 lifetime identity 的
+`physical-share` 标量在输入成为常量后可折叠；state/stage 的 birth 与 handoff 不因此消失。
+
 partial source-lane 候选按正式 repack leaf 的临时资源评估输入／输出交接：
 操作前计入仍活跃的 source 与 leaf scratch，操作后计入 result。完整寄存器 split
 是原 payload 的视图，不将已消费的 source 与 result 当成两套同时分配的寄存器；
@@ -36,11 +41,18 @@ natural、grouped/layered、joined 几何事实；byte/bit order 和 persistent 
 展开为显式的记录循环、byte load、数值位组合与 masked byte store。跨 byte 的字段
 消费同一份 fragment 映射；写入只覆盖该字段的 bits，保留共享 byte 的其它字段。
 编码 Value 的数值副本在原 load 边界完成，后续 field 使用不能穿过别名写入重新解引用。
+非连续的多维记录窗口需要保存读取快照时，数值字段消费者复用同一有界字段程序，
+在原读取时点保存所需字段；不要求把 strided 窗口交给连续整记录 byte-copy leaf。
 同一 stage 的多个字段表示保留同一个作者 birth；跨 block 的 stage 在自己的作用域
 初始化其存储。局部 byte leaf 只描述一个已投影 record，不拥有外层遍历或 Encoding 算法。
 这一通用路径目前要求 owner 的 encoded element axis 覆盖一个完整 record；任意前缀
 记录轴由实际 descriptor extent 遍历。这不覆盖任意整记录 reshape 传输或字段窗口；
 这些访问仍须具有自己的完整物理程序，不能留给 emitter 临时解释。
+
+标量 record 坐标先投影，再决定是否需要完整数值字段副本；剩余字段轴可以继续由向量
+消费者读取。投影只穿过保持 shape/axis 的表示转换，并证明原 load 到消费者之间没有
+可能别名的写入；不能跨过作者 stage。失去消费者的字段和表示转换在展开前删除，避免
+为一个已经选择的单记录字段额外初始化、解码整份多记录数组。
 
 已加载记录的 whole-byte natural 字段在 local storage projection 状态下保留 storage edge；
 record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry pass 根据实际消费者窗口和共享 alignment
@@ -79,6 +91,9 @@ descriptor 的请求 extent 与 backing storage 的有效范围分别验证：`M
 生成子窗口，并合成已有的 domain projection，保留其它轴的选择和原读取快照。
 已经拥有实际 allocation 的 `LocalBind` 保持 local carrier；布局传播不能隐式将
 存储身份变成寄存器数值，消费者必须经过真实的 load 或 conversion。
+已经选择私有存储、以标量初始化的 `New` 在 allocation 物化前也具有独立存储身份；
+分支和循环 carry 沿该身份追踪，不能因初始化值不是地址而将它误判成可能别名所有外部输入。
+加载的数值保留其原 descriptor 的坐标来源；坐标查询不授权越过写入重新读取原存储。
 分组的局部 Value 向 RVV 投影时，group 坐标、保留轴的 stride、slice 和 load 在
 composite lowering 中显式形成；它与标量副本投影共用同一分组坐标计算，后续 memory
 pass 选择真实传输，不把尚未选择的局部数组访问留给 emitter。

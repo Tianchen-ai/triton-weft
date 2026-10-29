@@ -3528,6 +3528,10 @@ mlir::LogicalResult RecordCohortOp::verify() {
   return mlir::success();
 }
 
+mlir::OpFoldResult ConstantOp::fold(FoldAdaptor) {
+  return getValue();
+}
+
 mlir::LogicalResult ConstantOp::verify() {
   auto typed = mlir::dyn_cast<mlir::TypedAttr>(getValue());
   if (!typed || typed.getType() != getResult().getType() ||
@@ -4452,6 +4456,29 @@ mlir::LogicalResult SelectOp::verify() {
   return verifyLeafOperation(*this);
 }
 
+mlir::OpFoldResult CompareOp::fold(FoldAdaptor operands) {
+  auto left = mlir::dyn_cast_if_present<mlir::IntegerAttr>(operands.getLhs());
+  auto right = mlir::dyn_cast_if_present<mlir::IntegerAttr>(operands.getRhs());
+  auto type = mlir::dyn_cast<mlir::IntegerType>(getLhs().getType());
+  if (!left || !right || !type || getLhs().getType() != getRhs().getType() ||
+      !getResult().getType().isInteger(1))
+    return {};
+  const auto &a = left.getValue();
+  const auto &b = right.getValue();
+  bool less = type.isSigned() ? a.slt(b) : a.ult(b);
+  bool greater = type.isSigned() ? a.sgt(b) : a.ugt(b);
+  auto predicate = getPredicate();
+  bool result;
+  if (predicate == "eq") result = a == b;
+  else if (predicate == "ne") result = a != b;
+  else if (predicate == "lt") result = less;
+  else if (predicate == "le") result = !greater;
+  else if (predicate == "gt") result = greater;
+  else if (predicate == "ge") result = !less;
+  else return {};
+  return mlir::IntegerAttr::get(getResult().getType(), llvm::APInt(1, result));
+}
+
 mlir::LogicalResult CompareOp::verify() {
   constexpr llvm::StringLiteral predicates[] = {"eq", "ne", "lt",
                                                  "le", "gt", "ge"};
@@ -4507,6 +4534,19 @@ mlir::LogicalResult RVVCompareSelectOp::verify() {
       selected.getFragmentGroups() != 0 || selected.getLocalBytes() != 0)
     return emitOpError("direct compare/select requires its exact one-mask resource contract");
   return verifyLeafOperation(*this);
+}
+
+mlir::OpFoldResult CastOp::fold(FoldAdaptor operands) {
+  auto constant = mlir::dyn_cast_if_present<mlir::IntegerAttr>(operands.getInput());
+  auto source = mlir::dyn_cast<mlir::IntegerType>(getInput().getType());
+  auto result = mlir::dyn_cast<mlir::IntegerType>(getResult().getType());
+  if (!constant || (!source && !getInput().getType().isIndex()) || !result)
+    return {};
+  const auto &value = constant.getValue();
+  auto converted = source && source.isSigned()
+      ? value.sextOrTrunc(result.getWidth())
+      : value.zextOrTrunc(result.getWidth());
+  return mlir::IntegerAttr::get(result, converted);
 }
 
 mlir::LogicalResult CastOp::verify() {
@@ -6372,6 +6412,16 @@ mlir::LogicalResult ReloadOp::verify() {
     return emitOpError(
         "reload slot size must preserve every selected RVV time part");
   return verifyLeafOperation(*this);
+}
+
+mlir::OpFoldResult RegisterMaterializeOp::fold(FoldAdaptor operands) {
+  // Compiler-local scalar sharing has no author birth or lifetime. A constant
+  // needs no saved register, but source state/stage materializations remain.
+  if (getRealization() == "physical-share" && getOwnerDomainId() == -1 &&
+      getBirthId() == -1 && getLifetimeEndDomainId() == -1 &&
+      isScalar(getResult().getType()))
+    return operands.getInput();
+  return {};
 }
 
 mlir::LogicalResult RegisterMaterializeOp::verify() {
@@ -11028,6 +11078,15 @@ mlir::LogicalResult ProjectReductionOperandOp::verify() {
         "reduction projection requires an explicit lane or time coordinate; "
         "singleton physical factors do not imply a singleton logical axis");
   return mlir::success();
+}
+
+mlir::Operation *WEFTRISCVDialect::materializeConstant(
+    mlir::OpBuilder &builder, mlir::Attribute value, mlir::Type type,
+    mlir::Location location) {
+  auto typed = mlir::dyn_cast<mlir::TypedAttr>(value);
+  if (!typed || typed.getType() != type || !isScalar(type))
+    return nullptr;
+  return ConstantOp::create(builder, location, type, value);
 }
 
 void WEFTRISCVDialect::initialize() {

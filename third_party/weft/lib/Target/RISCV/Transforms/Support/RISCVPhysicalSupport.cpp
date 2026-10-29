@@ -2302,6 +2302,13 @@ riscv::PhysicalPointOp riscv_internal::originPoint(mlir::Value value,
       worklist.push_back(field.getOwner());
       continue;
     }
+    if (auto load = mlir::dyn_cast<riscv::LoadOp>(definition)) {
+      // A saved load retains the descriptor's coordinate identity. Following
+      // this edge observes its original bounds; it does not permit rereading
+      // the storage or moving the snapshot past an intervening write.
+      worklist.push_back(load.getRegion());
+      continue;
+    }
     if (auto materialize =
             mlir::dyn_cast<riscv::RegisterMaterializeOp>(definition))
       worklist.push_back(materialize.getInput());

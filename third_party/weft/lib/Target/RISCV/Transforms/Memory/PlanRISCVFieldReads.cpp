@@ -311,7 +311,14 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
         value.getLayout().getCarrier() == "rvv" && interleaveRows(field, encoding) > 0;
     bool numericUnaligned = facts.alignment < bits / 8 && !scalarWord && !cohortWord &&
         (!value || value.getLayout().getCarrier() != "local");
-    bool general = (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
+    // A noncontiguous record window cannot use the contiguous byte-snapshot
+    // leaf. Save its demanded numerical fields at the original load epoch,
+    // using the same bounded field program and stage ownership as other bit
+    // projections. This closes numeric consumers without changing the source
+    // record layout or delaying their read past an aliasing write.
+    bool numericSnapshot = !riscv::isContiguousRecordRegion(load.getRegion()) &&
+        needsReadSnapshot(load);
+    bool general = numericSnapshot || (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
         (owner.getShape().size() > 1 && facts.mapping == "joined");
     if (!general) continue;
     if (owner.getShape().empty() || owner.getShape().asArrayRef().back() != owner.getElements())

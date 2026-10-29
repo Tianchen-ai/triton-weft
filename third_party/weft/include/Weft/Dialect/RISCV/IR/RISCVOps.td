@@ -18,6 +18,7 @@ def WEFT_RISCV_Dialect : Dialect {
   }];
   let useDefaultAttributePrinterParser = 1;
   let useDefaultTypePrinterParser = 1;
+  let hasConstantMaterializer = 1;
 }
 
 class WeftRISCV_Attr<string name, string attrMnemonic, list<Trait> traits = []>
@@ -1198,10 +1199,11 @@ def WeftRISCV_PointActiveOp : WeftRISCV_TerminalOp<"point_active", [Pure]> {
   let hasFolder = 1;
 }
 
-def WeftRISCV_ConstantOp : WeftRISCV_TerminalOp<"constant", [Pure]> {
+def WeftRISCV_ConstantOp : WeftRISCV_TerminalOp<"constant", [Pure, ConstantLike]> {
   let arguments = (ins AnyAttr:$value);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
+  let hasFolder = 1;
 }
 
 def WeftRISCV_IotaOp : WeftRISCV_LeafOp<"iota", [Pure]> {
@@ -1392,6 +1394,7 @@ def WeftRISCV_CompareOp : WeftRISCV_LeafOp<"compare", [Pure]> {
                        WeftRISCV_LeafAttr:$leaf);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
+  let hasFolder = 1;
 }
 
 def WeftRISCV_SelectOp : WeftRISCV_LeafOp<"select", [Pure]> {
@@ -1456,7 +1459,9 @@ class WeftRISCV_ConversionOp<string mnemonic>
   let hasVerifier = 1;
 }
 
-def WeftRISCV_CastOp : WeftRISCV_ConversionOp<"cast">;
+def WeftRISCV_CastOp : WeftRISCV_ConversionOp<"cast"> {
+  let hasFolder = 1;
+}
 
 def WeftRISCV_NarrowOp : WeftRISCV_LeafOp<"narrow", [Pure]> {
   let arguments = (ins AnyType:$input, StrAttr:$rounding, BoolAttr:$saturate,
@@ -1886,6 +1891,7 @@ def WeftRISCV_RegisterMaterializeOp
                        StrAttr:$realization);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
+  let hasFolder = 1;
 }
 
 def WeftRISCV_RVVBitplaneMergeOp
