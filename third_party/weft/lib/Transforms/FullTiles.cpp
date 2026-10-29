@@ -233,6 +233,20 @@ void foldCompleteBounds(scf::ForOp loop, int64_t step, IRRewriter &b, bool unsig
   }
 }
 
+// Parent-domain specialization can expose a constant bound on a nested Level.
+// Its already divisible traversal needs no new full/tail version. Close those
+// bounds before deciding whether its masked payload can use a direct transfer.
+void foldStaticCompleteBounds(Operation *scope, IRRewriter &b, bool unsignedIndices) {
+  scope->walk<WalkOrder::PreOrder>([&](scf::ForOp loop) {
+    auto step = tileStep(loop);
+    APInt upper;
+    if (!step || !matchPattern(loop.getUpperBound(), m_ConstantInt(&upper)) ||
+        (!unsignedIndices && upper.isNegative()) ||
+        !upper.urem(APInt(upper.getBitWidth(), *step)).isZero()) return;
+    foldCompleteBounds(loop, *step, b, unsignedIndices);
+  });
+}
+
 } // namespace
 
 FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
@@ -242,6 +256,7 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
     SmallVector<scf::ForOp> loops;
     function->walk([&](scf::ForOp loop) { loops.push_back(loop); });
     IRRewriter b(context);
+    foldStaticCompleteBounds(function, b, unsignedIndices);
     RewritePatternSet simplification(context);
     simplification.add<FoldMaskReduction>(context);
     scf::IfOp::getCanonicalizationPatterns(simplification, context);
@@ -352,6 +367,7 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
         });
         if (guarded) foldCompleteBounds(axis, *tileStep(axis), b, unsignedIndices);
       }
+      foldStaticCompleteBounds(full, b, unsignedIndices);
       SmallVector<Operation *> proposed;
       full.getBody()->walk([&](Operation *op) { proposed.push_back(op); });
       GreedyRewriteConfig config;
@@ -457,6 +473,7 @@ FailureOr<weft::FullTileGrowth> weft::separateFullTiles(Operation *function,
         Value value = arith::ConstantIntOp::create(b, compare.getLoc(), *known, 1);
         b.replaceOp(compare, value);
       }
+      foldStaticCompleteBounds(full, b, unsignedIndices);
       // A complete mask can eliminate an entire alternative implementation.
       // Charge the surviving fast body, rather than the unsimplified original
       // including that unreachable branch. The masked original remains the

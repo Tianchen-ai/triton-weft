@@ -1611,13 +1611,27 @@ private:
           cohortColumnOffset += start[1] / layout->elements();
         } else break;
       }
-      // A root two-dimensional View selected by two domain points retains
-      // independent row/block coordinates. Reuse those facts instead of
-      // dividing a flattened runtime-stride address back into coordinates.
+      // Rank-preserving domain selections retain absolute point coordinates,
+      // even through a helper's enclosing Level. They only clip the domain;
+      // they do not change the root storage strides or add a subview offset.
       if (auto selection = cohortOwner.getDefiningOp<wk::SliceOp>()) {
-        auto root = dyn_cast<BlockArgument>(selection.getBase());
+        Value rootView = selection.getBase();
+        while (auto parent = rootView.getDefiningOp<wk::SliceOp>()) {
+          if (parent.getSelectors().size() != 2 ||
+              !llvm::all_of(parent.getSelectors(), [](Attribute attr) {
+                StringRef selector = cast<StringAttr>(attr).getValue();
+                return selector == "all" || selector == "domain";
+              })) break;
+          rootView = parent.getBase();
+        }
+        auto root = dyn_cast<BlockArgument>(rootView);
+        auto rootKernel = root ? dyn_cast<wk::KernelOp>(root.getOwner()->getParentOp()) : wk::KernelOp();
+        bool contiguousRoot = bool(rootKernel);
+        if (rootKernel)
+          if (auto strided = rootKernel.getStridedArgs())
+            contiguousRoot &= !llvm::is_contained(*strided, rootKernel.getArgNames()[root.getArgNumber()]);
         auto windowShape = shape(field.getOwner().getType());
-        if (root && isa<wk::KernelOp>(root.getOwner()->getParentOp()) &&
+        if (contiguousRoot &&
             shape(root.getType()).size() == 2 && selection.getSelectors().size() == 2 &&
             windowShape.size() == 2 && windowShape.back() == layout->elements() &&
             cast<StringAttr>(selection.getSelectors()[0]).getValue() == "domain" &&

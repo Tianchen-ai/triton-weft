@@ -8,7 +8,9 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -114,9 +116,82 @@ struct Candidate {
 struct StackSlot {
   Value storage;
   int64_t elements;
-  Block *scope;
-  SmallVector<std::pair<unsigned, unsigned>> intervals;
+  struct Interval {
+    Block *scope;
+    unsigned first, last;
+  };
+  SmallVector<Interval> intervals;
 };
+
+// Lowering can reserve an entry stack array for several independent saved
+// address/payload vectors. Its actual read epochs begin at complete stores.
+// Expose those epochs to the existing slot allocator instead of charging every
+// entry reservation for the entire function and forcing hot arrays to the heap.
+unsigned scopeStackSnapshots(func::FuncOp function, IRRewriter &b) {
+  SmallVector<memref::AllocaOp> allocations;
+  function.walk([&](memref::AllocaOp alloc) { allocations.push_back(alloc); });
+  DominanceInfo dominance;
+  unsigned scoped = 0;
+  for (auto alloc : allocations) {
+    auto type = alloc.getType();
+    if (alloc->hasAttr("weft.x86.birth") || type.getRank() != 1 ||
+        !type.hasStaticShape() || !type.getLayout().isIdentity() ||
+        alloc.getAlignment().value_or(slotAlignment) > slotAlignment) continue;
+    auto uses = weft::x86::privateStorageUses(alloc);
+    if (failed(uses) || uses->aliases.size() != 1 || uses->users.size() > 128) continue;
+    SmallVector<vector::StoreOp> initializers;
+    SmallVector<Operation *> reads;
+    bool closed = true;
+    for (Operation *user : uses->users) {
+      if (auto store = dyn_cast<vector::StoreOp>(user)) {
+        APInt offset;
+        auto vector = store.getValueToStore().getType();
+        if (store.getBase() != alloc || store.getIndices().size() != 1 ||
+            !matchPattern(store.getIndices()[0], m_ConstantInt(&offset)) || !offset.isZero() ||
+            vector.getNumElements() != type.getNumElements()) { closed = false; break; }
+        initializers.push_back(store);
+      } else if (isa<memref::LoadOp, vector::LoadOp>(user)) {
+        reads.push_back(user);
+      } else {
+        closed = false;
+        break;
+      }
+    }
+    if (!closed || initializers.empty() || reads.empty()) continue;
+    DenseMap<Operation *, SmallVector<Operation *>> epochs;
+    for (Operation *read : reads) {
+      Operation *owner = nullptr;
+      for (auto store : initializers) {
+        if (!dominance.dominates(store, read)) continue;
+        bool preserved = weft::analysis::storagePreservedBetween(store, read,
+            [&](Operation *operation) {
+              return !llvm::is_contained(initializers, operation);
+            });
+        if (!preserved) continue;
+        if (owner) { closed = false; break; }
+        owner = store;
+      }
+      if (!closed || !owner) { closed = false; break; }
+      epochs[owner].push_back(read);
+    }
+    if (!closed) continue;
+    // This rewrite changes only private physical backing. Preserve every write,
+    // read, predicate and source-level birth at its original position.
+    for (auto store : initializers) {
+      b.setInsertionPoint(store);
+      auto storage = memref::AllocOp::create(b, alloc.getLoc(), type);
+      if (auto alignment = alloc.getAlignment()) storage.setAlignment(*alignment);
+      store.getBaseMutable().assign(storage);
+      for (Operation *read : epochs.lookup(store)) {
+        if (auto scalar = dyn_cast<memref::LoadOp>(read)) scalar.getMemrefMutable().assign(storage);
+        else cast<vector::LoadOp>(read).getBaseMutable().assign(storage);
+      }
+    }
+    b.eraseOp(alloc);
+    ++scoped;
+  }
+  return scoped;
+}
 
 class MaterializeLocalStorage
     : public PassWrapper<MaterializeLocalStorage, OperationPass<ModuleOp>> {
@@ -134,6 +209,7 @@ public:
     legalizePayloadStorage(getOperation(), b);
     for (auto function : getOperation().getOps<func::FuncOp>()) {
       if (function.isExternal()) continue;
+      unsigned scoped = scopeStackSnapshots(function, b);
       uint64_t reserved = 0;
       // Include already materialized stack snapshots. Unknown stack extents
       // prevent additional promotion instead of inventing a resource estimate.
@@ -199,11 +275,16 @@ public:
         StackSlot *selected = nullptr;
         for (auto &slot : slots) {
           auto storageType = cast<MemRefType>(slot.storage.getType());
-          if (slot.scope != candidate.scope || slot.elements < candidate.elements ||
+          if (slot.elements < candidate.elements ||
               storageType.getElementType() != type.getElementType() ||
               storageType.getMemorySpace() != type.getMemorySpace()) continue;
           if (llvm::any_of(slot.intervals, [&](auto interval) {
-                return candidate.first <= interval.second && interval.first <= candidate.last;
+                if (interval.scope == candidate.scope)
+                  return candidate.first <= interval.last && interval.first <= candidate.last;
+                // Each checked lifetime is contained in its original block.
+                // Repeated execution cannot retain its address after the branch.
+                return !insideMutuallyExclusiveRegions(interval.scope->getTerminator(),
+                                                       candidate.scope->getTerminator());
               })) continue;
           if (!selected || slot.elements < selected->elements) selected = &slot;
         }
@@ -214,13 +295,13 @@ public:
           b.setInsertionPointToStart(&function.getBody().front());
           auto storage = memref::AllocaOp::create(b, alloc.getLoc(), storageType);
           storage.setAlignment(slotAlignment);
-          slots.push_back({storage, candidate.elements, candidate.scope, {}});
+          slots.push_back({storage, candidate.elements, {}});
           selected = &slots.back();
           reserved += candidate.bytes;
         } else {
           ++reused;
         }
-        selected->intervals.emplace_back(candidate.first, candidate.last);
+        selected->intervals.push_back({candidate.scope, candidate.first, candidate.last});
         b.setInsertionPoint(alloc);
         Value result = selected->storage;
         if (result.getType() != type) {
@@ -237,6 +318,7 @@ public:
       function->setAttr("weft.x86.stack_storage_budget", b.getI64IntegerAttr(stackBudget));
       function->setAttr("weft.x86.promoted_arrays", b.getI64IntegerAttr(promoted));
       function->setAttr("weft.x86.reused_stack_arrays", b.getI64IntegerAttr(reused));
+      function->setAttr("weft.x86.scoped_stack_snapshots", b.getI64IntegerAttr(scoped));
     }
   }
 };
