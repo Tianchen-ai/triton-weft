@@ -11,9 +11,29 @@ using namespace weft;
 using namespace weft::riscv_internal;
 
 namespace {
+// Memory planning expands noncontiguous encoded snapshots into numerical
+// fields. Materialize their grouped operations before assigning layouts, while
+// both sides of the new projections still have one consistent layout state.
+bool needsNumericalSnapshot(Value value) {
+  auto field = sourceField(value);
+  if (!field) return false;
+  value = field.getOwner();
+  for (unsigned depth = 0; depth < 32; ++depth) {
+    if (auto load = value.getDefiningOp<riscv::LoadOp>())
+      return !riscv::isContiguousRecordRegion(load.getRegion()) &&
+             needsReadSnapshot(load);
+    if (auto extract = value.getDefiningOp<riscv::ExtractOp>()) value = extract.getInput();
+    else if (auto stage = value.getDefiningOp<riscv::MaterializeOp>()) value = stage.getInput();
+    else if (auto stage = value.getDefiningOp<riscv::RegisterMaterializeOp>()) value = stage.getInput();
+    else return false;
+  }
+  return true;
+}
 // Preserve the closed grouped/widen/reduce relation consumed by the existing
 // widening-dot materializer. All other consumers need the grouped values.
 bool hasWideningReduction(riscv::MacGroupsOp op) {
+  if (needsNumericalSnapshot(op.getLhs()) ||
+      needsNumericalSnapshot(op.getRhs())) return false;
   auto a = dyn_cast<IntegerType>(logicalElement(op.getLhs().getType()));
   auto c = dyn_cast<IntegerType>(logicalElement(op.getRhs().getType()));
   if (!a || !c || a.getWidth() > 8 || c.getWidth() > 8 ||
@@ -74,7 +94,8 @@ public:
         // A numerical snapshot is no longer an encoded field address. Keep the
         // direct natural-field leaf only when its original storage edge exists;
         // otherwise materialize the same pair sums through numeric projections.
-        if (!field || facts.mapping != "natural" || facts.bitOffset % 8 ||
+        if (needsNumericalSnapshot(fold.getInput()) || !field ||
+            facts.mapping != "natural" || facts.bitOffset % 8 ||
             !logicalElement(fold.getInput().getType()).isSignedInteger(16))
           operations.push_back(fold);
       }
