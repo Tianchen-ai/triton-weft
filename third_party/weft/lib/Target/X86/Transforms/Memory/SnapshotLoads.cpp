@@ -144,6 +144,15 @@ public:
       }
       if (ranges.size() > 16 || (ranges.size() == 1 && ranges.front().begin == 0 &&
                                 ranges.front().end == type.getNumElements())) continue;
+      // When consumers cover every byte contiguously, field boundaries do not
+      // remove traffic. Keep the snapshot intact so native-width legalization
+      // can share loads across adjacent fields instead of creating short loads
+      // and independent masks at every field boundary.
+      bool dense = !ranges.empty() && ranges.front().begin == 0 &&
+                   ranges.back().end == type.getNumElements();
+      for (size_t i = 1; dense && i < ranges.size(); ++i)
+        dense = ranges[i - 1].end == ranges[i].begin;
+      if (dense) continue;
       for (auto range : ranges) {
         b.setInsertionPoint(load);
         Location loc = load.getLoc();
