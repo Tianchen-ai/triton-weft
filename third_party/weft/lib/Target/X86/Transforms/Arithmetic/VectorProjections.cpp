@@ -650,8 +650,11 @@ public:
           })) continue;
       auto function = root->getParentOfType<func::FuncOp>();
       auto bits = function ? function->getAttrOfType<IntegerAttr>("weft.x86.vector_bits") : IntegerAttr();
-      if (bits && selectedConsumersOnly) {
-        int64_t width = std::max<int64_t>(8, type.getElementTypeBitWidth());
+      bool scalarPackets = llvm::all_of(unique, [](const auto &demand) { return demand.size() == 1; });
+      int64_t width = std::max<int64_t>(8, type.getElementTypeBitWidth());
+      bool nativeInteger = bits && isa<IntegerType>(type.getElementType()) &&
+                           type.getNumElements() * width <= bits.getInt();
+      if (bits && (selectedConsumersOnly || (nativeInteger && !scalarPackets))) {
         auto registers = [&](int64_t lanes) {
           return llvm::divideCeil(lanes * width, bits.getInt());
         };
@@ -661,11 +664,14 @@ public:
         // short packets can each require a native instruction where the shared
         // producer needs just one. Preserve that producer and its permutations.
         // Separating mixed constant bit planes can replace variable shifts
-        // with immediate shifts, so these packets have a distinct native cost.
-        if (projected > registers(type.getNumElements()) &&
-            !llvm::all_of(unique, [&](const auto &demand) {
-              return uniformWordShift(root->getResult(0), demand);
-            })) continue;
+        // with immediate shifts for a multi-register producer. A producer that
+        // fits one native register should remain shared across vector packets;
+        // single-element packets can use scalar extraction and broadcast.
+        bool splitNative = registers(type.getNumElements()) == 1 && !scalarPackets;
+        bool constantPlanes = llvm::all_of(unique, [&](const auto &demand) {
+          return uniformWordShift(root->getResult(0), demand);
+        });
+        if (projected > registers(type.getNumElements()) && (splitNative || !constantPlanes)) continue;
       }
       // Identical lane demands share one decoded packet even when their uses
       // broadcast or order those lanes differently. Charge distinct producers,
