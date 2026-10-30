@@ -355,6 +355,66 @@ mlir::LogicalResult Emitter::compileExtract(riscv::ExtractOp operation) {
     if (auto resultType =
             mlir::dyn_cast<riscv::ValueType>(operation.getResult().getType());
         resultType && resultType.getLayout().getCarrier() != "scalar") {
+      if (operation.getLeaf().getInstruction() == "local.extract" &&
+          operation.getAccess().getForm() == "local" &&
+          llvm::any_of(operation.getSelectors(), [](mlir::Attribute attr) {
+            return mlir::cast<mlir::StringAttr>(attr).getValue() == "domain";
+          })) {
+        auto inputType = operation.getInput().getType();
+        auto element = scalarCType(inputType.getElementType());
+        auto layout = resultType.getLayout();
+        if (!element || inputType.getShape().empty() ||
+            binding.localExtents.size() != inputType.getShape().size() ||
+            laneAxisFor(operation.getResult()) != inputType.getAxisIds().asArrayRef().back())
+          return fail(operation, "local domain vector read requires a contiguous inner axis");
+        for (size_t axis = 0; axis + 1 < layout.getLaneFactors().size(); ++axis)
+          if (layout.getLaneFactors()[axis] != 1)
+            return fail(operation, "local domain vector read cannot merge separated rows");
+        Binding loaded;
+        loaded.kind = Binding::Kind::Vector;
+        for (int64_t part = 0; part < vectorPartCount(operation.getResult()); ++part) {
+          auto coordinates = riscv::rvvLaneCoordinates(layout, part, 0);
+          if (!coordinates) return fail(operation, "local domain vector read lost its part coordinates");
+          std::string linear = "0", present = "1";
+          size_t cursor = 0;
+          for (auto [dimension, attr] : llvm::enumerate(operation.getSelectors())) {
+            auto selector = mlir::cast<mlir::StringAttr>(attr).getValue();
+            auto axes = resultType.getAxisIds().asArrayRef();
+            auto position = llvm::find(axes, inputType.getAxisIds()[dimension]);
+            int64_t offset = position == axes.end() ? 0 : (*coordinates)[position - axes.begin()];
+            std::string coordinate = std::to_string(offset);
+            if (selector == "domain" && cursor < operation.getIndices().size()) {
+              const auto &point = bindings.lookup(operation.getIndices()[cursor++]);
+              if (point.kind != Binding::Kind::Point)
+                return fail(operation, "local domain vector read requires a physical point");
+              const auto &extent = binding.localExtents[dimension];
+              coordinate = "(((" + extent + ") > 0 ? ((" + point.point.base +
+                  ") % (" + extent + ")) : 0) + " + std::to_string(offset) + ")";
+              present += " && (" + std::to_string(offset) + " < (" + point.point.active + "))";
+            } else if (selector == "index" && cursor < operation.getIndices().size()) {
+              auto index = bindings.lookup(operation.getIndices()[cursor++]);
+              if (index.kind != Binding::Kind::Scalar)
+                return fail(operation, "local domain vector prefix requires a scalar index");
+              coordinate = index.scalar;
+            } else if (selector != "all") {
+              return fail(operation, "local domain vector read has an unsupported selector");
+            }
+            present += " && ((" + coordinate + ") < (" + binding.localExtents[dimension] + "))";
+            linear = "((" + linear + ") * (" + binding.localExtents[dimension] + ") + (" + coordinate + "))";
+          }
+          std::string suffix = vectorSuffix(operation.getResult());
+          std::string name = fresh("local_domain");
+          const bool floating = mlir::isa<mlir::FloatType>(inputType.getElementType());
+          line(vectorType(operation.getResult()) + " " + name + " = (" + present + ") ? __riscv_vle" +
+              std::to_string(layout.getSew()) + "_v_" + suffix + "((const " + *element + " *)(" +
+              binding.scalar + ") + " + linear + ", " + partVL(operation.getResult(), part) +
+              ") : __riscv_" + (floating ? "vfmv_v_f_" : "vmv_v_x_") + suffix +
+              "(0, " + partVL(operation.getResult(), part) + ");");
+          loaded.parts.push_back(std::move(name));
+        }
+        bindings[operation.getResult()] = std::move(loaded);
+        return mlir::success();
+      }
       if (operation.getLeaf().getInstruction() == "rvv.local-dense-read") {
         if (!riscv_internal::isLocalDenseRowExtract(operation) ||
             operation.getAccess().getForm() != "unit" || binding.localExtents.size() != 2)
@@ -548,6 +608,7 @@ mlir::LogicalResult Emitter::compileExtract(riscv::ExtractOp operation) {
           : std::optional<llvm::SmallVector<int64_t>>(llvm::SmallVector<int64_t>{});
       if (!coordinates) return fail(operation, "scalar local extract has no result member mapping");
       std::string linear = "0";
+      std::string within = "1";
       size_t cursor = 0;
       for (auto [dimension, selectorAttribute] : llvm::enumerate(operation.getSelectors())) {
         auto selector = mlir::cast<mlir::StringAttr>(selectorAttribute).getValue();
@@ -557,6 +618,31 @@ mlir::LogicalResult Emitter::compileExtract(riscv::ExtractOp operation) {
           auto position = llvm::find(axes, inputType.getAxisIds()[dimension]);
           if (position == axes.end()) return fail(operation, "retained local axis is absent from result");
           coordinate = std::to_string((*coordinates)[position - axes.begin()]);
+        } else if ((selector == "domain" || selector == "group_index") &&
+                   cursor < operation.getIndices().size() &&
+                   dimension < binding.localExtents.size()) {
+          const Binding &point = bindings.lookup(operation.getIndices()[cursor++]);
+          if (point.kind != Binding::Kind::Point)
+            return fail(operation, "local domain extract requires a physical point");
+          const auto &extent = binding.localExtents[dimension];
+          std::string base = point.point.base;
+          if (selector == "group_index")
+            base = "((" + base + ") / " + std::to_string(point.point.physicalExtent) + ")";
+          // Numerical snapshots use coordinates relative to their own birth.
+          // A repeated parent point selects the same local row cohort; an
+          // inner point advances within the retained runtime-sized axis.
+          coordinate = "((" + extent + ") > 0 ? ((" + base + ") % (" + extent + ")) : 0)";
+          if (resultType) {
+            auto axes = resultType.getAxisIds().asArrayRef();
+            auto position = llvm::find(axes, inputType.getAxisIds()[dimension]);
+            if (position != axes.end())
+              coordinate = "((" + coordinate + ") + " +
+                  std::to_string((*coordinates)[position - axes.begin()]) + ")";
+            if (position != axes.end())
+              within += " && (" + std::to_string((*coordinates)[position - axes.begin()]) +
+                  " < (" + point.point.active + "))";
+          }
+          within += " && ((" + coordinate + ") < (" + extent + "))";
         } else if ((selector == "index" || selector == "gather") &&
                    cursor < operation.getIndices().size()) {
           auto indexValue = operation.getIndices()[cursor++];
@@ -574,7 +660,9 @@ mlir::LogicalResult Emitter::compileExtract(riscv::ExtractOp operation) {
           return fail(operation, "scalar local extract has no actual address coordinate");
         linear = "((" + linear + ") * (" + binding.localExtents[dimension] + ") + (" + coordinate + "))";
       }
-      auto value = materializeScalarRead(*type, binding.scalar + "[" + linear + "]", "local_load");
+      std::string read = binding.scalar + "[" + linear + "]";
+      if (within != "1") read = "((" + within + ") ? (" + read + ") : 0)";
+      auto value = materializeScalarRead(*type, read, "local_load");
       if (parts == 1) extracted.scalar = std::move(value);
       else extracted.parts.push_back(std::move(value));
     }
