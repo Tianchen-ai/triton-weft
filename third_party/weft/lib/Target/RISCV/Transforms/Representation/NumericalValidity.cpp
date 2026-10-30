@@ -243,9 +243,57 @@ public:
       auto extents = get(lookup.getIndices());
       if (failed(extents)) return failure();
       result = *extents;
+    } else if (auto select = dyn_cast<riscv::SelectOp>(op)) {
+      auto project = [&](Value operand) -> FailureOr<SmallVector<Value>> {
+        auto input = dyn_cast<riscv::ValueType>(operand.getType());
+        SmallVector<Value> extents;
+        if (input) {
+          auto incoming = get(operand);
+          if (failed(incoming)) return failure();
+          extents = *incoming;
+        }
+        SmallVector<Value> projected;
+        for (auto [position, axis] : llvm::enumerate(type.getAxisIds().asArrayRef())) {
+          if (type.getShape()[position] <= 0) return failure();
+          Value maximum = arith::ConstantIndexOp::create(b, op->getLoc(), type.getShape()[position]);
+          Value bound = maximum;
+          if (input) {
+            auto ids = input.getAxisIds().asArrayRef();
+            auto found = llvm::find(ids, axis);
+            if (found != ids.end()) {
+              unsigned index = found - ids.begin();
+              bound = extents[index];
+              if (input.getShape()[index] == 1 && type.getShape()[position] != 1) {
+                Value zero = arith::ConstantIndexOp::create(b, op->getLoc(), 0);
+                Value present = b.createOrFold<arith::CmpIOp>(op->getLoc(), arith::CmpIPredicate::ne, bound, zero);
+                bound = b.createOrFold<arith::SelectOp>(op->getLoc(), present, maximum, zero);
+              }
+            }
+          }
+          projected.push_back(bound);
+        }
+        return projected;
+      };
+      auto yes = project(select.getTrueValue()), no = project(select.getFalseValue());
+      auto condition = project(select.getCondition());
+      if (failed(yes) || failed(no) || failed(condition)) return failure();
+      bool scalarCondition = !isa<riscv::ValueType>(select.getCondition().getType());
+      for (auto [yesBound, noBound, conditionBound] : llvm::zip(*yes, *no, *condition)) {
+        Value bound = yesBound;
+        if (!riscv::sameDenseIndex(yesBound, noBound)) {
+          // A scalar condition chooses one complete rectangle. A shaped
+          // condition can create holes unless both branch domains agree.
+          if (!scalarCondition) return failure();
+          bound = b.createOrFold<arith::SelectOp>(op->getLoc(), select.getCondition(), yesBound, noBound);
+        }
+        result.push_back(b.createOrFold<arith::MinUIOp>(op->getLoc(), bound, conditionBound));
+      }
     } else if (isa<riscv::CastOp, riscv::WidenOp, riscv::NarrowOp, riscv::BitcastOp,
                    riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp,
-                   riscv::RVVAxisBroadcastOp>(op)) {
+                   riscv::RVVAxisBroadcastOp, riscv::MacGroupsOp, riscv::Fold2Op>(op)) {
+      auto mac = dyn_cast<riscv::MacGroupsOp>(op);
+      int64_t group = mac ? mac.getGroup() : isa<riscv::Fold2Op>(op) ? 2 : 1;
+      bool grouped = isa<riscv::MacGroupsOp, riscv::Fold2Op>(op);
       SmallVector<std::pair<riscv::ValueType, SmallVector<Value>>> sources;
       for (Value operand : op->getOperands()) {
         auto shaped = dyn_cast<riscv::ValueType>(operand.getType());
@@ -262,7 +310,8 @@ public:
           if (found == ids.end()) continue;
           size_t index = found - ids.begin();
           Value incoming = extents[index];
-          if (input.getShape()[index] == 1 && type.getShape()[position] != 1) {
+          bool groupedAxis = grouped && position + 1 == type.getShape().size();
+          if (!groupedAxis && input.getShape()[index] == 1 && type.getShape()[position] != 1) {
             if (type.getShape()[position] <= 0) return failure();
             Value zero = arith::ConstantIndexOp::create(b, op->getLoc(), 0);
             Value maximum = arith::ConstantIndexOp::create(b, op->getLoc(), type.getShape()[position]);
@@ -274,6 +323,15 @@ public:
         if (!bound && isa<riscv::RVVAxisBroadcastOp>(op) && type.getShape()[position] > 0)
           bound = arith::ConstantIndexOp::create(b, op->getLoc(), type.getShape()[position]);
         if (!bound) return failure();
+        if (grouped && position + 1 == type.getShape().size()) {
+          // Each output group is defined when at least one of its common
+          // input coordinates is active. Missing tail members contribute the
+          // additive identity. Keep the intersection before taking ceil so
+          // nested groups retain both empty and partial domains.
+          if (group <= 0) return failure();
+          Value divisor = arith::ConstantIndexOp::create(b, op->getLoc(), group);
+          bound = b.createOrFold<arith::CeilDivUIOp>(op->getLoc(), bound, divisor);
+        }
         result.push_back(bound);
       }
     } else return failure();
@@ -555,6 +613,9 @@ class ValidityPropagation {
       }
       Value predicate = riscv::ExtractOp::create(b, loc, b.getI1Type(), active, coordinates,
           b.getArrayAttr(selectors), unassignedAccess(b), unselectedLeaf(b));
+      // The mask is defined over the complete capacity, including false tail
+      // coordinates. Its scalar read does not need another validity lowering.
+      predicate.getDefiningOp()->setAttr("weft.riscv.validity_lowered", b.getUnitAttr());
       auto bounds = memoryContains(b, op.getRegion(), coordinates, op);
       if (failed(bounds)) return failure();
       predicate = b.createOrFold<arith::AndIOp>(loc, predicate, *bounds);
@@ -563,6 +624,9 @@ class ValidityPropagation {
       b.setInsertionPointToStart(branch.thenBlock());
       Value value = riscv::ExtractOp::create(b, loc, valueType.getElementType(), op.getValue(), coordinates,
           b.getArrayAttr(selectors), unassignedAccess(b), unselectedLeaf(b));
+      // The surrounding branch already combines the numerical mask and the
+      // destination bounds; it dominates this value read and the store.
+      value.getDefiningOp()->setAttr("weft.riscv.validity_lowered", b.getUnitAttr());
       Value address = riscv::SliceOp::create(b, loc, scalarMemory, op.getRegion(), coordinates, b.getArrayAttr(selectors));
       auto stored = riscv::StoreOp::create(b, loc, value, address, unassignedAccess(b),
           unselectedLeaf(b), riscv::FieldStorePlanAttr());

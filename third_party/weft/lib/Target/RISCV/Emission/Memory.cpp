@@ -1117,6 +1117,15 @@ mlir::LogicalResult Emitter::compileExtent(riscv::ExtentOp operation) {
 
 mlir::LogicalResult Emitter::compileReshape(riscv::ReshapeOp reshape) {
   Binding input = bindings.lookup(reshape.getInput());
+  if (input.kind == Binding::Kind::Field || input.kind == Binding::Kind::Slice) {
+    // Deferred reads still use the producer's logical coordinates. Read their
+    // selected physical parts before renaming or splitting those coordinates;
+    // otherwise a new replica axis can be mistaken for a broadcast and reload
+    // the first source part for every output group.
+    auto materialized = materializeNumeric(reshape.getInput(), std::move(input));
+    if (mlir::failed(materialized)) return mlir::failure();
+    input = std::move(*materialized);
+  }
   if (input.kind == Binding::Kind::Record &&
       reshape.getInput().getType().getShape() != reshape.getResult().getType().getShape()) {
     auto before = reshape.getInput().getType();

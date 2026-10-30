@@ -2774,6 +2774,15 @@ public:
         [&](riscv::ExtractOp extract) { recordExtracts.push_back(extract); });
     llvm::SmallVector<riscv::ExtractOp> deadSubviews;
     for (riscv::ExtractOp extract : recordExtracts) {
+      // A FieldRead still owns the memory access and requires this storage
+      // projection. Only numerical consumers can use the materialized value.
+      riscv::FieldReadOp read;
+      if (extract.getResult().hasOneUse())
+        read = mlir::dyn_cast<riscv::FieldReadOp>(*extract.getResult().getUsers().begin());
+      if (read && read.getResult().getType() != extract.getResult().getType())
+        read = {};
+      if (!read && llvm::all_of(extract.getResult().getUses(), usesStorageProjection))
+        continue;
       auto info = layeredRecordExtract(extract);
       if (!info)
         continue;
@@ -2796,7 +2805,8 @@ public:
       const int64_t temporaryGroups = std::max<int64_t>(
           1, (info->resultType.getLayout().getLmulEighths() + 7) / 8);
       const bool tail = info->resultType.getLayout().getValidity() == "tail";
-      rewriter.setInsertionPoint(extract);
+      // Preserve the explicit read point when the projection feeds FieldRead.
+      rewriter.setInsertionPoint(read ? read.getOperation() : extract.getOperation());
       auto load = riscv::RVVLayeredRecordLoadOp::create(rewriter,
           extract.getLoc(), info->resultType, info->field.getResult(),
           info->origin.getResult(), extract.getIndices().front(), *storagePlan,
@@ -2809,9 +2819,14 @@ public:
       riscv_internal::copyOrigin(extract, load);
       if (auto canonical = extract->getAttr("canonical_op"))
         load->setAttr("canonical_op", canonical);
-      extract.getResult().replaceAllUsesWith(load.getResult());
+      if (read)
+        rewriter.replaceOp(read, load.getResult());
+      else
+        extract.getResult().replaceUsesWithIf(load.getResult(), [&](mlir::OpOperand &use) {
+          return !usesStorageProjection(use);
+        });
       deadSubviews.push_back(info->subview);
-      rewriter.eraseOp(extract);
+      if (extract.getResult().use_empty()) rewriter.eraseOp(extract);
       for (riscv::ConvertLayoutOp conversion :
            llvm::reverse(info->extractConversions))
         if (conversion.getResult().use_empty())

@@ -106,6 +106,7 @@ public:
     lowerMaterializations(rewriter, failed);
     lowerLocalStates(rewriter, failed);
     lowerLoops(rewriter, failed);
+    lowerNumericWindows(rewriter, failed);
     lowerLocalGroupExtracts(rewriter, failed);
     closeOrderedLoops(failed);
     if (failed || mlir::failed(riscv_internal::materializeSharedDomainProjections(module)))
@@ -779,6 +780,80 @@ private:
         continue;
       }
       failed |= mlir::failed(weft::materializeRISCVSharedSupply(operation, rewriter));
+    }
+  }
+
+  void lowerNumericWindows(mlir::IRRewriter &rewriter, bool &failed) {
+    llvm::SmallVector<riscv::ExtractOp> extracts;
+    getOperation().walk([&](riscv::ExtractOp op) { extracts.push_back(op); });
+    llvm::DenseMap<mlir::Value, mlir::Value> saved;
+    int64_t identity = riscv_internal::lastLocalIdentity(getOperation());
+    for (auto extract : extracts) {
+      auto input = extract.getInput().getType();
+      auto output = mlir::dyn_cast<riscv::ValueType>(extract.getResult().getType());
+      auto *definition = extract.getInput().getDefiningOp();
+      if (!output || !definition || input.getLayout().getCarrier() == "local" ||
+          !mlir::isa<mlir::IntegerType, mlir::FloatType>(input.getElementType()) ||
+          mlir::isa<riscv::FieldOp>(definition)) continue;
+      bool grouped = false, domain = false, gather = false, supported = true;
+      for (auto attr : extract.getSelectors()) {
+        auto selector = mlir::cast<mlir::StringAttr>(attr).getValue();
+        grouped |= selector == "group_index";
+        domain |= selector == "domain";
+        gather |= selector == "gather";
+        supported &= selector == "all" || selector == "domain" || selector == "group_index" || selector == "gather";
+      }
+      auto elements = riscv_internal::staticProduct(input.getShape().asArrayRef());
+      bool nestedGather = gather && mlir::isa<riscv::ExtractOp>(definition);
+      bool needsWindow = domain && elements &&
+          input.getLayout().getCarrier() == "scalar" && *elements > 1;
+      if (!supported || (!grouped && !nestedGather && !needsWindow)) continue;
+      if (llvm::any_of(input.getShape().asArrayRef(), [](int64_t n) { return n <= 0; })) continue;
+      mlir::Value storage = saved.lookup(extract.getInput());
+      if (!storage) {
+        // Preserve the original numeric birth and all shared consumers. The
+        // private array exposes a subwindow without re-reading encoded input.
+        rewriter.setInsertionPointAfter(definition);
+        auto local = riscv_internal::localValueType(rewriter, input);
+        auto allocation = riscv_internal::allocateLocalValue(rewriter, local, definition,
+            identity, false, "numeric-window");
+        if (mlir::failed(allocation) || mlir::failed(riscv_internal::initializeLocalValue(
+                rewriter, *allocation, extract.getInput(), definition))) {
+          failed = true; continue;
+        }
+        storage = *allocation;
+        saved[extract.getInput()] = storage;
+      }
+      extract.getInputMutable().assign(storage);
+      if (grouped || gather) continue; // Local index/gather planning consumes the numeric snapshot.
+      rewriter.setInsertionPoint(extract);
+      auto memory = riscv_internal::localView(rewriter, storage, extract);
+      llvm::SmallVector<mlir::Value> offsets;
+      size_t cursor = 0;
+      for (auto [dimension, attr] : llvm::enumerate(extract.getSelectors())) {
+        auto selector = mlir::cast<mlir::StringAttr>(attr).getValue();
+        mlir::Value offset = mlir::arith::ConstantIndexOp::create(rewriter, extract.getLoc(), 0);
+        if (selector == "domain") {
+          auto point = extract.getIndices()[cursor++].getDefiningOp<riscv::PhysicalPointOp>();
+          if (!point) { supported = false; break; }
+          auto extent = mlir::arith::ConstantIndexOp::create(rewriter, extract.getLoc(), input.getShape()[dimension]);
+          offset = mlir::arith::RemUIOp::create(rewriter, extract.getLoc(), point.getBase(), extent);
+        }
+        offsets.push_back(offset);
+      }
+      if (!supported || mlir::failed(memory)) {
+        extract.emitError("numeric window requires a complete physical point and private descriptor");
+        failed = true; continue;
+      }
+      auto window = riscv_internal::valueMemoryWindow(rewriter, *memory, input, offsets, output, extract);
+      if (mlir::failed(window)) {
+        extract.emitError("numeric subwindow changed its declared axis relation");
+        failed = true; continue;
+      }
+      auto load = riscv::LoadOp::create(rewriter, extract.getLoc(), output, *window,
+          mlir::Value(), riscv_internal::unassignedAccess(rewriter), riscv_internal::unselectedLeaf(rewriter));
+      copyIdentity(extract, load);
+      rewriter.replaceOp(extract, load.getResult());
     }
   }
 

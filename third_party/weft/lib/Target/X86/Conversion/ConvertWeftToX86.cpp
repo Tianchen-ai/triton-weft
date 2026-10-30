@@ -1491,8 +1491,19 @@ private:
     if (auto window = region.getDefiningOp<wk::SubviewOp>()) {
       auto baseShape = shape(window.getBase().getType());
       if (window.getOffsets().size() != baseShape.size() || baseShape.empty()) return {};
-      for (size_t axis = 0; axis + 1 < baseShape.size(); ++axis)
-        if (window.getOffsets()[axis] != 0 || window.getExtents()[axis] != baseShape[axis]) return {};
+      unsigned dynamic = llvm::count(window.getOffsets(), -1);
+      for (size_t axis = 0; axis + 1 < baseShape.size(); ++axis) {
+        if (window.getOffsets()[axis] != 0) return {};
+        int64_t extent = window.getExtents()[axis];
+        if (extent == -1) {
+          // The dynamic-bound marker is not a symbolic shape identity. A
+          // whole-axis access needs the actual extent of the base region.
+          Value bound = mapped(window.getDynamicBounds()[dynamic++]);
+          if (bound != memories.at(window.getBase()).extents[axis]) return {};
+        } else if (extent != baseShape[axis]) {
+          return {};
+        }
+      }
       windowOffset = window.getOffsets().back();
       windowElements = window.getExtents().back();
       if (windowOffset == -1 && window.getDynamicBounds().size() == 1) {
@@ -3978,7 +3989,14 @@ private:
         stride *= dimensions[axis];
       }
     }
-    bool packets = (dynamic || stridedRows) && !packedType(domain.getType()) && !extents.empty() && ids == memoryAxes &&
+    // An encoded snapshot already traverses storage bytes here. For a direct
+    // record layout those bytes have the same contiguous inner relation as a
+    // dense array. Packetize at the original read point, preserving snapshot
+    // lifetime, tail validity and all alias ordering. Interleaved records keep
+    // their explicit storage-map path.
+    bool packedPackets = packedType(domain.getType());
+    bool packets = (dynamic || stridedRows || packedPackets) &&
+        (!packedType(domain.getType()) || packedPackets) && !extents.empty() && ids == memoryAxes &&
         bits >= 8 && bits <= 64 && llvm::isPowerOf2_32(bits) && matchPattern(view.storageMapped, m_Zero()) &&
         (!input || isa<MemRefType>(mapped(input).getType()));
     if (packets) {
@@ -4091,9 +4109,70 @@ private:
     Type elementType = scalar(op.getResult().getType());
     unsigned width = elementType.getIntOrFloatBitWidth();
     int64_t slots = (width + 7) / 8 + 1;
-    Value table = storageTable(loc, *layout, fieldIndex, false);
     auto extents = arrayExtents(op.getResult(), loc);
     auto output = weft::x86::allocateArray(b, loc, elementType, extents);
+    // The record extent and every field fragment are compile-time facts even
+    // when the number of records is dynamic. Keep one dynamic record loop and
+    // decode each record with constant vector permutations. This preserves the
+    // snapshot read and validity while avoiding a runtime fragment-table walk
+    // for every logical field element.
+    bool staticRecords = isa<MemRefType>(mapped(op.getOwner()).getType()) &&
+        fieldElements <= 4096 && layout->bytes() <= 4096;
+    if (staticRecords) {
+      Value records = arith::DivUIOp::create(b, loc,
+          weft::x86::arraySize(b, loc, extents), indexConstant(loc, fieldElements));
+      auto loop = scf::ForOp::create(b, loc, indexConstant(loc, 0), records, indexConstant(loc, 1));
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(loop.getBody());
+      Value record = loop.getInductionVar();
+      Value sourceBase = arith::MulIOp::create(b, loc, record, indexConstant(loc, layout->bytes()));
+      Value outputBase = arith::MulIOp::create(b, loc, record, indexConstant(loc, fieldElements));
+      auto recordType = VectorType::get({layout->bytes()}, b.getI8Type());
+      Value source = vector::LoadOp::create(b, loc, recordType, mapped(op.getOwner()), sourceBase);
+      Value sourceValid = vector::LoadOp::create(b, loc, recordType, valid(op.getOwner(), loc), sourceBase);
+      unsigned carrierWidth = target.vectorBits == 512 ? 16 : 32;
+      while (carrierWidth < width) carrierWidth *= 2;
+      auto bitsType = VectorType::get({fieldElements}, b.getIntegerType(carrierWidth));
+      auto byteType = VectorType::get({fieldElements}, b.getI8Type());
+      auto maskType = VectorType::get({fieldElements}, b.getI1Type());
+      Value bits = zero(loc, bitsType), active = constant(loc, maskType, b.getBoolAttr(true));
+      for (int64_t part = 0; part < slots; ++part) {
+        SmallVector<int64_t> indices;
+        SmallVector<APInt> shifts, fields, outputShifts, required;
+        bool any = false;
+        for (int64_t entry = 0; entry < fieldElements; ++entry) {
+          auto fragments = layout->fragments(fieldIndex, entry, false);
+          auto fragment = part < static_cast<int64_t>(fragments.size()) ?
+              fragments[part] : weft::analysis::StorageByteFragment{};
+          indices.push_back(fragment.byte);
+          shifts.emplace_back(carrierWidth, fragment.shift);
+          fields.emplace_back(carrierWidth, fragment.mask);
+          outputShifts.emplace_back(carrierWidth, fragment.resultShift);
+          required.emplace_back(1, fragment.mask != 0);
+          any |= fragment.mask != 0;
+        }
+        if (!any) continue;
+        auto literal = [&](VectorType type, ArrayRef<APInt> data) -> Value {
+          return arith::ConstantOp::create(b, loc, type, DenseIntElementsAttr::get(type, data));
+        };
+        Value data = operation(loc, "arith.extui", bitsType, permute(loc, source, indices, byteType));
+        Value fragment = arith::AndIOp::create(b, loc,
+            arith::ShRUIOp::create(b, loc, data, literal(bitsType, shifts)), literal(bitsType, fields));
+        bits = arith::OrIOp::create(b, loc, bits,
+            arith::ShLIOp::create(b, loc, fragment, literal(bitsType, outputShifts)));
+        Value partValid = arith::TruncIOp::create(b, loc, maskType, permute(loc, sourceValid, indices, byteType));
+        active = arith::AndIOp::create(b, loc, active,
+            arith::SelectOp::create(b, loc, literal(maskType, required), partValid,
+                constant(loc, maskType, b.getBoolAttr(true))));
+      }
+      auto integerType = VectorType::get({fieldElements}, b.getIntegerType(width));
+      if (width != carrierWidth) bits = operation(loc, "arith.trunci", integerType, bits);
+      if (isa<FloatType>(elementType))
+        bits = operation(loc, "arith.bitcast", VectorType::get({fieldElements}, elementType), bits);
+      vector::StoreOp::create(b, loc, bits, output.data, outputBase);
+      vector::StoreOp::create(b, loc, arith::ExtUIOp::create(b, loc, byteType, active), output.valid, outputBase);
+    } else {
+    Value table = storageTable(loc, *layout, fieldIndex, false);
     if (failed(weft::x86::forArray(b, loc, extents, [&](Value linear, ValueRange) {
       Value record = arith::DivUIOp::create(b, loc, linear, indexConstant(loc, fieldElements));
       Value entry = arith::RemUIOp::create(b, loc, linear, indexConstant(loc, fieldElements));
@@ -4125,6 +4204,7 @@ private:
       storeArrayMask(loc, active, output.valid, linear);
       return success();
     }))) return failure();
+    }
     bindArray(op.getResult(), output, loc);
     auto origin = origins(op.getOwner(), loc); Value recordOrigin = origin.back(); origin.pop_back();
     for (auto [i, extent] : llvm::enumerate(fieldShape))
@@ -4222,6 +4302,12 @@ private:
       int64_t rowWidth = tile.back();
       unsigned bits = storageType.getElementType().getIntOrFloatBitWidth();
       int64_t packetWidth = std::max<int64_t>(1, target.vectorBits / std::max<unsigned>(8, bits));
+      // Preserve the contiguous row in the physical IR so consumer projections
+      // can select its actual bytes before vector legalization. Splitting and
+      // stitching here obscures the load/shuffle relation used by the common
+      // snapshot slicer, although the source snapshot remains immutable.
+      if (packedType(source.getType()))
+        packetWidth = rowWidth;
       for (int64_t row = 0; row < resultType.getNumElements() / rowWidth; ++row) {
         for (int64_t start = 0; start < rowWidth; start += packetWidth) {
           int64_t lanes = std::min(packetWidth, rowWidth - start);

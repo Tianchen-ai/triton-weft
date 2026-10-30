@@ -193,6 +193,13 @@ class WeftSemantic:
         self._shape_ids: dict[str, int] = {}
         self._axis_ids: dict[str, int] = {}
         self._shape_symbols: dict[str, Value] = {}
+        self._kernel_shape_names: dict[Value, str] = {}
+        self._kernel_shape_ids: dict[Value, int] = {}
+        self._local_extents: dict[Value, tuple[int, Value]] = {}
+        self._local_extent_expressions: dict[tuple, tuple[int, Value]] = {}
+        self._local_extent_values: dict[int, Value] = {}
+        # Local SSA dimensions have a separate identity space from ABI shapes.
+        self._next_local_shape_id = 1 << 32
         self._shape_multiples: dict[str, int] = {}
         self._auto_symbols: dict[str, Value] = {}
         self._auto_choices: dict[str, tuple[int, ...]] = {}
@@ -466,6 +473,52 @@ class WeftSemantic:
                 result_names=(name,),
             )[0]
             self._shape_symbols[name] = value
+            self._kernel_shape_names[value] = name
+            self._kernel_shape_ids[value] = self._shape_ids[name]
+
+    def _local_extent(self, value: Value, node: ast.AST) -> tuple[int, Value]:
+        if value in self._kernel_shape_names:
+            return self._kernel_shape_ids[value], value
+        if value in self._local_extents:
+            return self._local_extents[value]
+        # Bind beside the defining SSA value so every dominated subview of the
+        # same bound shares an identity, including uses in sibling regions.
+        owner = next((region for region in self.builder.regions
+                      if any(argument is value for argument in region.arguments) or
+                      any(operation is value.producer for operation in region.operations)), None)
+        if owner is None:
+            raise FrontendError("local extent has no defining SSA scope", self._location(node))
+        def expression_key(current):
+            operation = current.producer
+            if operation is None or operation.name not in {
+                    "weft_kernel.constant", "arith.constant", "weft_kernel.binary", "weft_kernel.cast"}:
+                return ("ssa", current.id)
+            return (operation.name, current.type, tuple(sorted(operation.attributes.items())),
+                    tuple(expression_key(operand) for operand in operation.operands))
+        key = (id(owner), expression_key(value))
+        if key in self._local_extent_expressions:
+            result = self._local_extent_expressions[key]
+            self._local_extents[value] = result
+            return result
+        point = self.builder.get_insertion_point()
+        self.builder.block = owner
+        self.builder.position = (next(i for i, operation in enumerate(owner.operations)
+                                      if operation is value.producer) + 1
+                                 if value.producer is not None else 0)
+        try:
+            extent = self._convert_value(value, index, node)
+            identity = self._next_local_shape_id
+            self._next_local_shape_id += 1
+            extent = self._emit("weft_kernel.local_shape", node, operands=(extent,),
+                                result_types=(ScalarType(index),),
+                                attributes={"id": str(identity) + " : i64"})[0]
+        finally:
+            self.builder.restore_insertion_point(point)
+        result = (-identity, extent)
+        self._local_extents[value] = result
+        self._local_extent_expressions[key] = result
+        self._local_extent_values[-identity] = extent
+        return result
 
     def _parse_annotation(self, annotation: ast.expr) -> ValueType:
         if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
@@ -1773,6 +1826,7 @@ class WeftSemantic:
             raise FrontendError("subview base must be a View region", self._location(call))
 
         dynamic_bounds: list[Value] = []
+        selected_shape: list[int] = []
 
         def bounds(name: str) -> tuple[int, ...]:
             node = args[name]
@@ -1786,6 +1840,8 @@ class WeftSemantic:
                     if literal < 0 or (name == "extents" and literal == 0):
                         raise FrontendError("subview bounds require non-negative offsets and positive extents", self._location(call))
                     result.append(literal)
+                    if name == "extents":
+                        selected_shape.append(literal)
                     continue
                 if not isinstance(literal, Value):
                     raise FrontendError("subview bounds must be integer expressions", self._location(call))
@@ -1794,7 +1850,12 @@ class WeftSemantic:
                     DTypeCategory.INTEGER, DTypeCategory.INDEX
                 }:
                     raise FrontendError("subview dynamic bounds must be scalar integers", self._location(origin))
-                dynamic_bounds.append(self._convert_value(value, index, origin))
+                if name == "extents":
+                    identity, extent = self._local_extent(value, origin)
+                    selected_shape.append(identity)
+                    dynamic_bounds.append(extent)
+                else:
+                    dynamic_bounds.append(self._convert_value(value, index, origin))
                 result.append(-1)
             return tuple(result)
 
@@ -1817,7 +1878,7 @@ class WeftSemantic:
             call,
             operands=(region, *dynamic_bounds),
             result_types=(SliceType(region.type.encoding,
-                tuple(extent if extent > 0 else -axis for extent, axis in zip(extents, axes_of(region.type))),
+                tuple(selected_shape),
                 axes_of(region.type)),),
             attributes={"offsets": _i64_array(offsets), "extents": _i64_array(extents)},
         )[0]
@@ -2402,6 +2463,41 @@ class WeftSemantic:
             return "state" if callee.name == "state" else "staged"
         return None
 
+    def _level_static_statements(self, statements: Sequence[ast.stmt]) -> list[ast.stmt]:
+        """Expose births in selected constexpr branches before region formation.
+
+        Only side-effect-free scalar constexpr expressions are inspected here.
+        Runtime branches and declarations local to this Level remain in its
+        body and are compiled by the common Triton control-flow implementation.
+        """
+        from triton.language import constexpr
+        result = []
+        for statement in statements:
+            static = isinstance(statement, ast.If)
+            if static:
+                for node in ast.walk(statement.test):
+                    if isinstance(node, (ast.Call, ast.Attribute, ast.Subscript, ast.NamedExpr)):
+                        static = False
+                        break
+                    if isinstance(node, ast.Name):
+                        if node.id in self.generator.lscope:
+                            captured = self.generator.lscope[node.id]
+                            value = normalize_static(captured.value) if isinstance(captured, constexpr) else None
+                        else:
+                            value = self.static_env.get(node.id)
+                        if not isinstance(value, (bool, int, float)):
+                            static = False
+                            break
+            if static:
+                selected = self._eval_static(statement.test)
+                if isinstance(selected, constexpr):
+                    selected = selected.value
+                if isinstance(selected, (bool, int, float)):
+                    result.extend(self._level_static_statements(statement.body if selected else statement.orelse))
+                    continue
+            result.append(statement)
+        return result
+
     def _compile_level(self, statement: ast.With) -> None:
         if len(statement.items) != 1:
             raise FrontendError("one with statement opens one Level", self._location(statement))
@@ -2425,9 +2521,10 @@ class WeftSemantic:
         self._domain_partition_values[domain_type.domain_id] = partition
         point_type = DomainPointType(domain_type)
 
-        state_statements = [s for s in statement.body if self._birth_kind(s) == "state"]
-        staged_statements = [s for s in statement.body if self._birth_kind(s) == "staged"]
-        body_statements = [s for s in statement.body if self._birth_kind(s) is None]
+        statements = self._level_static_statements(statement.body)
+        state_statements = [s for s in statements if self._birth_kind(s) == "state"]
+        staged_statements = [s for s in statements if self._birth_kind(s) == "staged"]
+        body_statements = [s for s in statements if self._birth_kind(s) is None]
         initialization_unavailable = {
             name: f"Level initialization cannot reference body value {name!r}; state and stage "
             "initializers execute before the Level body"
@@ -2617,7 +2714,10 @@ class WeftSemantic:
             elif isinstance(source, ast.Name):
                 axis_name = source.id.lower()
                 axis_id = self._axis_id(source.id)
-                if source.id in self._shape_symbols:
+                # Helper arguments and local names follow lexical scope. A
+                # caller's shape symbol with the same spelling must not replace
+                # a helper's explicitly supplied (possibly smaller) extent.
+                if source.id in self._shape_symbols and source.id not in self.generator.lscope:
                     extent_value = self._shape_symbols[source.id]
                 else:
                     extent_value = self._compile_expr(source)
@@ -2626,7 +2726,7 @@ class WeftSemantic:
                         raise FrontendError("Level extent must be a named integer scalar, shape symbol or parent point",
                                             self._location(source))
                     extent_value = self._convert_value(extent_value, index, source)
-                extent_symbol = source.id
+                extent_symbol = self._kernel_shape_names.get(extent_value)
             else:
                 raise FrontendError("Level domain is a shape symbol or parent point", self._location(source))
         else:
@@ -2661,8 +2761,13 @@ class WeftSemantic:
         tail = "tail"
         if isinstance(partition_spelling, int):
             extent_spelling = self._domain_partition_spelling.get(source_domain.domain_id) if source_domain else None
+            if source_domain is None and extent_value.producer is not None and extent_value.producer.name in {
+                    "weft_kernel.constant", "arith.constant"}:
+                extent_spelling = int(extent_value.producer.attributes["value"].split(":")[0].strip(), 0)
             if (source_domain is not None and source_domain.tail == "exact" and
                     isinstance(extent_spelling, int) and extent_spelling % partition_spelling == 0):
+                tail = "exact"
+            elif source_domain is None and isinstance(extent_spelling, int) and extent_spelling % partition_spelling == 0:
                 tail = "exact"
             elif (
                 extent_symbol is not None

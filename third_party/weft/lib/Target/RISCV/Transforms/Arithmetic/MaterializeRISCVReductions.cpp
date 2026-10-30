@@ -22,6 +22,7 @@ public:
     registry.insert<riscv::WEFTRISCVDialect, arith::ArithDialect>();
   }
   void runOnOperation() override {
+    materializeSingletonIntegerContracts();
     SmallVector<riscv::ReduceRegionOp> reductions;
     SmallVector<riscv::ScanOp> scans;
     int64_t nextAxis = 0;
@@ -43,6 +44,57 @@ public:
   }
 
 private:
+  void materializeSingletonIntegerContracts() {
+    SmallVector<Operation *> contracts;
+    getOperation().walk([&](Operation *op) {
+      if (!isa<riscv::DotOp, riscv::ContractOp, riscv::OuterContractOp>(op)) return;
+      auto intent = op->getAttrOfType<StringAttr>("engine");
+      if (intent && intent.getValue() == "matrix") return;
+      auto result = dyn_cast<riscv::ValueType>(op->getResult(0).getType());
+      auto lhs = dyn_cast<riscv::ValueType>(op->getOperand(0).getType());
+      auto rhs = dyn_cast<riscv::ValueType>(op->getOperand(1).getType());
+      auto over = op->getAttrOfType<DenseI64ArrayAttr>("over");
+      if (!result || !lhs || !rhs || !over || over.size() != 1 ||
+          !isa<IntegerType>(result.getElementType()) ||
+          lhs.getElementType() != result.getElementType() ||
+          rhs.getElementType() != result.getElementType() ||
+          llvm::any_of(result.getShape().asArrayRef(), [](int64_t n) { return n != 1; }))
+        return;
+      contracts.push_back(op);
+    });
+    IRRewriter b(&getContext());
+    for (Operation *op : contracts) {
+      auto result = cast<riscv::ValueType>(op->getResult(0).getType());
+      int64_t axis = op->getAttrOfType<DenseI64ArrayAttr>("over")[0];
+      SmallVector<int64_t> shape, axes;
+      for (Value input : op->getOperands()) {
+        auto type = cast<riscv::ValueType>(input.getType());
+        for (auto [id, extent] : llvm::zip(type.getAxisIds().asArrayRef(), type.getShape().asArrayRef()))
+          if (!llvm::is_contained(axes, id)) { axes.push_back(id); shape.push_back(extent); }
+      }
+      auto position = llvm::find(axes, axis);
+      if (position == axes.end()) continue;
+      int64_t index = position - axes.begin();
+      SmallVector<int64_t> freeAxes(axes), freeShape(shape);
+      freeAxes.erase(freeAxes.begin() + index);
+      freeShape.erase(freeShape.begin() + index);
+      if (ArrayRef<int64_t>(freeAxes) != result.getAxisIds().asArrayRef() ||
+          ArrayRef<int64_t>(freeShape) != result.getShape().asArrayRef()) continue;
+      b.setInsertionPoint(op);
+      auto productType = riscv::ValueType::get(b.getContext(), result.getElementType(),
+          b.getDenseI64ArrayAttr(shape), b.getDenseI64ArrayAttr(axes), unassignedLayout(b, axes));
+      // Equal-width integer multiply and modular add can use reduction lanes
+      // even when all output axes are singleton. No free-axis vector is needed.
+      auto product = riscv::BinaryOp::create(b, op->getLoc(), productType,
+          op->getOperand(0), op->getOperand(1), "mul", unselectedLeaf(b));
+      auto reduction = riscv::ReduceOp::create(b, op->getLoc(), result, product,
+          "add", index, unselectedLeaf(b), ValueRange{});
+      copyOrigin(op, product);
+      copyOrigin(op, reduction);
+      b.replaceOp(op, reduction.getResult());
+    }
+  }
+
   LogicalResult materializeScan(IRRewriter &b, riscv::ScanOp op, int64_t &nextAxis) {
     const unsigned axis = op.getAxis();
     auto input = cast<riscv::ValueType>(op.getInputs()[0].getType());

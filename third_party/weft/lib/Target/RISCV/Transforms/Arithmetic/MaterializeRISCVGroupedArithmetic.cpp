@@ -19,11 +19,22 @@ bool hasWideningReduction(riscv::MacGroupsOp op) {
   if (!a || !c || a.getWidth() > 8 || c.getWidth() > 8 ||
       a.isUnsigned() == c.isUnsigned() || !logicalElement(op.getResult().getType()).isInteger(16) ||
       !op.getResult().hasOneUse()) return false;
+  // The fused leaf consumes a layered encoded field. A staged numerical
+  // value has already severed that storage relation and must use the ordinary
+  // grouped projection below, retaining the same finite-width boundary.
+  auto field = sourceField(a.isUnsigned() ? op.getLhs() : op.getRhs());
+  auto facts = field ? fieldFacts(field) : FieldFacts{};
+  if (!field || facts.mapping == "dense") return false;
   auto widen = dyn_cast<riscv::WidenOp>(*op.getResult().getUsers().begin());
   if (!widen || !logicalElement(widen.getResult().getType()).isInteger(32) ||
       !widen.getResult().hasOneUse()) return false;
   auto reduce = dyn_cast<riscv::ReduceOp>(*widen.getResult().getUsers().begin());
-  return reduce && reduce.getKind() == "add";
+  if (!reduce || reduce.getKind() != "add") return false;
+  auto result = dyn_cast<riscv::ValueType>(reduce.getResult().getType());
+  // The cohort leaf vectorizes a free output axis. Singleton outputs instead
+  // use the general grouped values followed by the ordinary lane reduction.
+  return result && llvm::any_of(result.getShape().asArrayRef(),
+                               [](int64_t extent) { return extent > 1; });
 }
 
 class MaterializeRISCVGroupedArithmeticPass
@@ -36,6 +47,7 @@ public:
     registry.insert<riscv::WEFTRISCVDialect, arith::ArithDialect, scf::SCFDialect>();
   }
   void runOnOperation() override {
+    foldExactGroupedReductions();
     SmallVector<Operation *> operations;
     SmallVector<Operation *> original;
     int64_t nextAxis = 0;
@@ -53,7 +65,9 @@ public:
       for (Region &region : op->getRegions())
         for (Block &block : region)
           for (Type type : block.getArgumentTypes()) inspect(type);
-      if (auto mac = dyn_cast<riscv::MacGroupsOp>(op); mac && !hasWideningReduction(mac)) operations.push_back(mac);
+      if (auto mac = dyn_cast<riscv::MacGroupsOp>(op);
+          mac && !hasWideningReduction(mac))
+        operations.push_back(mac);
       if (auto fold = dyn_cast<riscv::Fold2Op>(op)) {
         auto field = sourceField(fold.getInput());
         auto facts = field ? fieldFacts(field) : FieldFacts{};
@@ -75,6 +89,51 @@ public:
     for (auto op : operations) b.replaceOp(op, results.lookup(op->getResult(0)));
   }
 private:
+  void foldExactGroupedReductions() {
+    SmallVector<riscv::MacGroupsOp> operations;
+    getOperation().walk([&](riscv::MacGroupsOp op) { operations.push_back(op); });
+    IRRewriter b(&getContext());
+    for (auto mac : operations) {
+      if (hasWideningReduction(mac) || !mac.getResult().hasOneUse()) continue;
+      auto partial = dyn_cast<riscv::ValueType>(mac.getResult().getType());
+      auto width = partial ? dyn_cast<IntegerType>(partial.getElementType()) : IntegerType();
+      auto widen = dyn_cast<riscv::WidenOp>(*mac.getResult().getUsers().begin());
+      if (!width || !width.isSigned() || width.getWidth() != 16 || !widen ||
+          logicalBitWidth(mac.getLhs().getType()) > 16 ||
+          logicalBitWidth(mac.getRhs().getType()) > 16 ||
+          !widen.getResult().hasOneUse() || !logicalElement(widen.getResult().getType()).isSignedInteger(32))
+        continue;
+      auto reduce = dyn_cast<riscv::ReduceOp>(*widen.getResult().getUsers().begin());
+      if (!reduce || reduce.getKind() != "add" ||
+          reduce.getAxis() != int64_t(partial.getShape().size()) - 1) continue;
+      auto lhs = integerRange(mac.getLhs()), rhs = integerRange(mac.getRhs());
+      if (!lhs || !rhs) continue;
+      const int64_t amin = lhs->minimum.getExtValue(), amax = lhs->maximum.getExtValue();
+      const int64_t bmin = rhs->minimum.getExtValue(), bmax = rhs->maximum.getExtValue();
+      __int128 products[] = {__int128(amin) * bmin, __int128(amin) * bmax,
+                            __int128(amax) * bmin, __int128(amax) * bmax};
+      auto bounds = std::minmax_element(std::begin(products), std::end(products));
+      __int128 minimum = *bounds.first * mac.getGroup();
+      __int128 maximum = *bounds.second * mac.getGroup();
+      if (minimum < -32768 || maximum > 32767) continue;
+      b.setInsertionPoint(reduce);
+      auto dot = riscv::DotOp::create(b, reduce.getLoc(), reduce.getResult().getType(),
+          mac.getLhs(), mac.getRhs(), b.getDenseI64ArrayAttr({partial.getAxisIds().asArrayRef().back()}),
+          TypeAttr::get(logicalElement(widen.getResult().getType())),
+          "unassigned", "unassigned", mac.getSchedule(), unselectedLeaf(b));
+      // The boundary is eliminated only after proving that every narrow group
+      // has the same signed value before and after widening. The outer i32 sum
+      // then has exactly the same modular result, including partial tails.
+      dot->setAttr("engine", b.getStringAttr("vector"));
+      dot->setAttr("weft.riscv.proven_group_range", b.getDenseI64ArrayAttr(
+          {int64_t(mac.getGroup()), int64_t(minimum), int64_t(maximum)}));
+      copyOrigin(mac, dot);
+      b.replaceOp(reduce, dot.getResult());
+      b.eraseOp(widen);
+      b.eraseOp(mac);
+    }
+  }
+
   LogicalResult materialize(IRRewriter &b, Operation *op, int64_t groupedAxis, int64_t &nextAxis,
                             DenseMap<Value, Value> &results, DenseMap<Value, Value> &masks) {
     SmallVector<Value> inputs(op->getOperands());

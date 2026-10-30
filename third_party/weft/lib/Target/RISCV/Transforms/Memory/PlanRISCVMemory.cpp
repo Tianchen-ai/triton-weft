@@ -3259,31 +3259,37 @@ std::optional<riscv::ValueType> linearLocalCarrier(
     if (llvm::any_of(factors.asArrayRef(), [](int64_t n) { return n != 1; })) return std::nullopt;
   size_t first = 0;
   while (layout.getLaneFactors()[first] == 1) ++first;
-  auto suffix = type.getAxisIds().asArrayRef().drop_front(first);
-  // Preserve every active prefix axis. Only complete fixed-index suffixes can
-  // be merged: a Level point on a merged axis would need a different bound.
+  size_t last = layout.getLaneFactors().size() - 1;
+  while (layout.getLaneFactors()[last] == 1) --last;
+  const size_t mergedCount = last - first + 1;
+  auto mergedAxes = type.getAxisIds().asArrayRef().slice(first, mergedCount);
+  // Merge only the adjacent lane interval. Replica axes outside that interval
+  // remain independent parts: splitting the outer lanes instead would turn
+  // each short vector into a separate architectural register. A Level point
+  // on a merged axis would need a different active bound, so retain that edge.
   if (layout.getValidity() == "tail")
     for (mlir::Operation *scope = access; scope && scope->getBlock(); scope = scope->getParentOp()) {
       if (auto loop = mlir::dyn_cast<riscv::LoopOp>(scope);
-          loop && llvm::is_contained(suffix, loop.getDomain().getType().getAxisId()))
+          loop && llvm::is_contained(mergedAxes, loop.getDomain().getType().getAxisId()))
         return std::nullopt;
       for (mlir::Operation *previous = scope->getPrevNode(); previous; previous = previous->getPrevNode())
         if (auto point = mlir::dyn_cast<riscv::PhysicalPointOp>(previous);
-            point && llvm::is_contained(suffix, point.getType().getDomain().getAxisId()))
+            point && llvm::is_contained(mergedAxes, point.getType().getDomain().getAxisId()))
           return std::nullopt;
     }
-  if (llvm::any_of(layout.getReplicaFactors().asArrayRef().drop_front(first),
+  if (llvm::any_of(layout.getReplicaFactors().asArrayRef().slice(first, mergedCount),
                    [](int64_t n) { return n != 1; })) return std::nullopt;
-  auto extent = riscv_internal::staticProduct(type.getShape().asArrayRef().drop_front(first));
-  auto time = riscv_internal::staticProduct(layout.getTimeFactors().asArrayRef().drop_front(first));
-  auto lanes = riscv_internal::staticProduct(layout.getLaneFactors().asArrayRef().drop_front(first));
+  auto extent = riscv_internal::staticProduct(type.getShape().asArrayRef().slice(first, mergedCount));
+  auto time = riscv_internal::staticProduct(layout.getTimeFactors().asArrayRef().slice(first, mergedCount));
+  auto lanes = riscv_internal::staticProduct(layout.getLaneFactors().asArrayRef().slice(first, mergedCount));
   if (!extent || !time || !lanes || *extent / *lanes != *time || *extent % *lanes) return std::nullopt;
-  auto merged = [&](mlir::DenseI64ArrayAttr values, int64_t last) {
+  auto merged = [&](mlir::DenseI64ArrayAttr values, int64_t middle) {
     llvm::SmallVector<int64_t> result(values.asArrayRef().take_front(first));
-    result.push_back(last);
+    result.push_back(middle);
+    llvm::append_range(result, values.asArrayRef().drop_front(last + 1));
     return builder.getDenseI64ArrayAttr(result);
   };
-  auto axes = builder.getDenseI64ArrayAttr(type.getAxisIds().asArrayRef().take_front(first + 1));
+  auto axes = merged(type.getAxisIds(), type.getAxisIds()[first]);
   auto flat = riscv::LayoutAttr::get(builder.getContext(), "rvv", axes,
       merged(layout.getTimeFactors(), *time), merged(layout.getLaneFactors(), *lanes),
       merged(layout.getReplicaFactors(), 1), merged(layout.getFragmentFactors(), 1),

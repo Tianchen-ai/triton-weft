@@ -279,6 +279,19 @@ class CanonicalSemantic(TritonSemantic):
                     extension._shape_ids[name] = extent
                 else:
                     extension._shape_ids[name] = extent
+                    kernel_dimensions = {identity: value for value, identity in extension._kernel_shape_ids.items()}
+                    if extent in kernel_dimensions:
+                        dimension = kernel_dimensions[extent]
+                        extension._shape_symbols[name] = dimension
+                        if name not in bound.arguments:
+                            generator.set_value(name, wrap(dimension))
+                        continue
+                    if extent in extension._local_extent_values:
+                        dimension = extension._local_extent_values[extent]
+                        extension._shape_symbols[name] = dimension
+                        if name not in bound.arguments:
+                            generator.set_value(name, wrap(dimension))
+                        continue
                     for argument in bound.arguments.values():
                         actual = unwrap(argument)
                         if not isinstance(actual, Value) or not isinstance(actual.type, (ViewType, SliceType)):

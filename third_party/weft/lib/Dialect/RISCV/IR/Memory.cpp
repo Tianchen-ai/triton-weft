@@ -252,16 +252,28 @@ LogicalResult weft::riscv::LinearViewOp::verify() {
   auto count = contiguousLocalElements(getBase());
   const size_t rank = result.getShape().size();
   if (!count || rank == 0 || rank >= source.getShape().size())
-    return emitOpError("linear view must merge a nonempty contiguous suffix of private memory");
-  int64_t suffix = 1;
-  for (int64_t extent : source.getShape().asArrayRef().drop_front(rank - 1)) suffix *= extent;
-  SmallVector<int64_t> shape(source.getShape().asArrayRef().take_front(rank - 1));
-  shape.push_back(suffix);
+    return emitOpError("linear view must merge adjacent axes of contiguous private memory");
+  // A contiguous interval may be followed by independent replica axes. Keep
+  // those axes and their identities instead of requiring every merge to reach
+  // the last dimension. The first axis names the merged row-major interval.
+  const size_t mergedCount = source.getShape().size() - rank + 1;
+  bool reassociated = false;
+  for (size_t first = 0; first < rank && !reassociated; ++first) {
+    int64_t extent = 1;
+    for (int64_t size : source.getShape().asArrayRef().slice(first, mergedCount)) extent *= size;
+    SmallVector<int64_t> shape(source.getShape().asArrayRef().take_front(first));
+    shape.push_back(extent);
+    llvm::append_range(shape, source.getShape().asArrayRef().drop_front(first + mergedCount));
+    SmallVector<int64_t> axes(source.getAxisIds().asArrayRef().take_front(first + 1));
+    llvm::append_range(axes, source.getAxisIds().asArrayRef().drop_front(first + mergedCount));
+    reassociated = result.getShape().asArrayRef() == ArrayRef<int64_t>(shape) &&
+                   result.getAxisIds().asArrayRef() == ArrayRef<int64_t>(axes);
+  }
   SmallVector<int64_t> strides(rank, 1), origins(rank, 0);
-  for (size_t i = rank - 1; i > 0; --i) strides[i - 1] = strides[i] * shape[i];
-  if (!count || result.getEncoding() != source.getEncoding() ||
-      result.getShape().asArrayRef() != ArrayRef<int64_t>(shape) ||
-      result.getAxisIds().asArrayRef() != source.getAxisIds().asArrayRef().take_front(rank) ||
+  if (!reassociated)
+    return emitOpError("linear view must preserve axis order outside its merged interval");
+  for (size_t i = rank - 1; i > 0; --i) strides[i - 1] = strides[i] * result.getShape()[i];
+  if (result.getEncoding() != source.getEncoding() ||
       result.getStrides().asArrayRef() != ArrayRef<int64_t>(strides) ||
       result.getOrigins().asArrayRef() != ArrayRef<int64_t>(origins) ||
       result.getAlignment() != source.getAlignment() || result.getAddressClass() != "slice" ||
