@@ -3994,7 +3994,7 @@ private:
     // dense array. Packetize at the original read point, preserving snapshot
     // lifetime, tail validity and all alias ordering. Interleaved records keep
     // their explicit storage-map path.
-    bool packedPackets = packedType(domain.getType());
+    bool packedPackets = bool(packedType(domain.getType()));
     bool packets = (dynamic || stridedRows || packedPackets) &&
         (!packedType(domain.getType()) || packedPackets) && !extents.empty() && ids == memoryAxes &&
         bits >= 8 && bits <= 64 && llvm::isPowerOf2_32(bits) && matchPattern(view.storageMapped, m_Zero()) &&
