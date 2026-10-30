@@ -56,12 +56,36 @@ bool checkX86ThreadState(const X86Target &target, std::string &error) {
 #if defined(__linux__) && defined(__x86_64__)
   // LLVM's host probe combines CPUID with OSXSAVE/XGETBV. CPUID alone does not
   // authorize AVX or AVX-512 execution in this thread.
-  auto available = llvm::sys::getHostCPUFeatures();
+  // Hardware capability probing serializes many CPUID leaves. Reuse it while
+  // this thread remains on the same CPU, but check its live XCR0 below on every
+  // call. Context verification separately enforces the allowed affinity set.
+  struct Probe {
+    pid_t process = 0;
+    int cpu = -1;
+    llvm::StringMap<bool> features;
+  };
+  thread_local Probe probe;
+  const pid_t process = getpid();
+  const int cpu = sched_getcpu();
+  if (cpu < 0 || probe.process != process || probe.cpu != cpu) {
+    probe.features = llvm::sys::getHostCPUFeatures();
+    probe.process = process;
+    probe.cpu = cpu;
+  }
+  const auto &available = probe.features;
   for (const auto &name : target.features)
     if (!available.lookup(name)) {
       error = "x86 execution requires CPU and OS vector-state support for " + name;
       return false;
     }
+  uint32_t low = 0, high = 0;
+  __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
+  const uint64_t state = (uint64_t(high) << 32) | low;
+  const uint64_t required = target.hasFeature("avx512f") ? 0xe6 : 0x6;
+  if ((state & required) != required) {
+    error = "calling thread has no enabled x86 vector state";
+    return false;
+  }
   if (target.hasFeature("amx-tile")) {
     unsigned long permitted = 0;
     if (syscall(SYS_arch_prctl, ARCH_GET_XCOMP_PERM, &permitted) != 0) {
