@@ -1162,7 +1162,7 @@ def WeftRISCV_LoopOp : WeftRISCV_Op<"loop", [RecursiveMemoryEffects]> {
   let hasVerifier = 1;
 }
 
-def WeftRISCV_YieldOp : WeftRISCV_Op<"yield", [Terminator]> {
+def WeftRISCV_YieldOp : WeftRISCV_Op<"yield", [Pure, Terminator]> {
   let arguments = (ins Variadic<AnyType>:$values);
   let hasVerifier = 1;
 }
