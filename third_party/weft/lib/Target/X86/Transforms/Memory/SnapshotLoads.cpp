@@ -152,7 +152,14 @@ public:
                    ranges.back().end == type.getNumElements();
       for (size_t i = 1; dense && i < ranges.size(); ++i)
         dense = ranges[i - 1].end == ranges[i].begin;
-      if (dense) continue;
+      int64_t largest = 0;
+      for (auto range : ranges) largest = std::max(largest, range.end - range.begin);
+      // A dominant byte field and its small metadata have different demands:
+      // retain the large contiguous field while isolating the metadata. Keeping
+      // that whole record together can replicate its masks in every consumer.
+      bool dominantByteField = type.getElementTypeBitWidth() == 8 &&
+          largest >= 4 * (type.getNumElements() - largest);
+      if (dense && !dominantByteField) continue;
       for (auto range : ranges) {
         b.setInsertionPoint(load);
         Location loc = load.getLoc();

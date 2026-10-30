@@ -13,6 +13,7 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 using namespace mlir;
 namespace {
@@ -103,6 +104,52 @@ public:
     for (auto root : roots) {
       auto type = root.getRes().getType();
       if (type.getRank() != 1 || type.isScalable()) continue;
+      if (type.getElementType().isInteger(1) && type.getNumElements() > 8) {
+        llvm::SmallPtrSet<Operation *, 32> visited;
+        SmallVector<Value> pending{root.getRes()};
+        bool numericalBits = false;
+        while (!pending.empty() && !numericalBits && visited.size() < 4096) {
+          for (Operation *user : pending.pop_back_val().getUsers()) {
+            if (!visited.insert(user).second) continue;
+            if (isa<arith::ExtUIOp, arith::ExtSIOp, arith::SIToFPOp, arith::UIToFPOp>(user)) {
+              numericalBits = true;
+              break;
+            }
+            for (Value result : user->getResults())
+              if (getElementTypeOrSelf(result.getType()).isInteger(1)) pending.push_back(result);
+          }
+        }
+        if (!numericalBits && pending.empty()) {
+          // Construct predicates as native bytes before the final comparison.
+          // A scalar insertion chain in i1 otherwise becomes a long sequence
+          // of predicate-register shifts instead of native vector assembly.
+          SmallVector<LLVM::InsertElementOp> chain;
+          Value base = root.getRes();
+          while (auto insert = base.getDefiningOp<LLVM::InsertElementOp>()) {
+            if ((insert != root && !insert->hasOneUse()) || chain.size() >= 4096) break;
+            chain.push_back(insert);
+            base = insert.getVector();
+          }
+          if (!chain.empty() && !base.getDefiningOp<LLVM::InsertElementOp>()) {
+            b.setInsertionPointAfter(root);
+            auto bytes = type.clone(b.getI8Type());
+            Value value = arith::ExtUIOp::create(b, root.getLoc(), bytes, base);
+            for (auto insert : llvm::reverse(chain)) {
+              Value scalar = arith::ExtUIOp::create(b, root.getLoc(), b.getI8Type(), insert.getValue());
+              auto native = cast<LLVM::InsertElementOp>(b.clone(*insert));
+              native.getVectorMutable().assign(value);
+              native.getValueMutable().assign(scalar);
+              native.getRes().setType(bytes);
+              value = native.getRes();
+            }
+            Value zero = arith::ConstantOp::create(b, root.getLoc(), bytes,
+                DenseElementsAttr::get(bytes, b.getI8IntegerAttr(0)));
+            Value mask = arith::CmpIOp::create(b, root.getLoc(), arith::CmpIPredicate::ne, value, zero);
+            root.getRes().replaceAllUsesWith(mask);
+            continue;
+          }
+        }
+      }
       int64_t count = type.getNumElements(), missing = count;
       SmallVector<int64_t> indices(count, -1);
       Value current = root.getRes(), source;
@@ -652,7 +699,11 @@ public:
       auto bits = function ? function->getAttrOfType<IntegerAttr>("weft.x86.vector_bits") : IntegerAttr();
       bool scalarPackets = llvm::all_of(unique, [](const auto &demand) { return demand.size() == 1; });
       int64_t width = std::max<int64_t>(8, type.getElementTypeBitWidth());
+      // Subbyte vectors still need carrier legalization; their logical lane
+      // count is not the cost of one native vector producer.
       bool nativeInteger = bits && isa<IntegerType>(type.getElementType()) &&
+                           type.getElementTypeBitWidth() >= 8 && width <= 64 &&
+                           llvm::isPowerOf2_32(width) &&
                            type.getNumElements() * width <= bits.getInt();
       if (bits && (selectedConsumersOnly || (nativeInteger && !scalarPackets))) {
         auto registers = [&](int64_t lanes) {
@@ -665,13 +716,12 @@ public:
         // producer needs just one. Preserve that producer and its permutations.
         // Separating mixed constant bit planes can replace variable shifts
         // with immediate shifts for a multi-register producer. A producer that
-        // fits one native register should remain shared across vector packets;
-        // single-element packets can use scalar extraction and broadcast.
-        bool splitNative = registers(type.getNumElements()) == 1 && !scalarPackets;
+        // fits one native register remains shared unless disjoint constant
+        // planes eliminate variable shifts. Scalar packets can use broadcasts.
         bool constantPlanes = llvm::all_of(unique, [&](const auto &demand) {
           return uniformWordShift(root->getResult(0), demand);
         });
-        if (projected > registers(type.getNumElements()) && (splitNative || !constantPlanes)) continue;
+        if (projected > registers(type.getNumElements()) && !constantPlanes) continue;
       }
       // Identical lane demands share one decoded packet even when their uses
       // broadcast or order those lanes differently. Charge distinct producers,
