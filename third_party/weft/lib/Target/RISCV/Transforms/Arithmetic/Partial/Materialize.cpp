@@ -2624,6 +2624,11 @@ public:
       mlir::Value oldRhs = dot.getRhs();
       dot.getResult().replaceAllUsesWith(finalized.getResult());
       rewriter.eraseOp(dot);
+      // Short, closed storage traversals need no dynamic issue coordinate.
+      // Expose their constant windows while preserving the accumulator chain
+      // and original load order; resource closure runs on the expanded body.
+      if (windowCount > 1 && windowCount <= 2)
+        (void)mlir::loopUnrollFull(loop);
       llvm::DenseSet<mlir::Value> stops;
       for (ProjectedRoot &root : roots)
         stops.insert(root.field.getResult());
