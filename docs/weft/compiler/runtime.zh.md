@@ -20,9 +20,16 @@ kernel[(instances,)](X, Y, B=64, num_cpu_threads=2)
 
 ## Grid 与线程
 
-Grid 指定独立实例，`num_cpu_threads` 指定 OpenMP 执行。
-单实例直接调用原生代码，多实例单线程使用原生循环，多线程使用原生 OpenMP launcher。
+Grid 指定独立实例，`num_cpu_threads` 指定原生 worker 数。
+单实例直接调用原生代码，多实例单线程使用原生循环，多线程复用共享 Weft runtime 中的线程池。
 `num_cpu_threads=0` 采用 OpenMP 当前设置。
+
+执行器从 GGML 抽取常驻 worker、混合轮询/等待和屏障机制，不链接完整 GGML。
+生成的 launcher 仅解码类型化参数并把连续区间映射为 grid 坐标。
+所有实际 worker 的 CPU/向量/矩阵检查通过后才写输出。线程池按调用者、CPU affinity
+和线程数复用；并发调用者彼此隔离，fork 子进程重新建立 worker。
+原生应用可调用 `weft_parallel_for`，并用 `weft_parallel_release` 释放当前调用者的空闲池。
+同步调用之间形成共享准备与消费的阶段边界；已有框架 worker 仍直接调用单实例入口。
 
 应用通过 `tl.program_id` 划分数据，每个实例运行一份有序源程序。
 已有 worker 的框架可以使用导出的单实例入口，详见[原生 SDK](native-sdk.md)。

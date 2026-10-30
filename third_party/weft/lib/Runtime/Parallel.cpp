@@ -65,6 +65,21 @@ struct Pool {
   std::atomic<int> failed{0};
   char diagnostic[1024]{};
 
+  cpu_set_t workerAffinity(int index) const {
+    // Keep the inherited CPU set as the resource boundary, but distribute the
+    // participating threads rather than leaving barrier partners on one core.
+    cpu_set_t selected;
+    CPU_ZERO(&selected);
+    int count = CPU_COUNT(&affinity);
+    int position = count ? index % count : 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+      if (CPU_ISSET(cpu, &affinity) && position-- == 0) {
+        CPU_SET(cpu, &selected);
+        return selected;
+      }
+    return affinity;
+  }
+
   Pool(int size, const cpu_set_t &mask) : threads(size), affinity(mask) {
     try {
       for (int i = 1; i < threads; ++i) workers.emplace_back([this, i] { secondary(i); });
@@ -105,6 +120,9 @@ struct Pool {
     --parallelDepth;
   }
   void secondary(int index) {
+    cpu_set_t assigned = workerAffinity(index);
+    // A failed optional placement leaves the inherited mask in force.
+    (void)sched_setaffinity(0, sizeof(assigned), &assigned);
     uint64_t last = 0;
     for (;;) {
       // ggml_graph_compute_poll_for_work / check_for_work: first poll for a
@@ -128,7 +146,10 @@ struct Pool {
     // by sleeping workers. The caller participates as worker zero.
     { std::lock_guard<std::mutex> lock(mutex); generation.fetch_add(1, std::memory_order_release); }
     condition.notify_all();
+    cpu_set_t assigned = workerAffinity(0);
+    bool placed = sched_setaffinity(0, sizeof(assigned), &assigned) == 0;
     execute(0);
+    if (placed) (void)sched_setaffinity(0, sizeof(affinity), &affinity);
     int status = failed.load(std::memory_order_acquire);
     if (status && message && capacity) std::snprintf(message, capacity, "%s", diagnostic);
     return status;

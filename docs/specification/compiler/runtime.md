@@ -35,12 +35,15 @@ Encoding、derived builder、helper、模型、alias/stride 声明及 constexpr 
 compiled = kernel[(instances,)](X, Y, B=64, num_cpu_threads=8)
 ```
 
-grid 表示独立 program instances；num_cpu_threads 配置 OpenMP。
+grid 表示独立 program instances；num_cpu_threads 配置共享 native runtime 的常驻 worker 数。
 program_id 和 num_programs 在前端变为实际使用的显式入口 scalar；未使用的坐标不进入 ABI。Canonical 核心不增加
 hart、warp、thread ownership 或隐式跨实例同步。每个实例执行一份有序程序，
 源码负责数据分区和尾部。单实例直接调用；多实例单线程使用原生循环；
-多线程使用原生 OpenMP launcher，各 worker 在写入前检查执行能力。
-num_cpu_threads=0 使用 OpenMP 当前线程设置。
+多线程由共享线程池执行连续的实例区间，所有 worker 通过能力检查后才写入输出。
+num_cpu_threads=0 保留 OpenMP 当前线程设置作为默认线程数来源；实际执行使用共享线程池。
+线程池按调用者、线程数及 CPU affinity 复用；并发调用者相互独立，fork 子进程重建池。
+同步调用结束后结果可见，分阶段调用可以在准备完成后复用其结果；
+`weft_parallel_release` 释放当前调用者的空闲池。
 
 跨实例别名、数据分区与同步由作者保证。已有线程框架调用导出的单实例入口，
 沿用其任务划分，不在每次算子调用内部建立另一组线程。

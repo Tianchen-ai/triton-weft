@@ -22,10 +22,19 @@ An explicit sysroot uses the application's declared `sysroot_identity`.
 
 ## Grid and threads
 
-Grid specifies independent instances. `num_cpu_threads` specifies OpenMP execution.
+Grid specifies independent instances. `num_cpu_threads` specifies native worker count.
 A single instance calls native code directly; multiple instances with one thread
-use a native loop; multiple threads use the native OpenMP launcher.
+use a native loop; multiple threads use a pool in the shared Weft runtime.
 `num_cpu_threads=0` uses OpenMP's current setting.
+
+The executor adapts GGML's persistent workers, hybrid polling/waiting and barrier
+implementation without linking GGML. Generated launchers decode typed arguments
+and map contiguous ranges to grid coordinates. All active workers pass their
+CPU/vector/matrix checks before any worker writes output. Concurrent callers
+use independent pools, cached by CPU affinity and worker count; fork children
+rebuild their workers. Native applications can use `weft_parallel_for` and
+release idle caller-owned pools with `weft_parallel_release`. Each synchronous
+call provides a phase boundary for shared preparation and consumption.
 
 The application partitions data with `tl.program_id`. Each instance runs an
 ordered source program. Frameworks with existing workers can use the exported
