@@ -363,13 +363,19 @@ mlir::LogicalResult Emitter::compileExtract(riscv::ExtractOp operation) {
         auto inputType = operation.getInput().getType();
         auto element = scalarCType(inputType.getElementType());
         auto layout = resultType.getLayout();
+        int64_t laneAxis = laneAxisFor(operation.getResult());
+        auto lanePosition = llvm::find(inputType.getAxisIds().asArrayRef(), laneAxis);
         if (!element || inputType.getShape().empty() ||
             binding.localExtents.size() != inputType.getShape().size() ||
-            laneAxisFor(operation.getResult()) != inputType.getAxisIds().asArrayRef().back())
-          return fail(operation, "local domain vector read requires a contiguous inner axis");
-        for (size_t axis = 0; axis + 1 < layout.getLaneFactors().size(); ++axis)
-          if (layout.getLaneFactors()[axis] != 1)
-            return fail(operation, "local domain vector read cannot merge separated rows");
+            lanePosition == inputType.getAxisIds().asArrayRef().end())
+          return fail(operation, "local domain vector read requires an explicit memory axis");
+        for (size_t axis = 0; axis < layout.getLaneFactors().size(); ++axis)
+          if (layout.getAxisIds()[axis] != laneAxis && layout.getLaneFactors()[axis] != 1)
+            return fail(operation, "local domain vector read requires one memory lane axis");
+        size_t laneDimension = lanePosition - inputType.getAxisIds().asArrayRef().begin();
+        std::string stride = "sizeof(" + *element + ")";
+        for (size_t dimension = laneDimension + 1; dimension < binding.localExtents.size(); ++dimension)
+          stride = "((" + stride + ") * (" + binding.localExtents[dimension] + "))";
         Binding loaded;
         loaded.kind = Binding::Kind::Vector;
         for (int64_t part = 0; part < vectorPartCount(operation.getResult()); ++part) {
@@ -405,9 +411,10 @@ mlir::LogicalResult Emitter::compileExtract(riscv::ExtractOp operation) {
           std::string suffix = vectorSuffix(operation.getResult());
           std::string name = fresh("local_domain");
           const bool floating = mlir::isa<mlir::FloatType>(inputType.getElementType());
-          line(vectorType(operation.getResult()) + " " + name + " = (" + present + ") ? __riscv_vle" +
-              std::to_string(layout.getSew()) + "_v_" + suffix + "((const " + *element + " *)(" +
-              binding.scalar + ") + " + linear + ", " + partVL(operation.getResult(), part) +
+          bool contiguous = laneDimension + 1 == binding.localExtents.size();
+          line(vectorType(operation.getResult()) + " " + name + " = (" + present + ") ? __riscv_" +
+              (contiguous ? "vle" : "vlse") + std::to_string(layout.getSew()) + "_v_" + suffix + "((const " + *element + " *)(" +
+              binding.scalar + ") + " + linear + ", " + (contiguous ? "" : stride + ", ") + partVL(operation.getResult(), part) +
               ") : __riscv_" + (floating ? "vfmv_v_f_" : "vmv_v_x_") + suffix +
               "(0, " + partVL(operation.getResult(), part) + ");");
           loaded.parts.push_back(std::move(name));
