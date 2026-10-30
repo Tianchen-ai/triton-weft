@@ -104,6 +104,44 @@ public:
     for (auto root : roots) {
       auto type = root.getRes().getType();
       if (type.getRank() != 1 || type.isScalable()) continue;
+      int64_t count = type.getNumElements(), missing = count;
+      SmallVector<int64_t> indices(count, -1);
+      Value current = root.getRes(), source;
+      // Prefer one permutation when the reconstruction comes from a complete
+      // snapshot, including predicates. Widening those bits first would hide
+      // the existing permutation and create scalar byte insertions.
+      for (int64_t steps = 0; missing && steps < 2 * count; ++steps) {
+        auto insert = current.getDefiningOp<LLVM::InsertElementOp>();
+        APInt position;
+        if (!insert || !matchPattern(insert.getPosition(), m_ConstantInt(&position)) ||
+            position.getActiveBits() > 63 || position.getZExtValue() >= static_cast<uint64_t>(count)) break;
+        int64_t lane = position.getZExtValue();
+        if (indices[lane] < 0) {
+          auto extract = insert.getValue().getDefiningOp<LLVM::ExtractElementOp>();
+          APInt from;
+          if (!extract || !matchPattern(extract.getPosition(), m_ConstantInt(&from)) ||
+              from.getActiveBits() > 63) break;
+          auto inputType = extract.getVector().getType();
+          if (inputType.getRank() != 1 || inputType.isScalable() ||
+              from.getZExtValue() >= static_cast<uint64_t>(inputType.getNumElements()) ||
+              (source && source != extract.getVector())) break;
+          source = extract.getVector();
+          indices[lane] = from.getZExtValue();
+          --missing;
+        }
+        current = insert.getVector();
+      }
+      if (!missing) {
+        b.setInsertionPoint(root);
+        bool bfloat = type.getElementType().isBF16();
+        if (bfloat)
+          source = arith::BitcastOp::create(b, root.getLoc(),
+              cast<VectorType>(source.getType()).clone(b.getI16Type()), source);
+        Value result = vector::ShuffleOp::create(b, root.getLoc(), source, source, indices);
+        if (bfloat) result = arith::BitcastOp::create(b, root.getLoc(), type, result);
+        b.replaceOp(root, result);
+        continue;
+      }
       if (type.getElementType().isInteger(1) && type.getNumElements() > 8) {
         llvm::SmallPtrSet<Operation *, 32> visited;
         SmallVector<Value> pending{root.getRes()};
@@ -150,40 +188,6 @@ public:
           }
         }
       }
-      int64_t count = type.getNumElements(), missing = count;
-      SmallVector<int64_t> indices(count, -1);
-      Value current = root.getRes(), source;
-      // Bound the analysis even for a source with repeated element updates.
-      for (int64_t steps = 0; missing && steps < 2 * count; ++steps) {
-        auto insert = current.getDefiningOp<LLVM::InsertElementOp>();
-        APInt position;
-        if (!insert || !matchPattern(insert.getPosition(), m_ConstantInt(&position)) ||
-            position.getActiveBits() > 63 || position.getZExtValue() >= static_cast<uint64_t>(count)) break;
-        int64_t lane = position.getZExtValue();
-        if (indices[lane] < 0) {
-          auto extract = insert.getValue().getDefiningOp<LLVM::ExtractElementOp>();
-          APInt from;
-          if (!extract || !matchPattern(extract.getPosition(), m_ConstantInt(&from)) ||
-              from.getActiveBits() > 63) break;
-          auto inputType = extract.getVector().getType();
-          if (inputType.getRank() != 1 || inputType.isScalable() ||
-              from.getZExtValue() >= static_cast<uint64_t>(inputType.getNumElements()) ||
-              (source && source != extract.getVector())) break;
-          source = extract.getVector();
-          indices[lane] = from.getZExtValue();
-          --missing;
-        }
-        current = insert.getVector();
-      }
-      if (missing) continue;
-      b.setInsertionPoint(root);
-      bool bfloat = type.getElementType().isBF16();
-      if (bfloat)
-        source = arith::BitcastOp::create(b, root.getLoc(),
-            cast<VectorType>(source.getType()).clone(b.getI16Type()), source);
-      Value result = vector::ShuffleOp::create(b, root.getLoc(), source, source, indices);
-      if (bfloat) result = arith::BitcastOp::create(b, root.getLoc(), type, result);
-      b.replaceOp(root, result);
     }
   }
 };
