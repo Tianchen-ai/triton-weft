@@ -23,7 +23,14 @@ bool needsNumericalSnapshot(Value value) {
       return !riscv::isContiguousRecordRegion(load.getRegion()) &&
              needsReadSnapshot(load);
     if (auto extract = value.getDefiningOp<riscv::ExtractOp>()) value = extract.getInput();
-    else if (auto stage = value.getDefiningOp<riscv::MaterializeOp>()) value = stage.getInput();
+    else if (auto stage = value.getDefiningOp<riscv::MaterializeOp>()) {
+      // An encoded stage owns a saved record, including its field geometry.
+      // Later writes to the original view do not require a numerical snapshot
+      // of that private record's consumers.
+      if (isa<kernel::EncodingType>(logicalElement(stage.getResult().getType())))
+        return false;
+      value = stage.getInput();
+    }
     else if (auto stage = value.getDefiningOp<riscv::RegisterMaterializeOp>()) value = stage.getInput();
     else return false;
   }
