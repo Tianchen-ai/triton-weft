@@ -83,18 +83,36 @@ def launch_source(abi):
 #include <string.h>
 #include <limits.h>
 #include <omp.h>
+#include <stdatomic.h>
 {abi['declaration']}
 {dispatch}
 {single_body}
 {single_dispatch}
 {GRID_DECLARATION}
 struct launch_arguments {{ {' '.join(fields) if fields else 'unsigned char unused;'} }};
+typedef void (*triton_parallel_body)(void *, size_t, size_t);
+typedef int (*triton_parallel_runner)(size_t, int, const void *, triton_check_thread,
+                                      void *, triton_parallel_body, char *, size_t);
+static _Atomic(triton_parallel_runner) parallel_executor = NULL;
+void triton_weft_bind_parallel(triton_parallel_runner executor) {{
+  atomic_store_explicit(&parallel_executor, executor, memory_order_release);
+}}
 static inline void {instance}(void (*entry)(void), const struct launch_arguments *decoded,
                             size_t grid0, size_t grid1, size_t grid2, size_t linear) {{
   const size_t pid0 = linear % grid0;
   const size_t pid1 = (linear / grid0) % grid1;
   const size_t pid2 = linear / (grid0 * grid1);
   {invocation}
+}}
+struct launch_job {{
+  void (*entry)(void);
+  const struct launch_arguments *decoded;
+  size_t grid0, grid1, grid2;
+}};
+static void launch_range(void *opaque, size_t begin, size_t end) {{
+  const struct launch_job *job = (const struct launch_job *)opaque;
+  for (size_t i = begin; i < end; ++i)
+    {instance}(job->entry, job->decoded, job->grid0, job->grid1, job->grid2, i);
 }}
 int triton_weft_grid(void (*entry)(void), void *const *arguments,
                     size_t grid0, size_t grid1, size_t grid2, int threads,
@@ -112,27 +130,15 @@ int triton_weft_grid(void (*entry)(void), void *const *arguments,
     for (size_t i = 0; i < count; ++i) {instance}(entry, &decoded, grid0, grid1, grid2, i);
     return 0;
   }}
-  int failed = 0;
-  #pragma omp parallel num_threads(threads) shared(failed)
-  {{
-    char local_error[1024] = {{0}};
-    int status = check(scope, local_error, sizeof(local_error));
-    if (status) {{
-      #pragma omp critical
-      {{
-        if (!failed) {{
-          failed = status;
-          if (error && error_size) {{ strncpy(error, local_error, error_size - 1); error[error_size - 1] = 0; }}
-        }}
-      }}
+  triton_parallel_runner executor = atomic_load_explicit(&parallel_executor, memory_order_acquire);
+  if (!executor) {{
+    if (error && error_size) {{
+      strncpy(error, "native grid needs the shared Weft parallel runtime", error_size - 1);
+      error[error_size - 1] = 0;
     }}
-    #pragma omp barrier
-    if (!failed) {{
-      #pragma omp for schedule(static)
-      for (ptrdiff_t i = 0; i < (ptrdiff_t)count; ++i)
-        {instance}(entry, &decoded, grid0, grid1, grid2, (size_t)i);
-    }}
+    return 5;
   }}
-  return failed;
+  struct launch_job job = {{entry, &decoded, grid0, grid1, grid2}};
+  return executor(count, threads, scope, check, &job, launch_range, error, error_size);
 }}
 '''

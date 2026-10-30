@@ -300,6 +300,14 @@ Kernel::Kernel(std::shared_ptr<Context> context, const std::string &libraryPath,
   void *handle = dlopen(libraryPath.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!handle) throw Failure(WEFT_IO_ERROR, "cannot load kernel library: " + std::string(dlerror()));
   try {
+    // Generated launchers carry typed argument decoding only. Bind the shared
+    // executor explicitly so exported kernels do not each own a thread pool
+    // or depend on a process-global symbol namespace.
+    using Parallel = decltype(&weft_parallel_for);
+    using BindParallel = void (*)(Parallel);
+    dlerror();
+    auto bindParallel = reinterpret_cast<BindParallel>(dlsym(handle, "triton_weft_bind_parallel"));
+    if (!dlerror() && bindParallel) bindParallel(&weft_parallel_for);
     entry = reinterpret_cast<weft_native_entry>(symbolAddress(handle, symbol));
     dispatch = reinterpret_cast<Dispatch>(symbolAddress(handle, dispatchSymbol));
   } catch (...) {

@@ -17,13 +17,21 @@ Triton wheel. The declared Clang and OpenMP runtime can be bundled; libc and
 other platform dependencies come from the declared target environment.
 Distributors must preserve the notices required by their chosen components.
 
+## Adapted GGML thread execution
+
+The shared native runtime includes a compact adaptation of GGML's worker
+wakeup, polling and barrier implementation from llama.cpp revision
+`620d2225cc436ab0b001e3200e590e3b286ef9ab`. It executes checked native ranges
+without GGML tensors, graphs or library linkage. Copyright and MIT terms are
+retained in `lib/Runtime/ggml-threadpool-LICENSE`, installed with the SDK.
+
 ## Optional GGML / llama.cpp integration
 
 The optional adapter and comparison examples build against the user's explicit
 [llama.cpp checkout](https://github.com/ggml-org/llama.cpp), which retains its
 [MIT license](https://github.com/ggml-org/llama.cpp/blob/master/LICENSE) and upstream
-file notices. Upstream GGML source is not bundled in this public repository or
-the Python distribution, and is not a compiler or runtime fallback.
+file notices. Apart from the adapted threading code above, the GGML library
+is not bundled and is not a compiler or runtime fallback.
 
 ## Optional dependencies and references
 

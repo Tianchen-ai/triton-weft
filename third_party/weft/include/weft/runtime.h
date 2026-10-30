@@ -136,8 +136,19 @@ WEFT_API weft_status weft_kernel_open(weft_context *context, const char *directo
 WEFT_API weft_status weft_kernel_open_native(weft_context *context, const char *library_path,
                                             const char *manifest_json,
                                             weft_kernel **result, weft_error *error);
-/* CPU launcher callback; checks the actual OpenMP worker before visible writes. */
+/* CPU launcher callback; checks the actual native worker before visible writes. */
 WEFT_API int weft_kernel_check_worker(const void *kernel, char *message, size_t capacity);
+/* Synchronous native work. Every active worker passes check before any body
+   starts. Each body receives a disjoint contiguous [begin,end) interval.
+   Callbacks must not throw through this C ABI. Pools are shared by generated
+   kernels and reused per calling thread, CPU affinity and worker count. */
+typedef int (*weft_worker_check)(const void *, char *, size_t);
+typedef void (*weft_parallel_body)(void *, size_t begin, size_t end);
+WEFT_API int weft_parallel_for(size_t count, int threads, const void *scope,
+                               weft_worker_check check, void *arguments,
+                               weft_parallel_body body, char *message, size_t capacity);
+/* Release idle pools owned by this caller. Other callers remain independent. */
+WEFT_API void weft_parallel_release(void);
 /* Calls retain their library and target context independently of this handle. */
 WEFT_API void weft_kernel_release(weft_kernel *kernel);
 WEFT_API weft_status weft_kernel_describe(const weft_kernel *kernel,

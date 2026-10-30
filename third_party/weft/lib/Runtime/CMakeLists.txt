@@ -1,6 +1,7 @@
-add_library(WeftRuntime SHARED Metadata.cpp Library.cpp CallContract.cpp Layout.cpp Binding.cpp Resources.cpp API.cpp)
+find_package(Threads REQUIRED)
+add_library(WeftRuntime SHARED Metadata.cpp Library.cpp CallContract.cpp Layout.cpp Binding.cpp Resources.cpp API.cpp Parallel.cpp)
 add_library(Weft::Runtime ALIAS WeftRuntime)
-target_link_libraries(WeftRuntime PRIVATE WeftRISCVPlatform WeftX86Platform ${CMAKE_DL_LIBS})
+target_link_libraries(WeftRuntime PRIVATE WeftRISCVPlatform WeftX86Platform ${CMAKE_DL_LIBS} Threads::Threads)
 target_include_directories(WeftRuntime PUBLIC
   $<BUILD_INTERFACE:${WEFT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${WEFT_INSTALL_ROOT}/include>)
