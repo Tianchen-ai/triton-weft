@@ -515,13 +515,15 @@ class ProjectIntegerExpressions
           // small producer repeatedly. Lane-count conservation at the root
           // does not bound this inner work. Keep a native-register producer
           // shared rather than redoing its shifts, signs and scales per use.
+          // Retain the wide broadcast itself: composing a short shuffle lets
+          // LLVM sink its widening into every consumer packet again.
           if (bits && sourceType.getNumElements() < type.getNumElements() &&
               sourceType.getNumElements() * sourceType.getElementTypeBitWidth() <= bits.getInt()) {
             llvm::SmallDenseSet<int64_t> distinct;
             for (int64_t index : composed) distinct.insert(index);
             if (distinct.size() < composed.size() &&
                 integerLaneLocal(source.getDefiningOp(), selectedConsumersOnly))
-              return vector::ShuffleOp::create(b, loc, source, source, composed);
+              return vector::ShuffleOp::create(b, loc, value, value, indices);
           }
           return project(b, loc, source, composed, root, depth + 1);
         }
