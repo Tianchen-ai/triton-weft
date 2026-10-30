@@ -137,6 +137,12 @@ unsigned scopeStackSnapshots(func::FuncOp function, IRRewriter &b) {
     if (alloc->hasAttr("weft.x86.birth") || type.getRank() != 1 ||
         !type.hasStaticShape() || !type.getLayout().isIdentity() ||
         alloc.getAlignment().value_or(slotAlignment) > slotAlignment) continue;
+    // A native-vector-sized entry slot is already cheap to reserve. Keeping
+    // its distinct address also preserves load invariance across nested
+    // projections; splitting and reusing tiny predicate slots obscures it.
+    uint64_t bytes = type.getNumElements() *
+                     llvm::divideCeil(type.getElementTypeBitWidth(), 8u);
+    if (bytes <= slotAlignment) continue;
     auto uses = weft::x86::privateStorageUses(alloc);
     if (failed(uses) || uses->aliases.size() != 1 || uses->users.size() > 128) continue;
     SmallVector<vector::StoreOp> initializers;
