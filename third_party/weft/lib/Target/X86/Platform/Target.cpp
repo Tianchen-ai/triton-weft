@@ -78,6 +78,15 @@ bool checkX86ThreadState(const X86Target &target, std::string &error) {
       error = "x86 execution requires CPU and OS vector-state support for " + name;
       return false;
     }
+  return checkX86ExecutionState(target, error);
+#else
+  error = "native x86 execution requires x86-64 Linux";
+  return false;
+#endif
+}
+
+bool checkX86ExecutionState(const X86Target &target, std::string &error) {
+#if defined(__linux__) && defined(__x86_64__)
   uint32_t low = 0, high = 0;
   __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
   const uint64_t state = (uint64_t(high) << 32) | low;

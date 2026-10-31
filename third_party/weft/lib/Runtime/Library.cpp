@@ -105,12 +105,17 @@ void Context::verifyThread(const std::vector<std::string> &extensions, bool bind
   require(CPU_EQUAL(&intersection, &current), WEFT_TARGET_ERROR,
           "execution affinity exceeds the discovered CPU set");
   std::string error;
-  X86Target executing = x86.target;
+  const X86Target *executing = &x86.target;
+  X86Target matrixTarget;
   if (!extensions.empty()) {
-    executing.features.emplace_back("amx-tile");
-    for (const auto &extension : extensions) executing.features.push_back(extension);
+    matrixTarget = x86.target;
+    matrixTarget.features.emplace_back("amx-tile");
+    for (const auto &extension : extensions) matrixTarget.features.push_back(extension);
+    executing = &matrixTarget;
   }
-  require(checkX86ThreadState(executing, error), WEFT_TARGET_ERROR, error);
+  // Discovery validated immutable ISA support on every allowed CPU. The live
+  // affinity remains a subset above; only per-thread OS state needs rechecking.
+  require(checkX86ExecutionState(*executing, error), WEFT_TARGET_ERROR, error);
 #elif defined(__linux__) && defined(__riscv)
   int control = prctl(70, 0UL, 0UL, 0UL, 0UL);
   if (control < 0 || (control & 3) == 1)

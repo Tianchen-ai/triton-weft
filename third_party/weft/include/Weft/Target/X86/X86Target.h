@@ -26,6 +26,8 @@ bool parseX86Target(const std::string &cpu, const std::string &abi,
                     int64_t vlen, X86Target &result, std::string &error);
 bool queryNativeX86Target(X86NativeTarget &result, std::string &error);
 bool checkX86ThreadState(const X86Target &target, std::string &error);
+// Caller has already checked hardware support on every CPU in its affinity.
+bool checkX86ExecutionState(const X86Target &target, std::string &error);
 llvm::json::Object x86TargetJSON(const X86Target &target);
 } // namespace weft
 #endif
