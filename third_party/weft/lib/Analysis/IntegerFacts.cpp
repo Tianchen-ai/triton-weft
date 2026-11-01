@@ -84,13 +84,28 @@ IntegerExpression describe(Value value, IntegerType type) {
   auto known = [&](Attribute attr) {
     expression.kind = Kind::Known; expression.known = constantRange(attr, type);
   };
-  if (auto op = value.getDefiningOp<arith::ConstantOp>()) known(op.getValue());
+  if (auto argument = dyn_cast<BlockArgument>(value)) {
+    // Staged births are immutable numerical snapshots, unlike loop carries
+    // and mutable state births. Transfer their source facts into the level
+    // body instead of replacing them with the entire integer type domain.
+    auto level = dyn_cast_or_null<wk::LevelOp>(argument.getOwner()->getParentOp());
+    if (level && argument.getOwner()->getParent() == &level.getBody()) {
+      auto state = cast<wk::BirthsYieldOp>(level.getStateBirths().front().getTerminator());
+      auto staged = cast<wk::BirthsYieldOp>(level.getStagedBirths().front().getTerminator());
+      unsigned offset = 1 + level.getCarried().size() + state.getValues().size();
+      if (argument.getArgNumber() >= offset &&
+          argument.getArgNumber() - offset < staged.getValues().size())
+        unary(staged.getValues()[argument.getArgNumber() - offset]);
+    }
+  }
+  else if (auto op = value.getDefiningOp<arith::ConstantOp>()) known(op.getValue());
   else if (auto op = value.getDefiningOp<wk::ConstantOp>()) known(op.getValue());
   else if (auto op = value.getDefiningOp<wk::IotaOp>()) {
     expression.kind = Kind::Known;
     if (op.getEnd() > op.getStart())
       expression.known = IntegerRange{Bound::getUnsigned(op.getStart()), Bound::getUnsigned(op.getEnd() - 1)};
   } else if (auto op = value.getDefiningOp<wk::WidenOp>()) unary(op.getInput(), Kind::Cast);
+  else if (auto op = value.getDefiningOp<wk::MaterializeOp>()) unary(op.getInput());
   else if (auto op = value.getDefiningOp<wk::CastOp>()) unary(op.getInput(), Kind::Cast);
   else if (auto op = value.getDefiningOp<wk::NarrowOp>()) unary(op.getInput(), op.getSaturate() ? Kind::Saturate : Kind::Cast);
   else if (auto op = value.getDefiningOp<wk::ExtractOp>()) unary(op.getInput());
