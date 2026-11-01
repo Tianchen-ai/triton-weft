@@ -1,6 +1,7 @@
 #include "Weft/Target/X86/X86Compiler.h"
 #include "Weft/Dialect/Kernel/Transforms/SourceSpecialization.h"
 #include "Weft/Analysis/LogicalAxes.h"
+#include "Weft/Analysis/IntegerFacts.h"
 #include "Weft/Analysis/ReductionIdentity.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/Kernel/IR/KernelInterface.h"
@@ -42,6 +43,7 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/PassManager.h"
@@ -124,6 +126,38 @@ Type denseElement(Type type) {
       !llvm::is_contained(ArrayRef<unsigned>{1, 8, 16, 32, 64}, bits)) return {};
   return IntegerType::get(context, bits, bits == 1 ? IntegerType::Signless :
       family.front() == 'u' ? IntegerType::Unsigned : IntegerType::Signed);
+}
+
+// A closed exact partial-sum chain can use the ordinary contraction builder.
+// This is performed on the private lowering clone, preserving the author's
+// Canonical program. Open chains keep their observable narrow values below.
+void foldExactGroupedReductions(ModuleOp source) {
+  SmallVector<wk::MacGroupsOp> operations;
+  source.walk([&](wk::MacGroupsOp op) { operations.push_back(op); });
+  IRRewriter b(source.getContext());
+  for (auto mac : operations) {
+    if (mac.getOverflow() != "wrap" || !mac.getResult().hasOneUse()) continue;
+    auto partial = dyn_cast<wk::ValueType>(mac.getResult().getType());
+    auto narrow = partial ? dyn_cast<IntegerType>(partial.getElementType()) : IntegerType();
+    auto widen = dyn_cast<wk::WidenOp>(*mac.getResult().getUsers().begin());
+    if (!narrow || !widen || !widen.getResult().hasOneUse()) continue;
+    auto wide = weft::analysis::integerElementType(widen.getResult().getType());
+    if (!wide || wide.getWidth() < narrow.getWidth()) continue;
+    auto reduce = dyn_cast<wk::ReduceOp>(*widen.getResult().getUsers().begin());
+    if (!reduce || reduce.getKind() != "add" ||
+        reduce.getAxis() != int64_t(partial.getShape().size()) - 1) continue;
+    auto left = weft::analysis::integerRange(mac.getLhs());
+    auto right = weft::analysis::integerRange(mac.getRhs());
+    auto range = left && right ? weft::analysis::productSumRange(*left, *right, mac.getGroup()) : std::nullopt;
+    if (!range || !range->fits(narrow)) continue;
+    b.setInsertionPoint(reduce);
+    auto dot = wk::DotOp::create(b, reduce.getLoc(), reduce.getResult().getType(),
+        mac.getLhs(), mac.getRhs(), b.getDenseI64ArrayAttr({partial.getAxisIds().asArrayRef().back()}),
+        TypeAttr::get(wide), b.getStringAttr("vector"));
+    b.replaceOp(reduce, dot.getResult());
+    b.eraseOp(widen);
+    b.eraseOp(mac);
+  }
 }
 
 // The physical module uses fixed vectors and explicit LLVM memory operations.
@@ -324,6 +358,11 @@ private:
   const weft::X86Target &target;
   OpBuilder b;
   IRMapping values;
+  // Exact wide implementations of a source integer boundary. Keep the narrow
+  // SSA value for its other consumers; only numerical widening may reuse this
+  // representative. Facts are established from Canonical operands before
+  // signed-byte instruction selection loses their correlated ranges.
+  DenseMap<Value, Value> exactIntegerWidenings;
   func::FuncOp cfgFunction;
   bool unstructuredHelperControl = false;
   llvm::StringMap<int64_t> sourceParameters;
@@ -614,6 +653,18 @@ private:
   }
   Value castValue(Location loc, Value input, Type from, Type to) {
     Type result = physicalType(to), src = scalar(from), dst = scalar(to);
+    if (auto integer = dyn_cast<IntegerType>(src)) {
+      if (isa<FloatType>(dst) || (isa<IntegerType>(dst) &&
+          dst.getIntOrFloatBitWidth() > integer.getWidth())) {
+        auto exact = exactIntegerWidenings.find(input);
+        if (exact != exactIntegerWidenings.end()) {
+          input = exact->second;
+          src = IntegerType::get(b.getContext(),
+              cast<VectorType>(input.getType()).getElementTypeBitWidth(),
+              integer.getSignedness());
+        }
+      }
+    }
     if (input.getType() == result) return input;
     if ((src.isIndex() && isa<FloatType>(dst)) || (dst.isIndex() && isa<FloatType>(src))) {
       Type integer = b.getI64Type();
@@ -2381,10 +2432,19 @@ private:
               lhsElement, rhsElement, target);
           // A wider modular sum realizes the same low bits. Restore the
           // author's boundary before any later widening or floating conversion.
-          if (selected && resultElement.getWidth() < 32)
+          if (selected && resultElement.getWidth() < 32) {
+            Value wide = selected->value;
             selected->value = arith::TruncIOp::create(b, loc,
                 cast<VectorType>(selected->value.getType()).clone(b.getIntegerType(resultElement.getWidth())),
                 selected->value);
+            auto left = weft::analysis::integerRange(sources[0], lhsElement);
+            auto right = weft::analysis::integerRange(sources[1], rhsElement);
+            auto range = left && right ?
+                weft::analysis::productSumRange(*left, *right, group) : std::nullopt;
+            // Prove the mathematical sum, not the already-wrapped result.
+            if (range && range->fits(resultElement))
+              exactIntegerWidenings[selected->value] = wide;
+          }
         }
         if (group == 2)
           selected = weft::selectX86IntegerPairs(module, b, loc, lhs, rhs, lhsValid, rhsValid,
@@ -5052,6 +5112,7 @@ public:
   StringRef getArgument() const override { return "weft-convert-to-x86"; }
   void runOnOperation() override {
     ModuleOp source = getOperation();
+    foldExactGroupedReductions(source);
     OwningOpRef<ModuleOp> physical = ModuleOp::create(source.getLoc());
     auto kernels = llvm::to_vector(source.getOps<wk::KernelOp>());
     if (kernels.size() != 1 || failed(Lowering(*physical, target).run(kernels.front()))) {
