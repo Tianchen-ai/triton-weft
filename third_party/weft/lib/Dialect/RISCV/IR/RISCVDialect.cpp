@@ -2374,7 +2374,7 @@ mlir::LogicalResult LocalPackPlanAttr::verify(
   auto interleavedRecordBytes =
       checkedPositiveProduct({interleaveRows, recordBytes});
   if (kind != "interleave" || rowAxis <= 0 || recordAxis <= 0 ||
-      rowAxis == recordAxis || interleaveRows <= 1 || recordBytes <= 0 ||
+      rowAxis == recordAxis || interleaveRows <= 0 || recordBytes <= 0 ||
       recordElements <= 0 || localBytes <= 0 ||
       !interleavedRecordBytes || localBytes % *interleavedRecordBytes != 0)
     return emitError()
@@ -6199,13 +6199,17 @@ mlir::LogicalResult EncodedLocalPackOp::verify() {
           checkedPositiveProduct({*records, plan.getRecordBytes()});
   }
   auto kernel = getOperation()->getParentOfType<KernelOp>();
+  const bool contiguous = plan.getInterleaveRows() == 1;
+  const int64_t transferAxis = contiguous ? plan.getRecordAxis() : plan.getRowAxis();
+  const int64_t transferLanes = contiguous && kernel
+      ? kernel.getTarget().getVlenBits() / 8 : plan.getInterleaveRows();
   const bool transferLayout =
       kernel && transfer && transfer.getCarrier() == "rvv" &&
       transfer.getAxisIds().asArrayRef() ==
-          llvm::ArrayRef<int64_t>({plan.getRowAxis()}) &&
+          llvm::ArrayRef<int64_t>({transferAxis}) &&
       transfer.getTimeFactors().asArrayRef() == llvm::ArrayRef<int64_t>({1}) &&
       transfer.getLaneFactors().asArrayRef() ==
-          llvm::ArrayRef<int64_t>({plan.getInterleaveRows()}) &&
+          llvm::ArrayRef<int64_t>({transferLanes}) &&
       transfer.getReplicaFactors().asArrayRef() ==
           llvm::ArrayRef<int64_t>({1}) &&
       transfer.getFragmentFactors().asArrayRef() ==
@@ -6213,7 +6217,7 @@ mlir::LogicalResult EncodedLocalPackOp::verify() {
       transfer.getLocalFactors().asArrayRef() ==
           llvm::ArrayRef<int64_t>({1}) &&
       transfer.getSew() == 8 && transfer.getLmulEighths() == 8 &&
-      transfer.getVl() == plan.getInterleaveRows() &&
+      transfer.getVl() == transferLanes &&
       transfer.getRegisterGroups() == 1 &&
       supportsRVVLayout(kernel.getTarget(), transfer);
   if (!encoding || encoding.getKind() != "base" ||
@@ -6309,13 +6313,17 @@ mlir::LogicalResult RVVEncodedLocalPackTransferOp::verify() {
   LayoutAttr transfer = getTransferLayout();
   auto encoding = mlir::dyn_cast<kernel::EncodingType>(input.getElementType());
   auto kernel = getOperation()->getParentOfType<KernelOp>();
+  const bool contiguous = plan.getInterleaveRows() == 1;
+  const int64_t transferAxis = contiguous ? plan.getRecordAxis() : plan.getRowAxis();
+  const int64_t transferLanes = contiguous && kernel
+      ? kernel.getTarget().getVlenBits() / 8 : plan.getInterleaveRows();
   const bool transferLayout =
       kernel && transfer && transfer.getCarrier() == "rvv" &&
       transfer.getAxisIds().asArrayRef() ==
-          llvm::ArrayRef<int64_t>({plan.getRowAxis()}) &&
+          llvm::ArrayRef<int64_t>({transferAxis}) &&
       transfer.getTimeFactors().asArrayRef() == llvm::ArrayRef<int64_t>({1}) &&
       transfer.getLaneFactors().asArrayRef() ==
-          llvm::ArrayRef<int64_t>({plan.getInterleaveRows()}) &&
+          llvm::ArrayRef<int64_t>({transferLanes}) &&
       transfer.getReplicaFactors().asArrayRef() ==
           llvm::ArrayRef<int64_t>({1}) &&
       transfer.getFragmentFactors().asArrayRef() ==
@@ -6323,7 +6331,7 @@ mlir::LogicalResult RVVEncodedLocalPackTransferOp::verify() {
       transfer.getLocalFactors().asArrayRef() ==
           llvm::ArrayRef<int64_t>({1}) &&
       transfer.getSew() == 8 && transfer.getLmulEighths() == 8 &&
-      transfer.getVl() == plan.getInterleaveRows() &&
+      transfer.getVl() == transferLanes &&
       transfer.getRegisterGroups() == 1 &&
       supportsRVVLayout(kernel.getTarget(), transfer);
   if (!encoding || encoding.getKind() != "base" ||

@@ -1877,15 +1877,15 @@ Emitter::compileEncodedLocalBind(riscv::EncodedLocalBindOp operation) {
   Binding result;
   result.kind = Binding::Kind::Record;
   result.recordPointer = storage.scalar;
-  result.interleaveRows = plan.getInterleaveRows();
-  result.interleaveRowAxis = plan.getRowAxis();
+  result.interleaveRows = plan.getInterleaveRows() > 1 ? plan.getInterleaveRows() : 0;
+  result.interleaveRowAxis = result.interleaveRows ? plan.getRowAxis() : 0;
   result.interleaveCohortStrideBytes = "((" + blocks.scalar + ") * " +
       std::to_string(plan.getRecordBytes() * plan.getInterleaveRows()) + ")";
   result.recordAxis = plan.getRecordAxis();
   result.recordElements = plan.getRecordElements();
   result.recordStrideBytes =
       plan.getRecordBytes() * plan.getInterleaveRows();
-  result.recordGroupAxis = plan.getRowAxis();
+  result.recordGroupAxis = result.interleaveRows ? plan.getRowAxis() : 0;
   result.recordByteStrides.emplace_back(
       plan.getRowAxis(), "((" + blocks.scalar + ") * " +
                              std::to_string(plan.getRecordBytes()) + ")");
@@ -1944,6 +1944,13 @@ mlir::LogicalResult Emitter::compileRVVEncodedLocalPackTransfer(
       " + (" + byte.scalar + ")) * " +
       std::to_string(plan.getInterleaveRows()) + ")";
   const std::string packed = fresh("pack_bytes");
+  if (plan.getInterleaveRows() == 1) {
+    line(transferType + " " + packed + " = __riscv_vle8_v_" + transferSuffix +
+         "((const uint8_t *)(" + sourceAddress + "), " + transferVLName + ");");
+    line("__riscv_vse8_v_" + transferSuffix + "((uint8_t *)(" + storage.scalar +
+         " + " + targetAddress + "), " + packed + ", " + transferVLName + ");");
+    return mlir::success();
+  }
   line(transferType + " " + packed + " = __riscv_vlse8_v_" +
        transferSuffix + "((const uint8_t *)(" + sourceAddress +
        "), (ptrdiff_t)(" + rowStride->second + "), " + transferVLName +

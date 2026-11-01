@@ -1016,7 +1016,8 @@ private:
         auto hasExclusiveOutput = [&](mlir::Value input, mlir::Value other) {
           for (int64_t axis : riscv_internal::logicalAxes(input.getType()))
             if (!llvm::is_contained(over, axis) &&
-                !llvm::is_contained(riscv_internal::logicalAxes(other.getType()), axis))
+                !llvm::is_contained(riscv_internal::logicalAxes(other.getType()), axis) &&
+                riscv_internal::physicalExtent(input, axis) > 1)
               return true;
           return false;
         };

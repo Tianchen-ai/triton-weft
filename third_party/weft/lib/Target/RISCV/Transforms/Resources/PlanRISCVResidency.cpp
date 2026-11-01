@@ -151,6 +151,31 @@ planEncodedLocalPack(mlir::Builder &builder,
     return std::nullopt;
   }
 
+  // An encoded snapshot used by reduction-lane dot products is consumed a
+  // record at a time. Preserve contiguous bytes within each saved record;
+  // output-lane grouped operations instead benefit from byte-plane cohorts.
+  bool reductionLaneConsumer = false;
+  materialize->getParentOfType<riscv::KernelOp>().walk([&](riscv::DotOp dot) {
+    auto implementation = dot->getAttrOfType<riscv::ImplementationAttr>("implementation");
+    if (!implementation || implementation.getFamily() != "widen-dot" ||
+        !llvm::is_contained(dot.getOver(), recordAxis)) return;
+    for (mlir::Value operand : {dot.getLhs(), dot.getRhs()}) {
+      auto field = riscv_internal::sourceField(operand);
+      if (!field) continue;
+      mlir::Value owner = field.getOwner();
+      for (unsigned depth = 0; depth < 32; ++depth) {
+        if (owner == materialize.getResult()) {
+          reductionLaneConsumer = true;
+          break;
+        }
+        if (auto extract = owner.getDefiningOp<riscv::ExtractOp>()) owner = extract.getInput();
+        else if (auto convert = owner.getDefiningOp<riscv::ConvertLayoutOp>()) owner = convert.getInput();
+        else break;
+      }
+    }
+  });
+  if (reductionLaneConsumer) interleaveRows = 1;
+
   auto representedExtent = [&](size_t axis) -> std::optional<int64_t> {
     int64_t extent = 1;
     for (mlir::DenseI64ArrayAttr factors : {

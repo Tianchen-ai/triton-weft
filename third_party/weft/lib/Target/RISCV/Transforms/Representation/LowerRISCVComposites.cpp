@@ -731,12 +731,15 @@ private:
           auto kernel = operation->getParentOfType<riscv::KernelOp>();
           const int64_t transferLmulEighths = 8;
           const int64_t transferSew = 8;
-          const int64_t transferLanes = plan.getInterleaveRows();
+          const bool contiguous = plan.getInterleaveRows() == 1;
+          const int64_t transferLanes = contiguous && kernel
+              ? kernel.getTarget().getVlenBits() / 8 : plan.getInterleaveRows();
+          const int64_t transferAxis = contiguous ? plan.getRecordAxis() : plan.getRowAxis();
           auto transferLayout =
               kernel
                   ? riscv::LayoutAttr::get(
                         rewriter.getContext(), "rvv",
-                        riscv_internal::integers(rewriter, {plan.getRowAxis()}),
+                        riscv_internal::integers(rewriter, {transferAxis}),
                         riscv_internal::integers(rewriter, {1}),
                         riscv_internal::integers(rewriter, {transferLanes}),
                         riscv_internal::integers(rewriter, {1}),

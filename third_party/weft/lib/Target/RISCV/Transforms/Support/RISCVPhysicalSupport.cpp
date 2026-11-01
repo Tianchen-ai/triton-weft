@@ -1774,12 +1774,12 @@ int64_t riscv_internal::interleaveRows(mlir::Operation *operation,
     if (!definition || !visited.insert(definition).second)
       break;
     if (auto pack = mlir::dyn_cast<riscv::EncodedLocalBindOp>(definition))
-      return pack.getPlan().getInterleaveRows();
+      return pack.getPlan().getInterleaveRows() > 1 ? pack.getPlan().getInterleaveRows() : 0;
     if (auto pack = mlir::dyn_cast<riscv::EncodedLocalPackOp>(definition))
-      return pack.getPlan().getInterleaveRows();
+      return pack.getPlan().getInterleaveRows() > 1 ? pack.getPlan().getInterleaveRows() : 0;
     if (auto materialize = mlir::dyn_cast<riscv::MaterializeOp>(definition)) {
       if (auto plan = materialize.getLocalPackPlanAttr())
-        return plan.getInterleaveRows();
+        return plan.getInterleaveRows() > 1 ? plan.getInterleaveRows() : 0;
     }
     if (auto extract = mlir::dyn_cast<riscv::ExtractOp>(definition)) {
       owner = extract.getInput();

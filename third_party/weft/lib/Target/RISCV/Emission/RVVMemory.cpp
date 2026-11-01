@@ -831,7 +831,7 @@ Emitter::compileRVVStorageWindow(riscv::RVVStorageWindowOp operation) {
   const int64_t group = plan.getGroupSize();
   const int64_t layer = plan.getLayerSize();
   const int64_t width = plan.getElementBits();
-  if (owner.kind != Binding::Kind::Record || owner.interleaveRows != 0 ||
+  if (owner.kind != Binding::Kind::Record ||
       owner.recordElements != plan.getRecordElements() || !storage || !integer ||
       integer.isSigned() || integer.getWidth() != width ||
       storage->bitOffset / 8 != plan.getByteOffset() ||
@@ -855,7 +855,12 @@ Emitter::compileRVVStorageWindow(riscv::RVVStorageWindowOp operation) {
       return fail(operation,
                   "layered RVV storage window has no register-coordinate mapping");
     std::string record = "(" + owner.recordPointer;
+    std::string rowOffset = "0";
     for (auto [axis, coordinate] : llvm::zip(axes, *coordinates)) {
+      if (owner.interleaveRows > 0 && axis == owner.interleaveRowAxis) {
+        rowOffset = std::to_string(coordinate);
+        continue;
+      }
       auto byteStride = llvm::find_if(owner.recordByteStrides,
                                       [&](const auto &entry) {
                                         return entry.first == axis;
@@ -884,8 +889,49 @@ Emitter::compileRVVStorageWindow(riscv::RVVStorageWindowOp operation) {
         ") * " + std::to_string(plan.getShiftStep()) + ")";
     const std::string vl = partVL(operation.getResult(), part);
     std::string raw = fresh("layered_window_raw");
-    line(type + " " + raw + " = __riscv_vle8_v_" + suffix +
-         "((const uint8_t *)(" + record + " + " + byte + "), " + vl + ");");
+    if (owner.interleaveRows > 1) {
+      // A saved encoded record may use byte-plane interleaving across a
+      // free output axis. Its reduction window still follows one record;
+      // translate logical byte positions through the selected field chunks.
+      const int64_t chunk = storage->access.getFieldChunkBytes();
+      const int64_t lanes = physicalLanes(operation.getResult());
+      if (chunk <= 0 || lanes <= 0 ||
+          owner.interleaveRows > INT32_MAX / (lanes + chunk))
+        return fail(operation, "layered window has no bounded byte-plane offsets");
+      const int64_t bound = (lanes + chunk) * owner.interleaveRows;
+      const int64_t bits = bound <= 256 ? 8 : bound <= 65536 ? 16 : 32;
+      const int64_t indexLMUL = resultType.getLayout().getLmulEighths() * bits / 8;
+      const std::string indexLMULName = lmulSpelling(indexLMUL);
+      if (indexLMULName.empty())
+        return fail(operation, "layered window byte-plane index needs an illegal LMUL");
+      const std::string indexSuffix = "u" + std::to_string(bits) + indexLMULName;
+      const std::string indexType = "vuint" + indexSuffix.substr(1) + "_t";
+      const std::string index = fresh("layered_window_index");
+      line(indexType + " " + index + " = __riscv_vid_v_" + indexSuffix + "(" + vl + ");");
+      const std::string relative = "((" + byte + ") - " +
+                                   std::to_string(storage->bitOffset / 8) + ")";
+      const std::string crossed = "__riscv_vdivu_vx_" + indexSuffix +
+          "(__riscv_vadd_vx_" + indexSuffix + "(" + index + ", (" + relative +
+          ") % " + std::to_string(chunk) + ", " + vl + "), " +
+          std::to_string(chunk) + ", " + vl + ")";
+      const std::string offsets = "__riscv_vadd_vv_" + indexSuffix + "(" + index +
+          ", __riscv_vmul_vx_" + indexSuffix + "(" + crossed + ", " +
+          std::to_string(chunk * (owner.interleaveRows - 1)) + ", " + vl + "), " + vl + ")";
+      Binding selectedOwner = owner;
+      selectedOwner.recordPointer = record;
+      line(type + " " + raw + " = __riscv_vluxei" + std::to_string(bits) +
+           "_v_" + suffix + "((const uint8_t *)" +
+           fieldStorageAddress(selectedOwner, *storage, byte, rowOffset) +
+           ", " + offsets + ", " + vl + ");");
+    } else {
+      Binding selectedOwner = owner;
+      selectedOwner.recordPointer = record;
+      const std::string address = owner.interleaveRows == 1
+          ? fieldStorageAddress(selectedOwner, *storage, byte, rowOffset)
+          : "(" + record + " + " + byte + ")";
+      line(type + " " + raw + " = __riscv_vle8_v_" + suffix +
+           "((const uint8_t *)" + address + ", " + vl + ");");
+    }
     std::string decoded = "__riscv_vsrl_vx_" + suffix + "(" + raw + ", " +
                           shift + ", " + vl + ")";
     decoded = "__riscv_vand_vx_" + suffix + "(" + decoded + ", " +

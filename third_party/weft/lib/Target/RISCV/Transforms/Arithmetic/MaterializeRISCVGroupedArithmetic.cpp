@@ -4,6 +4,7 @@
 #include "Transforms/Representation/NumericalValidity.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 
 using namespace mlir;
@@ -74,6 +75,7 @@ public:
     registry.insert<riscv::WEFTRISCVDialect, arith::ArithDialect, scf::SCFDialect>();
   }
   void runOnOperation() override {
+    versionSharedGroupedPrograms();
     foldExactGroupedReductions();
     SmallVector<Operation *> operations;
     SmallVector<Operation *> original;
@@ -117,12 +119,96 @@ public:
     for (auto op : operations) b.replaceOp(op, results.lookup(op->getResult(0)));
   }
 private:
+  void versionSharedGroupedPrograms() {
+    SmallVector<riscv::MacGroupsOp> candidates;
+    getOperation().walk([&](riscv::MacGroupsOp mac) {
+      if (hasWideningReduction(mac)) candidates.push_back(mac);
+    });
+    DenseSet<Operation *> handled;
+    IRRewriter b(&getContext());
+    for (auto mac : candidates) {
+      auto unsignedType = dyn_cast<IntegerType>(logicalElement(mac.getLhs().getType()));
+      auto field = sourceField(unsignedType && unsignedType.isUnsigned() ? mac.getLhs() : mac.getRhs());
+      Value owner = field ? field.getOwner() : Value();
+      riscv::MaterializeOp stage;
+      for (unsigned depth = 0; owner && depth < 32; ++depth) {
+        if ((stage = owner.getDefiningOp<riscv::MaterializeOp>())) break;
+        if (auto extract = owner.getDefiningOp<riscv::ExtractOp>()) owner = extract.getInput();
+        else break;
+      }
+      if (!stage || handled.contains(stage)) continue;
+      auto saved = dyn_cast<riscv::ValueType>(stage.getResult().getType());
+      auto encoding = saved ? dyn_cast<kernel::EncodingType>(saved.getElementType()) : kernel::EncodingType();
+      auto declaration = encoding ? findEncoding(stage, encoding.getFamily()) : riscv::EncodingDeclOp();
+      if (!saved || saved.getShape().size() != 2 || !declaration ||
+          stage->getBlock()->getTerminator()->getNumOperands()) continue;
+      riscv::LoopOp reuseLoop;
+      for (Operation *parent = mac->getParentOp(); parent && parent != stage->getParentOp(); parent = parent->getParentOp())
+        if (parent->getBlock() == stage->getBlock()) reuseLoop = dyn_cast<riscv::LoopOp>(parent);
+      auto domain = reuseLoop ? reuseLoop.getDomain().getDefiningOp<riscv::DomainOp>() : riscv::DomainOp();
+      if (!domain || llvm::is_contained(saved.getAxisIds().asArrayRef(),
+                                       domain.getResult().getType().getAxisId())) continue;
+      Value extent = domain.getExtent();
+      if (auto *definition = extent.getDefiningOp(); definition &&
+          definition->getBlock() == stage->getBlock() && !definition->isBeforeInBlock(stage)) continue;
+      auto partial = cast<riscv::ValueType>(mac.getResult().getType());
+      int64_t outputCount = 1, frontier = 0;
+      for (size_t i = 0; i + 1 < partial.getShape().size(); ++i) {
+        outputCount *= partial.getShape()[i];
+        if (partial.getAxisIds()[i] == saved.getAxisIds()[0]) frontier = partial.getShape()[i];
+      }
+      const int64_t rows = saved.getShape()[0], elements = saved.getShape()[1];
+      const int64_t terms = partial.getShape().asArrayRef().back() * mac.getGroup();
+      const int64_t recordElements = declaration.getElements();
+      const int64_t recordBytes = declaration.getStorageBits() / 8;
+      if (outputCount <= 0 || frontier <= 1 || rows <= 0 || elements <= 0 ||
+          recordElements <= 0 || recordBytes <= 0 || terms <= 0 || elements % recordElements) continue;
+      auto target = mac->getParentOfType<riscv::KernelOp>().getTarget();
+      const int64_t byteLanes = std::max<int64_t>(1, target.getVlenBits() / 8);
+      const int64_t partialLanes = std::max<int64_t>(1, target.getVlenBits() / 16);
+      auto ceilDiv = [](int64_t x, int64_t y) { return x / y + (x % y != 0); };
+      const int64_t cohorts = ceilDiv(rows, frontier);
+      const int64_t records = rows * (elements / recordElements);
+      const int64_t encodedPreparation = recordBytes * (elements / recordElements) * cohorts * (frontier + 2);
+      const int64_t decodedPreparation = records * ceilDiv(recordBytes, byteLanes) * 2;
+      const int64_t repeats = cohorts * ceilDiv(elements, terms);
+      const int64_t encodedWork = ceilDiv(outputCount, partialLanes) *
+          ceilDiv(terms, mac.getGroup()) * (mac.getGroup() + 2) * repeats;
+      const int64_t decodedWork = outputCount * ceilDiv(terms, byteLanes) * 5 * repeats;
+      if (encodedPreparation <= decodedPreparation || decodedWork <= encodedWork) continue;
+      const int64_t threshold = (encodedPreparation - decodedPreparation - 1) / (decodedWork - encodedWork);
+      if (threshold <= 0) continue;
+      auto scope = stage->getParentOfType<riscv::LoopOp>();
+      if (!scope || scope.getNumResults() ||
+          (extent.getDefiningOp() && scope->isProperAncestor(extent.getDefiningOp()))) continue;
+      handled.insert(stage);
+      b.setInsertionPoint(scope);
+      auto limit = arith::ConstantIndexOp::create(b, stage.getLoc(), threshold);
+      auto condition = arith::CmpIOp::create(b, stage.getLoc(), arith::CmpIPredicate::ule, extent, limit);
+      auto choice = scf::IfOp::create(b, stage.getLoc(), condition, true);
+      choice->setAttr("weft.riscv.grouped_reuse_choice", b.getDenseI64ArrayAttr(
+          {threshold, encodedPreparation, decodedPreparation, encodedWork, decodedWork}));
+      auto clone = [&](Block &block, StringRef strategy) {
+        IRMapping mapping;
+        b.setInsertionPoint(block.getTerminator());
+        Operation *copy = b.clone(*scope.getOperation(), mapping);
+        copy->walk([&](riscv::MacGroupsOp grouped) {
+          grouped->setAttr("weft.riscv.grouped_strategy", b.getStringAttr(strategy));
+        });
+      };
+      clone(choice.getThenRegion().front(), "decoded");
+      clone(choice.getElseRegion().front(), "encoded");
+      scope.erase();
+      break; // One shared stage per invocation; other closed groups still lower normally.
+    }
+  }
+
   void foldExactGroupedReductions() {
     SmallVector<riscv::MacGroupsOp> operations;
     getOperation().walk([&](riscv::MacGroupsOp op) { operations.push_back(op); });
     IRRewriter b(&getContext());
     for (auto mac : operations) {
-      if (hasWideningReduction(mac) || !mac.getResult().hasOneUse()) continue;
+      if (!mac.getResult().hasOneUse()) continue;
       auto partial = dyn_cast<riscv::ValueType>(mac.getResult().getType());
       auto width = partial ? dyn_cast<IntegerType>(partial.getElementType()) : IntegerType();
       auto widen = dyn_cast<riscv::WidenOp>(*mac.getResult().getUsers().begin());
@@ -144,6 +230,37 @@ private:
       __int128 minimum = *bounds.first * mac.getGroup();
       __int128 maximum = *bounds.second * mac.getGroup();
       if (minimum < -32768 || maximum > 32767) continue;
+      if (hasWideningReduction(mac)) {
+        auto kernel = mac->getParentOfType<riscv::KernelOp>();
+        auto outputs = cast<riscv::ValueType>(reduce.getResult().getType());
+        int64_t outputCount = 1;
+        for (int64_t extent : outputs.getShape().asArrayRef()) {
+          if (extent <= 0 || outputCount > INT32_MAX / extent) {
+            outputCount = INT32_MAX;
+            break;
+          }
+          outputCount *= extent;
+        }
+        const int64_t terms = partial.getShape().asArrayRef().back() * mac.getGroup();
+        const int64_t byteLanes = std::max<int64_t>(1, kernel.getTarget().getVlenBits() / 8);
+        const int64_t partialLanes = std::max<int64_t>(1, kernel.getTarget().getVlenBits() / 16);
+        auto ceilDiv = [](int64_t value, int64_t divisor) {
+          return value / divisor + (value % divisor != 0);
+        };
+        // Estimate encoded cohort updates against per-record decode, widening
+        // multiply and reduction. Costs depend on axes and target vector
+        // capacity, never on an encoding name or a benchmark configuration.
+        const int64_t encodedIssues = ceilDiv(outputCount, partialLanes) *
+            ceilDiv(terms, mac.getGroup()) * (mac.getGroup() + 2);
+        const int64_t decodedIssues = outputCount * ceilDiv(terms, byteLanes) * 5;
+        auto strategy = mac->getAttrOfType<StringAttr>("weft.riscv.grouped_strategy");
+        const bool forcedEncoded = strategy && strategy.getValue() == "encoded";
+        const bool forcedDecoded = strategy && strategy.getValue() == "decoded";
+        const bool keepEncoded = forcedEncoded || (!forcedDecoded && encodedIssues <= decodedIssues);
+        mac->setAttr("weft.riscv.grouped_candidate_cost", b.getDenseI64ArrayAttr(
+            {outputCount, terms, encodedIssues, decodedIssues}));
+        if (keepEncoded) continue;
+      }
       b.setInsertionPoint(reduce);
       auto dot = riscv::DotOp::create(b, reduce.getLoc(), reduce.getResult().getType(),
           mac.getLhs(), mac.getRhs(), b.getDenseI64ArrayAttr({partial.getAxisIds().asArrayRef().back()}),

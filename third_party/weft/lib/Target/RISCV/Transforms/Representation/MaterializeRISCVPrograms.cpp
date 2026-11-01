@@ -104,12 +104,22 @@ public:
                          rewriter.getStringAttr("ascending"));
       copyProvenance(operation, blockLoop);
       rewriter.setInsertionPointToStart(blockLoop.getBody());
+      const bool contiguous = plan.getInterleaveRows() == 1;
+      mlir::Value byteStep = contiguous
+          ? mlir::Value(mlir::arith::ConstantIndexOp::create(rewriter,
+              operation.getLoc(), operation.getTransferLayout().getVl())) : one;
       auto byteLoop = mlir::scf::ForOp::create(rewriter,
-          operation.getLoc(), zero, bytesPerRecord, one);
+          operation.getLoc(), zero, bytesPerRecord, byteStep);
       byteLoop->setAttr("weft.riscv.direction",
                         rewriter.getStringAttr("ascending"));
       copyProvenance(operation, byteLoop);
       rewriter.setInsertionPointToStart(byteLoop.getBody());
+      if (contiguous) {
+        auto remaining = mlir::arith::SubIOp::create(rewriter,
+            operation.getLoc(), bytesPerRecord, byteLoop.getInductionVar());
+        transferVL = mlir::arith::MinUIOp::create(rewriter,
+            operation.getLoc(), remaining, byteStep);
+      }
       auto transfer =
           riscv::RVVEncodedLocalPackTransferOp::create(rewriter,
               operation.getLoc(), operation.getInput(), operation.getStorage(),
