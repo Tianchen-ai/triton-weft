@@ -43,6 +43,10 @@ def test_matrix_complete_output(shape, dtype):
 @pytest.mark.parametrize("dtype", ["i8", "bf16"])
 @pytest.mark.skipif(platform.machine() != "x86_64", reason="The tested matrix implementation uses Intel AMX")
 def test_aligned_matrix_complete_output(dtype):
+    from triton import cpu
+    extension = "amx-int8" if dtype == "i8" else "amx-bf16"
+    if extension not in cpu.target().march.split("+"):
+        pytest.skip(f"CPU lacks {extension}")
     from triton.kernels.weft.dense.x86 import integer_matmul, bfloat_matmul
     rows, columns, width = 80, 80, 64
     rng = np.random.default_rng(19)

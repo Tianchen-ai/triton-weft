@@ -36,7 +36,7 @@ with a legal integer matrix route. Read the printed actual extensions.
 
 The paper's projection combines these ideas at larger scale: encoded weight
 fields, explicit partial widths, a shared panel and nested output states.
-Its author programs are in the installable Bench package.
+Its author programs are in the installed `triton.kernels.weft` library.
 
 [![Source scopes and partial arithmetic in projection](../assets/paper/model.png)](../assets/paper/model.png)
 

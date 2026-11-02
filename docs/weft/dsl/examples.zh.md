@@ -34,7 +34,7 @@
 
 论文中的 projection 在更大范围组合这些能力：
 编码权重字段、显式 partial 位宽、共享 panel 和嵌套输出 state。
-对应作者程序位于可安装的 Bench package。
+对应作者程序位于已安装的 `triton.kernels.weft` 库。
 
 [![Projection 的源作用域与部分和算术](../assets/paper/model.png)](../assets/paper/model.png)
 
