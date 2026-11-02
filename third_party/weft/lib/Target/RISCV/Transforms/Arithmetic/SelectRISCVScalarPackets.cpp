@@ -91,7 +91,7 @@ void selectScalarWindows(ModuleOp module, IRRewriter &rewriter) {
           type.getShape(), type.getAxisIds(), combined);
       auto zero = rewriter.getDenseI64ArrayAttr({0});
       auto read = riscv::RVVReplicaStorageLoadOp::create(rewriter, load.getLoc(), readType,
-          load.getField(), load.getLogicalBase(), load.getPlan(), uint64_t{0}, zero,
+          load.getField(), load.getLogicalBase(), load.getPlan(), rewriter.getI64IntegerAttr(0), zero,
           rewriter.getDenseI64ArrayAttr({}), zero, zero, zero, zero, zero, zero,
           load.getAccess(), riscv_internal::leaf(rewriter, "rvv", "replica-storage-load",
               "rvv.replica-storage-load.natural", "rvv.replica-storage-load.natural",
