@@ -27,7 +27,7 @@ To build the dependency SDK from the public LLVM project:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r python/requirements.txt
+python -m pip install 'setuptools>=40.8.0' wheel 'pybind11>=2.13.1'
 LLVM_PROJECT_PATH="$PWD/.deps/llvm-project" \
 LLVM_BUILD_PATH="$PWD/.deps/llvm-build" \
 LLVM_INSTALL_PATH="$PWD/.deps/llvm" \
