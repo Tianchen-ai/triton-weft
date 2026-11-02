@@ -2,7 +2,7 @@
 import numpy as np
 import triton.language as tl
 from triton.integrations.ggml_formats import Q4_K, Q8_K
-from triton.kernels.weft.ggml.blocks.mul_mat.organized_projection import q4_projection
+from triton.kernels.weft.ggml.blocks.mul_mat.q4_k import production_mul_mat_q4_k
 
 
 def main():
@@ -21,10 +21,9 @@ def main():
             weights[column, block, 16:] = 0x21
     workspace = np.empty((rows, width // 256, 292), dtype=np.uint8)
     output = np.empty((rows, outputs), dtype=np.float32)
-    compiled = q4_projection[(1,)](
+    compiled = production_mul_mat_q4_k[(1,)](
         tl.View(weights, encoding=Q4_K, shape=(outputs, width)), activation,
         tl.View(workspace, encoding=Q8_K, shape=(rows, width)), output,
-        MR=1, NR=4, MC=1, SHARED=True, GROUPED=True, RETAIN_OUTPUT=True,
         num_cpu_threads=1)
     codes = np.where(np.arange(width) % 64 < 32, 1, 2).astype(np.float32)
     reference = activation @ (factors.astype(np.float32)[:, None] * codes).T
