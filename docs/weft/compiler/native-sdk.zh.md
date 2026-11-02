@@ -47,6 +47,7 @@ cmake -S examples/weft/deployment -B /tmp/weft-native-build \
   -DWeft_DIR=/printed/sdk/path/lib/cmake/Weft
 cmake --build /tmp/weft-native-build
 /tmp/weft-native-build/weft-native-call /tmp/affine-native
+/tmp/weft-native-build/weft-native-call-c /tmp/affine-native
 ```
 
 前四个输出是 `-0.5 0.75 2 3.25`。

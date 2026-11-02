@@ -1,41 +1,55 @@
 # Triton–Weft
 
-**用 Triton 编写 CPU kernel，用 Weft 控制编码数据、计算分组与复用。**
+**用编码字段、带类型计算、共享值和状态组合高性能 CPU 内核。**
 
-[English](README.md) · [中文工具书](https://tianchen-ai.github.io/triton-weft/zh/) · [English handbook](https://tianchen-ai.github.io/triton-weft/) · [完整示例](examples/weft/README.zh-CN.md) · [实验结果](#实验与复现) · [实验复现](docs/weft/experiments/reproduce.zh.md)
+Weft 是通过扩展 Triton 实现的编程模型。源程序显式表达数据表示、数值分组、
+共享和状态更新，编译器利用这些关系为 x86 和 RISC-V 构造向量与矩阵执行。
+程序沿用 `@triton.jit(model="weft")`、`kernel[grid](...)`、配置、自动调优、
+缓存及原生导出接口。
 
-Triton–Weft 扩展 Triton 的 Python 语言与编译器，面向 **RISC-V 和 x86 CPU**。
-从熟悉的 `tl.load`、`tl.store`、归约和 `tl.dot` 开始；需要精细控制时，用
-**Encoding** 描述打包存储，用 **Level** 组织逻辑计算，用 **state/stage** 表达累加与复用。
-编译器保留这些关系，选择向量或矩阵指令、物理布局、局部存储和执行调度。
+可安装的 `triton.kernels.weft` 提供内核、存储格式、布局、数值辅助函数、
+调优资源和主机端组合，包括稠密与量化投影、归一化、在线注意力、流式统计及
+带状态的模型组件。NumPy 和 CPU Torch 是可选的主机缓冲区接入方式。
 
-用户使用同一套 Triton 工作流：`@triton.jit(model="weft")`、`kernel[grid](...)`、
-`triton.Config`、自动调优、编译缓存与原生导出。
+## 构建与安装
 
-[![共同 Triton 前端、Canonical IR 与两个物理后端](docs/weft/assets/paper/compiler.png)](docs/weft/assets/paper/compiler.png)
+源码在没有 `.git` 目录时也可构建。需要 Python 3.10 或更新版本、Git、CMake、
+Ninja、支持 C++20 的编译器，以及
+[`cmake/llvm-info.json`](cmake/llvm-info.json) 固定的 LLVM/MLIR 版本。
+该版本提供 Clang 23；OpenMP 运行时须使用匹配的调度 ABI。
 
-*Canonical IR 保存源程序的作用域、逻辑轴、状态和 Encoding；RISC-V 输出 intrinsic C
-与局部汇编，x86 输出 LLVM IR。*
-
-## 安装
-
-在独立环境中安装本项目的 Triton 发行包：
+从公开 LLVM 项目构建依赖 SDK：
 
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install --index-url https://tianchen-ai.github.io/triton-weft/wheels/ 'triton==3.8.0+weft.2'
-python -m pip install numpy
+python -m pip install -r python/requirements.txt
+LLVM_PROJECT_PATH="$PWD/.deps/llvm-project" \
+LLVM_BUILD_PATH="$PWD/.deps/llvm-build" \
+LLVM_INSTALL_PATH="$PWD/.deps/llvm" \
+bash scripts/build-llvm-project.sh
 ```
 
-[Release](https://github.com/Tianchen-ai/triton-weft/releases/tag/v3.8.0-weft.2)
-提供 Linux x86-64 CPython 3.10 和 RISC-V CPython 3.11／3.12／3.14 wheel，
-包含 Clang 23 与 OpenMP。[安装指南](docs/weft/getting-started/installation.zh.md)
-说明系统要求，以及其他 Python 环境和当前 `main` 的源码构建方法。发行包名和导入名均为 `triton`。
+也可以选用由同一版本构建的现有 SDK。显式指定 SDK、本机 Clang 和 OpenMP：
 
-## 运行第一个 kernel
+```sh
+CC="$PWD/.deps/llvm/bin/clang" \
+CXX="$PWD/.deps/llvm/bin/clang++" \
+LLVM_SYSPATH="$PWD/.deps/llvm" \
+TRITON_WEFT_CLANG_ROOT="$PWD/.deps/llvm" \
+TRITON_WEFT_OPENMP_LIBRARY="$PWD/.deps/llvm/lib/libomp.so" \
+TRITON_WEFT_OPENMP_INCLUDE_DIR="$PWD/.deps/llvm/lib/clang/23/include" \
+TRITON_BUILD_DIR="$PWD/.build" \
+TRITON_BUILD_PROTON=OFF \
+python -m pip install --no-build-isolation .
+python -m pip install numpy pytest
+```
 
-将下面程序保存为 `affine.py`，执行 `python affine.py`：
+若 LLVM 将库安装到目标专属目录，应传入该目录中的 `libomp.so`。
+构建会检查 OpenMP 入口、头文件与 Clang 本机目标。
+[安装指南](docs/weft/getting-started/installation.zh.md)进一步说明显式工具链与交叉编译。
+
+## 编写和调用内核
 
 ```python
 import numpy as np
@@ -45,143 +59,79 @@ import triton.language as tl
 @triton.jit(model="weft")
 def affine(X, Y, N, scale, bias, B: tl.constexpr):
     i = tl.program_id(0) * B + tl.arange(0, B)
-    x = tl.load(X + i, mask=i < N, other=0.0)
-    tl.store(Y + i, x * scale + bias, mask=i < N)
+    value = tl.load(X + i, mask=i < N, other=0.0)
+    tl.store(Y + i, value * scale + bias, mask=i < N)
 
 x = np.arange(131, dtype=np.float32)
 y = np.empty_like(x)
 compiled = affine[(triton.cdiv(x.size, 64),)](
-    x, y, x.size, 1.25, -0.5, B=64, num_cpu_threads=2
-)
-print(y[:4])  # [-0.5, 0.75, 2.0, 3.25]
+    x, y, x.size, 1.25, -0.5, B=64, num_cpu_threads=2)
+np.testing.assert_array_equal(y, x * 1.25 - 0.5)
 ```
 
-这里的 grid 包含三个独立程序实例，由两个 CPU 线程执行。最后一个实例用 mask
-处理剩余三个元素。首次调用针对选定核心编译，后续调用复用 Triton 缓存。
+grid 表示独立程序实例，`num_cpu_threads` 指定 CPU 工作线程数。
+带类型的 `tl.View` 参数还能向编译器提供逻辑字段、形状与存储信息。
 
-## 把影响性能的结构写进程序
-
-| 作者的选择 | Triton–Weft 表达 | 编译器获得的信息 |
+| 作者对象 | 程序表达 | 编译使用的信息 |
 |---|---|---|
-| 打包字节与逻辑字段 | `@triton.encoding`、`tl.View` | 字段坐标、位宽、存储与对齐 |
-| 逻辑分组与尾块 | `with tl.level.rows(...)`、`blocks(...)` | 哪些输出共享计算，以及覆盖范围 |
-| 累加与复用 | `tl.state(...)`、`tl.stage(...)` | 初始化频率、跨迭代状态与共享值 |
-| 数值分组 | `tl.mac_groups`、`tl.widen`、`tl.reduce` | 部分和位宽与转换边界 |
-| 向量或矩阵计算 | `tl.dot(..., engine="vector" 或 "matrix")` | 当前 contraction 的实现类别约束 |
+| 存储字段 | `@triton.encoding`、`tl.View` | 坐标、位宽、存储与对齐 |
+| 逻辑区域 | `tl.level` | 独立输出、分组与有效尾部 |
+| 共享值与状态 | `tl.stage`、`tl.state` | 输入观察、初始化与更新 |
+| 数值分组 | `tl.mac_groups`、`tl.widen`、`tl.reduce` | 局部位宽与转换位置 |
+| 执行类别 | `tl.dot(..., engine=...)` | 向量或合法矩阵执行的构造 |
 
-作者可以分别改变格式、数值分组和复用作用域；编译器通过共享分析与目标 passes
-实现这些选择。[编程模型章节](docs/weft/programming-model/index.zh.md)
-结合论文中的量化投影，逐步解释这些关系如何改变实际工作。
+普通 Python 工厂可以一次绑定 Encoding 和 JIT 辅助函数。
+库中的 [`organized_projection.py`](python/triton/kernels/weft/ggml/blocks/mul_mat/organized_projection.py)
+让 Q4_K 与 Q6_K 共用带类型入口、准备框架、加权计算和两种输出状态遍历。
+各格式提供自己的字段辅助函数，Q4_K 另外提供校正字段。
 
-| 目标 | 向量路线 | 矩阵路线 |
-|---|---|---|
-| SG2044 | RVV，VLEN 128 | — |
-| K1 | RVV，VLEN 256 | IME1 |
-| K3 X100／A100 | RVV，VLEN 256／1024 | A100 上的 IME2 |
-| x86 | AVX2／AVX-512、VNNI | Intel AMX INT8／BF16 |
+## 运行完整示例
 
-`triton.cpu.target()` 构造编译目标；`triton.tools.cpu` 在 JIT 前选择执行核心。
-具体操作见[目标、核心与 engine](docs/weft/getting-started/hardware.zh.md)。
-
-## 从可运行示例学习
-
-克隆仓库后，在已安装 wheel 的环境中，从仓库根目录运行：
+安装后，在源码根目录运行：
 
 ```sh
-python -m examples.weft.language.triton_basics --operation softmax
-python -m examples.weft.language.encoding
-python -m examples.weft.language.levels
-python -m examples.weft.language.contraction --engine vector
-python -m examples.weft.deployment.autotune_export /tmp/affine-artifact
+python -m examples.weft.kernels.projection
+python -m examples.weft.kernels.welford
+python -m examples.weft.kernels.attention
+python -m examples.weft.kernels.gemm
+python -m pytest python/test/weft -s --tb=short
 ```
 
-[双语示例指南](examples/weft/README.zh-CN.md)说明输入、预期输出和可调整的源程序构造。
-随后可以学习 [PyTorch](docs/weft/integrations/overview.zh.md)、
-[原生 C++ 部署](docs/weft/compiler/native-sdk.zh.md)以及
-[llama.cpp 接入](docs/weft/integrations/llama-cpp.zh.md)。
+每个示例独立准备输入、调用安装的产品，并用独立参考检查全部输出。
+产品测试还覆盖工厂特化、原生导出和重新加载、逻辑尾部，以及 x86 整数与 BF16
+矩阵路径。矩阵测试需要相应 CPU 能力。
 
-接入 llama.cpp 时，Triton 将 kernel 编译成带 typed ABI 的原生库，
-adapter 把它绑定到匹配的 GGML 调用点，GGML worker 在推理中直接调用。
-[完整教程](docs/weft/integrations/llama-cpp.zh.md)包括源码、导出、adapter 构建、加载与命中计数。
+`triton.kernels.weft.programs` 中的主机程序提供 `Program`、`Operators`、
+工作空间、KV-cache、MoE 和状态空间接口。应用可以只导入所需任务与主机接入。
+[工具书](docs/weft/index.zh.md)与[示例指南](examples/weft/README.zh-CN.md)
+说明语言及部署接口。
 
-## 实验与复现
+## 原生部署
 
-**论文中的算子和模型实验可以使用 Triton–Weft 与
-[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench) 复现。**
-Bench 提供作者程序、工作负载形状、参考库构建配方、模型协议、数值检查和计时入口。
+`compiled.export(directory)` 保存原生库、带类型 ABI 和运行时依赖，
+`triton.runtime.weft.artifact.load(directory)` 重新加载。
+SDK 安装 `<weft/runtime.h>` 与 `<weft/runtime.hpp>`，源码位于
+`third_party/weft/runtime/include/weft`。两类 CPU 使用相同的原生 ABI 和头文件名。
+参见 [C++ 部署示例](examples/weft/deployment)与
+[原生 SDK 指南](docs/weft/compiler/native-sdk.zh.md)。
 
-[![代表算子与全部 543 项匹配比较的性能分布](docs/weft/assets/paper/operators.png)](docs/weft/assets/paper/operators.png)
+## 测量结果
 
-*论文数据包含 553 个算子—平台案例，其中 543 项具有匹配的原生参考。
-SG2044、K1、K3 A100 与 Xeon Platinum 8470Q 的几何平均加速分别为
-1.60×、1.55×、1.82×、1.56×。分布图保留全部匹配案例。*
+随附的 `results/*.csv` 给出算子、模型与受控研究的测量结果及其比较范围。
+数值和数量均来自这些文件。源码包包含完整编译器、正常内核库、示例与正确性测试。
 
-| 平台 | 正式用例 | 匹配原生比较 | 几何平均加速 |
-|---|---:|---:|---:|
-| SG2044 · RVV128 | 133 | 132 | **1.60×** |
-| K1 · RVV256／IME1 | 137 | 136 | **1.55×** |
-| K3 A100 · RVV1024／IME2 | 136 | 135 | **1.82×** |
-| Xeon Platinum 8470Q · AVX-512／VNNI／AMX | 147 | 140 | **1.56×** |
-
-倍率为参考耗时除以 Triton–Weft 耗时；匹配参考包含 541 项 GGML 和两项 oneDNN。
-[完整算子测量 CSV](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/operators.csv)。
-
-[![九组模型配置的 prefill 与 decode 结果](docs/weft/assets/paper/models.png)](docs/weft/assets/paper/models.png)
-
-*九组配置覆盖 Llama 2 7B、DeepSeek 8B 与 Qwen 2.5 14B。
-每组分别展示 prefill、decode 相对对应正常 llama.cpp 后端的收益；
-K3 的 CPU–RVV 与厂商 IME2 使用各自的参考策略。*
-
-| 平台 | 模型 | 参考 | Prefill | Decode |
-|---|---|---|---:|---:|
-| x86 | Llama 2 7B Q4_0 | 正常 llama.cpp | 1.75× | 1.20× |
-| x86 | DeepSeek 8B Q4_K_M | 正常 llama.cpp | 1.23× | 1.27× |
-| x86 | Qwen 2.5 14B Q4_K_M | 正常 llama.cpp | 1.18× | 1.25× |
-| SG2044 | Llama 2 7B Q4_0 | 正常 llama.cpp | 1.26× | 1.02× |
-| SG2044 | DeepSeek 8B Q4_K_M | 正常 llama.cpp | 1.15× | 0.957× |
-| K1 | Llama 2 7B Q4_0 | 正常 llama.cpp | 1.62× | 0.997× |
-| K1 | DeepSeek 8B Q4_K_M | 正常 llama.cpp | 1.15× | 1.01× |
-| K3 A100 | DeepSeek 8B Q4_K_M | CPU–RVV | 1.93× | 1.92× |
-| K3 A100 | DeepSeek 8B Q4_K_M | 厂商 IME2 | 0.985× | 1.17× |
-
-SG2044 模型使用 64 线程，K1、K3 和 x86 使用八线程。SG2044／K1／x86 为 128-token prefill、512-token context 后生成
-32 tokens；K3 为 32-token prefill、32-token context 后生成 8 tokens。
-[完整 18 个模型阶段 CSV](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/models.csv)。
-
-先查看用例，再使用配置好的目标运行：
-
-```sh
-git clone https://github.com/Tianchen-ai/triton-weft-bench.git
-cd triton-weft-bench
-python -m pip install '.[verification]'
-mkdir -p .local
-cp configs/example.json .local/bench.local.json
-export WEFT_BENCH_CONFIG="$PWD/.local/bench.local.json"
-# 按目标配置指南填写目标、连接方式和参考库。
-weft-bench list --kind suites --target k1
-weft-bench show q4_k_dot --target k1
-weft-bench op q4_k_dot --target k1 --output output/current/k1/q4_k_dot
-```
-
-[复现章节](docs/weft/experiments/reproduce.zh.md)给出全量套件、目标机 JIT、固定参考、
-模型 package 和结果文件的操作步骤。[结果与图片来源](docs/weft/experiments/results.zh.md)
-说明论文采用的测量快照及计时范围。
-
-## 项目结构
+## 源码结构
 
 | 模块 | 位置 |
 |---|---|
-| 语言与共同 Triton 前端 | `python/triton/language`、`python/triton/compiler` |
-| JIT、CPU backend 与原生加载 | `python/triton/runtime`、`python/triton/backends/weft` |
-| Canonical IR 与共享分析 | `third_party/weft/lib/Dialect/Kernel`、`third_party/weft/lib/Analysis` |
-| RISC-V／x86 物理编译 | `third_party/weft/lib/Target/RISCV`、`third_party/weft/lib/Target/X86` |
-| 原生 runtime 与应用 adapter | `third_party/weft/lib/Runtime`、`integrations` |
-| 可运行教程／双语工具书 | `examples/weft`、`docs/weft` |
-| 详细设计合同 | `docs/specification` |
+| 语言与前端 | `python/triton/language`、`python/triton/compiler` |
+| JIT、CPU 后端与原生调用 | `python/triton/runtime`、`python/triton/backends/weft` |
+| 正常 CPU 内核库 | `python/triton/kernels/weft` |
+| Canonical IR 与共同分析 | `third_party/weft/lib/Dialect/Kernel`、`third_party/weft/lib/Analysis` |
+| RISC-V 物理 IR | `third_party/weft/lib/Dialect/RISCV` |
+| 降低、优化与发射 | `third_party/weft/lib/Target` |
+| 原生运行时与公开 SDK | `third_party/weft/lib/Runtime`、`third_party/weft/runtime/include` |
+| 示例与产品回归 | `examples/weft`、`python/test/weft` |
 
-本仓库 fork 自 [Triton v3.8.0](https://github.com/triton-lang/triton/tree/v3.8.0)，
-`main` 是产品主分支。[上游修改地图](docs/weft/development/upstream.zh.md)
-列出各扩展接缝；开发 pass 或新增硬件扩展可从[贡献指南](CONTRIBUTING.md)开始。
-
-上游 Triton 保留 MIT 许可证，Weft 扩展保留 Apache-2.0；
-[NOTICE](NOTICE) 记录组件归属。
+完整 fork 基于 Triton v3.8.0。上游 Triton 保留 MIT 许可证，Weft 扩展保留
+Apache-2.0。`LICENSE`、`NOTICE` 与 `third_party/weft/licenses` 保存组件归属及第三方声明。

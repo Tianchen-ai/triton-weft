@@ -48,9 +48,11 @@ cmake -S examples/weft/deployment -B /tmp/weft-native-build \
   -DWeft_DIR=/printed/sdk/path/lib/cmake/Weft
 cmake --build /tmp/weft-native-build
 /tmp/weft-native-build/weft-native-call /tmp/affine-native
+/tmp/weft-native-build/weft-native-call-c /tmp/affine-native
 ```
 
 The first four values are `-0.5 0.75 2 3.25`.
+Both the C and C++ examples check all 64 outputs.
 The application links `Weft::Runtime`. Runtime loading uses the exported artifact;
 the SDK and the artifact must match the executing target.
 

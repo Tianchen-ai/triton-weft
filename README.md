@@ -18,7 +18,7 @@ optional host-buffer integrations.
 ## Build and install
 
 The source tree builds without a `.git` directory. Use Python 3.10 or newer,
-CMake, Ninja, a C++20 compiler and the LLVM/MLIR revision in
+Git, CMake, Ninja, a C++20 compiler and the LLVM/MLIR revision in
 [`cmake/llvm-info.json`](cmake/llvm-info.json). The pinned revision supplies
 Clang 23; its OpenMP runtime must use the same dispatch ABI.
 

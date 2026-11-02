@@ -25,10 +25,15 @@ int main(int argc, char **argv) {
         .set("bias", weft::scalar(-0.5f));
     auto call = binding.prepare();
     call();
+    for (size_t i = 0; i < y.size(); ++i) {
+      if (y[i] != 1.25f * x[i] - 0.5f)
+        throw std::runtime_error("complete output check failed");
+    }
     std::cout << "Y = 1.25 * X - 0.5:";
     for (size_t i = 0; i < 4; ++i)
       std::cout << ' ' << y[i];
     std::cout << '\n';
+    std::cout << "C++ SDK: all 64 outputs match\n";
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';
     return 1;

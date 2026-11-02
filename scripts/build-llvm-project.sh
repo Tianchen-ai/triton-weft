@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
+set -eo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 LLVM_TARGETS=${LLVM_TARGETS:-Native;NVPTX;AMDGPU}
-LLVM_PROJECTS=${LLVM_PROJECTS:-mlir;llvm;lld;clang}
+LLVM_PROJECTS=${LLVM_PROJECTS:-mlir;lld;clang}
 LLVM_RUNTIME_PROJECTS=${LLVM_RUNTIME_PROJECTS:-openmp}
 LLVM_DISTRIBUTION_COMPONENTS=${LLVM_DISTRIBUTION_COMPONENTS:-"llvm-headers;llvm-libraries;cmake-exports;mlir-headers;mlir-libraries;mlir-cmake-exports;lld-headers;lld-libraries;lld-cmake-exports;clang;clang-resource-headers;FileCheck;not;split-file;llc;opt;llvm-config;mlir-tblgen;mlir-translate"}
-LLVM_BUILD_TYPE=${LLVM_BUILD_TYPE:-RelWithDebInfo}
-LLVM_COMMIT_HASH=${LLVM_COMMIT_HASH:-$(jq -r '.llvm_hash' "$REPO_ROOT/cmake/llvm-info.json")}
+LLVM_BUILD_TYPE=${LLVM_BUILD_TYPE:-Release}
+LLVM_COMMIT_HASH=${LLVM_COMMIT_HASH:-$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["llvm_hash"])' "$REPO_ROOT/cmake/llvm-info.json")}
 LLVM_PROJECT_PATH=${LLVM_PROJECT_PATH:-"$REPO_ROOT/llvm-project"}
 LLVM_BUILD_PATH=${LLVM_BUILD_PATH:-"$LLVM_PROJECT_PATH/build"}
 LLVM_INSTALL_PATH=${LLVM_INSTALL_PATH:-"$LLVM_PROJECT_PATH/install"}
@@ -38,6 +39,8 @@ if [ -z "$CMAKE_ARGS" ]; then
               -DLLVM_OPTIMIZED_TABLEGEN=ON
               -DMLIR_ENABLE_BINDINGS_PYTHON=OFF
               -DLLVM_ENABLE_ZSTD=OFF
+              -DLLVM_INCLUDE_TESTS=OFF
+              -DLLVM_INCLUDE_BENCHMARKS=OFF
               -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
               -DCMAKE_EXPORT_COMPILE_COMMANDS=1
               -DLLVM_ENABLE_PROJECTS="$LLVM_PROJECTS"
@@ -58,14 +61,15 @@ if [ -n "$LLVM_CLEAN" ] && [ -e "$LLVM_PROJECT_PATH" ]; then
 fi
 
 if [ ! -e "$LLVM_PROJECT_PATH" ]; then
-    echo "Cloning from $LLVM_PROJECT_URL"
-    git clone "$LLVM_PROJECT_URL" "$LLVM_PROJECT_PATH"
+    git init "$LLVM_PROJECT_PATH"
+    git -C "$LLVM_PROJECT_PATH" remote add origin "$LLVM_PROJECT_URL"
 fi
 echo "Resetting to $LLVM_COMMIT_HASH"
-git -C "$LLVM_PROJECT_PATH" fetch origin "$LLVM_COMMIT_HASH"
+git -C "$LLVM_PROJECT_PATH" fetch --depth 1 origin "$LLVM_COMMIT_HASH"
 git -C "$LLVM_PROJECT_PATH" reset --hard "$LLVM_COMMIT_HASH"
 echo "Configuring with ${CMAKE_ARGS[@]}"
 cmake "${CMAKE_ARGS[@]}"
 echo "Building LLVM"
 ninja -C "$LLVM_BUILD_PATH"
 cmake --install "$LLVM_BUILD_PATH"
+install -m 644 "$LLVM_PROJECT_PATH/llvm/LICENSE.TXT" "$LLVM_INSTALL_PATH/LICENSE.TXT"
