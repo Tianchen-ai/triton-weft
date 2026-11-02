@@ -1,0 +1,19 @@
+target,model,phase,policy,shape,normal_ms,weft_ms,speedup,threads,repetitions,correctness,aggregation
+sg2044,llama2-7b-q4_0,decode,normal,"{""depth"": 512, ""generate"": 32, ""prompt"": 0}",2226.961094,2202.630592,1.0110461109949025,64,5,sampled-logits-within-tolerance,
+sg2044,llama2-7b-q4_0,prefill,normal,"{""depth"": 0, ""generate"": 0, ""prompt"": 128}",3487.841529,2768.149625,1.2599902467338628,64,5,sampled-logits-within-tolerance,
+sg2044,deepseek8b-q4_k_m,decode,normal,"{""depth"": 512, ""generate"": 32, ""prompt"": 0}",2539.63818,2499.283739,1.0161464024153362,64,5,sampled-logits-within-tolerance,
+sg2044,deepseek8b-q4_k_m,prefill,normal,"{""depth"": 0, ""generate"": 0, ""prompt"": 128}",3232.571531,2769.815294,1.1670711538066914,64,5,sampled-logits-within-tolerance,
+k1,llama2-7b-q4_0,prefill,normal,"{""depth"": 0, ""generate"": 0, ""prompt"": 128}",28309.446131606142,19765.86276939058,1.4322393341436206,8,10,sampled-logits-within-tolerance,geometric mean of process median ratios
+k1,llama2-7b-q4_0,decode,normal,"{""depth"": 512, ""generate"": 32, ""prompt"": 0}",40083.805474,39058.012157,1.0262633262767358,8,5,sampled-logits-within-tolerance,
+k1,deepseek8b-q4_k_m,prefill,normal,"{""depth"": 0, ""generate"": 0, ""prompt"": 128}",51158.257015,43051.63792,1.1882998995314416,8,5,sampled-logits-within-tolerance,
+k1,deepseek8b-q4_k_m,decode,normal,"{""depth"": 512, ""generate"": 32, ""prompt"": 0}",54167.314022,46372.986476,1.1680790507213483,8,5,sampled-logits-within-tolerance,
+k3-a100-8t,deepseek8b-q4_k_m,prefill,vendor-ime2,"{""depth"": 0, ""generate"": 0, ""prompt"": 32}",6627.708525,5727.121351,1.1572495358148385,8,5,sampled-logits-within-tolerance,
+x86-8t-controlled,llama2-7b-q4_0,prefill,normal,"{""depth"": 0, ""generate"": 0, ""prompt"": 128}",714.9405870134768,419.41295859656685,1.704622073208706,8,10,full-vocabulary-prefill-and-teacher-forced-decode-within-1e-3,geometric mean of independent process median ratios
+x86-8t-controlled,deepseek8b-q4_k_m,prefill,normal,"{""depth"": 0, ""generate"": 0, ""prompt"": 128}",887.1543246716653,747.7996331670685,1.1863529819002514,8,10,full-vocabulary-prefill-and-teacher-forced-decode-within-1e-3,geometric mean of independent process median ratios
+x86-8t-controlled,qwen2.5-14b-q4_k_m,prefill,normal,"{""depth"": 0, ""generate"": 0, ""prompt"": 128}",1585.3845958017553,1373.8907862174326,1.153937861514162,8,10,full-vocabulary-prefill-and-teacher-forced-decode-within-1e-3,geometric mean of independent process median ratios
+k3-a100-8t,deepseek8b-q4_k_m,decode,vendor-ime2,"{""depth"": 32, ""generate"": 8, ""prompt"": 0}",15514.142152,11397.549069,1.3611823084137142,8,5,sampled-logits-within-tolerance,
+x86-8t-controlled,llama2-7b-q4_0,decode,normal,"{""depth"": 512, ""generate"": 32, ""prompt"": 0}",1989.475320290249,1635.3581964739387,1.2165379576045403,8,10,full-vocabulary-prefill-and-teacher-forced-decode-within-1e-3,geometric mean of independent process median ratios
+x86-8t-controlled,deepseek8b-q4_k_m,decode,normal,"{""depth"": 512, ""generate"": 32, ""prompt"": 0}",2675.794158954728,2241.4004552820147,1.193804593306401,8,10,full-vocabulary-prefill-and-teacher-forced-decode-within-1e-3,geometric mean of independent process median ratios
+x86-8t-controlled,qwen2.5-14b-q4_k_m,decode,normal,"{""depth"": 512, ""generate"": 32, ""prompt"": 0}",4828.835568083765,4095.067930229289,1.1791832639546442,8,10,full-vocabulary-prefill-and-teacher-forced-decode-within-1e-3,geometric mean of independent process median ratios
+k3-a100-8t,deepseek8b-q4_k_m,prefill,cpu-rvv,"{""depth"": 0, ""generate"": 0, ""prompt"": 32}",149246.46317,76985.420167,1.93863283263569,8,5,sampled-logits-within-tolerance,
+k3-a100-8t,deepseek8b-q4_k_m,decode,cpu-rvv,"{""depth"": 32, ""generate"": 8, ""prompt"": 0}",41433.852474,20970.009731,1.9758623389071808,8,5,sampled-logits-within-tolerance,
