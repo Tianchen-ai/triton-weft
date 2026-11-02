@@ -941,7 +941,12 @@ private:
         return permute(loc, value, lanes,
                        cast<VectorType>(value.getType()).cloneWith({run}, scalar(value.getType())));
       };
-      Value value = access(loc, base, part(offsets), part(mask), part(data),
+      // Each part emits IR. Sequence them so host compilers construct the same
+      // program instead of choosing an argument-evaluation order for us.
+      Value partOffsets = part(offsets);
+      Value partMask = part(mask);
+      Value partData = part(data);
+      Value value = access(loc, base, partOffsets, partMask, partData,
                            packet, load, true);
       if (load) {
         if (vector.getElementType().isBF16()) {
