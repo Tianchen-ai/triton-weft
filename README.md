@@ -1,43 +1,61 @@
 # Triton–Weft
 
-**Write CPU kernels in Triton. Control encoded data, computation groups and reuse with Weft.**
+**Compose high-performance CPU kernels from encoded fields, typed computation,
+shared values and state.**
 
-[中文](README.zh-CN.md) · [English handbook](https://tianchen-ai.github.io/triton-weft/) · [中文工具书](https://tianchen-ai.github.io/triton-weft/zh/) · [Examples](examples/weft/README.md) · [Results](#experiments-and-reproduction) · [Experiment reproduction](docs/weft/experiments/reproduce.md)
+Weft is a programming model implemented by extending Triton. Its source objects
+keep data representation, numerical groups, sharing and state updates explicit.
+The compiler uses those relationships to construct vector and matrix execution
+for x86 and RISC-V. Programs use `@triton.jit(model="weft")`, the normal
+`kernel[grid](...)` interface, configuration, autotuning, caching and native export.
 
-Triton–Weft extends Triton's Python language and compiler for **RISC-V and x86 CPUs**.
-Start with `tl.load`, `tl.store`, reductions and `tl.dot`. Add **Encoding** to describe
-packed storage, **Level** to organize logical computation, and **state/stage** to
-control accumulation and reuse. These relationships stay explicit as the compiler
-chooses vector or matrix instructions, physical layouts, local storage and schedules.
+The installable library `triton.kernels.weft` supplies kernels, stored formats,
+layouts, numerical helpers, tuning resources and host composition. The library
+includes dense and quantized projections, normalization, online attention,
+streaming statistics and stateful model components. NumPy and CPU Torch are
+optional host-buffer integrations.
 
-The result is one Triton workflow: `@triton.jit(model="weft")`, `kernel[grid](...)`,
-`triton.Config`, autotuning, cached compilation and native export.
+## Build and install
 
-[![Triton frontend, shared Canonical IR and target physical compilation](docs/weft/assets/paper/compiler.png)](docs/weft/assets/paper/compiler.png)
+The source tree builds without a `.git` directory. Use Python 3.10 or newer,
+CMake, Ninja, a C++20 compiler and the LLVM/MLIR revision in
+[`cmake/llvm-info.json`](cmake/llvm-info.json). The pinned revision supplies
+Clang 23; its OpenMP runtime must use the same dispatch ABI.
 
-*The compiler keeps source scopes, axes, state and Encoding in Canonical IR.
-RISC-V emits intrinsic C and local assembly; x86 emits LLVM IR.*
-
-## Install
-
-Install this project's Triton distribution in a dedicated environment:
+To build the dependency SDK from the public LLVM project:
 
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install --index-url https://tianchen-ai.github.io/triton-weft/wheels/ 'triton==3.8.0+weft.2'
-python -m pip install numpy
+python -m pip install -r python/requirements.txt
+LLVM_PROJECT_PATH="$PWD/.deps/llvm-project" \
+LLVM_BUILD_PATH="$PWD/.deps/llvm-build" \
+LLVM_INSTALL_PATH="$PWD/.deps/llvm" \
+bash scripts/build-llvm-project.sh
 ```
 
-The [release](https://github.com/Tianchen-ai/triton-weft/releases/tag/v3.8.0-weft.2)
-provides Linux x86-64 CPython 3.10 and RISC-V CPython 3.11/3.12/3.14 wheels,
-including Clang 23 and OpenMP. The [installation guide](docs/weft/getting-started/installation.md)
-lists system requirements and the source build for other Python environments or current `main`.
-The distribution and import name are both `triton`.
+An existing SDK built from that exact revision can be selected instead. Build
+the product with the SDK, host Clang and OpenMP locations explicitly:
 
-## Run your first kernel
+```sh
+CC="$PWD/.deps/llvm/bin/clang" \
+CXX="$PWD/.deps/llvm/bin/clang++" \
+LLVM_SYSPATH="$PWD/.deps/llvm" \
+TRITON_WEFT_CLANG_ROOT="$PWD/.deps/llvm" \
+TRITON_WEFT_OPENMP_LIBRARY="$PWD/.deps/llvm/lib/libomp.so" \
+TRITON_WEFT_OPENMP_INCLUDE_DIR="$PWD/.deps/llvm/lib/clang/23/include" \
+TRITON_BUILD_DIR="$PWD/.build" \
+TRITON_BUILD_PROTON=OFF \
+python -m pip install --no-build-isolation .
+python -m pip install numpy pytest
+```
 
-Save this as `affine.py` and run `python affine.py`:
+LLVM installations with a target-specific library directory should pass that
+directory's `libomp.so`. The build checks the OpenMP entry points, headers and
+native Clang target. The [installation guide](docs/weft/getting-started/installation.md)
+also describes explicit and cross-compilation toolchains.
+
+## Write and call a kernel
 
 ```python
 import numpy as np
@@ -47,150 +65,87 @@ import triton.language as tl
 @triton.jit(model="weft")
 def affine(X, Y, N, scale, bias, B: tl.constexpr):
     i = tl.program_id(0) * B + tl.arange(0, B)
-    x = tl.load(X + i, mask=i < N, other=0.0)
-    tl.store(Y + i, x * scale + bias, mask=i < N)
+    value = tl.load(X + i, mask=i < N, other=0.0)
+    tl.store(Y + i, value * scale + bias, mask=i < N)
 
 x = np.arange(131, dtype=np.float32)
 y = np.empty_like(x)
 compiled = affine[(triton.cdiv(x.size, 64),)](
-    x, y, x.size, 1.25, -0.5, B=64, num_cpu_threads=2
-)
-print(y[:4])  # [-0.5, 0.75, 2.0, 3.25]
+    x, y, x.size, 1.25, -0.5, B=64, num_cpu_threads=2)
+np.testing.assert_array_equal(y, x * 1.25 - 0.5)
 ```
 
-Here the grid contains three independent programs; two CPU threads execute them.
-The final program uses a mask for its three valid elements. The first call compiles
-for the selected execution cores; subsequent calls reuse Triton's cache.
+The grid describes independent programs; `num_cpu_threads` selects the CPU
+worker count. Typed `tl.View` arguments additionally expose logical fields,
+shapes and storage to the compiler.
 
-## Express the structure that matters
-
-| Author choice | Triton–Weft expression | What the compiler learns |
+| Author object | Program expression | Information used by compilation |
 |---|---|---|
-| Packed bytes and logical fields | `@triton.encoding`, `tl.View` | Field coordinates, bit widths, storage and alignment |
-| Logical groups and tails | `with tl.level.rows(...)`, `blocks(...)` | Which outputs share a computation and its coverage |
-| Accumulation and reuse | `tl.state(...)`, `tl.stage(...)` | Initialization frequency, carried state and shared values |
-| Numerical grouping | `tl.mac_groups`, `tl.widen`, `tl.reduce` | Partial-sum widths and conversion boundaries |
-| Vector or matrix arithmetic | `tl.dot(..., engine="vector" or "matrix")` | A constraint on that contraction's physical implementation |
+| Stored fields | `@triton.encoding`, `tl.View` | Coordinates, bits, storage and alignment |
+| Logical regions | `tl.level` | Independent outputs, grouping and active tails |
+| Shared values and state | `tl.stage`, `tl.state` | Input observations, initialization and updates |
+| Numerical groups | `tl.mac_groups`, `tl.widen`, `tl.reduce` | Local widths and conversion positions |
+| Execution class | `tl.dot(..., engine=...)` | Vector or legal matrix construction |
 
-Authors can independently change a format, a numerical group or a reuse scope.
-The compiler implements those choices through shared analysis and target passes.
-The [programming-model chapter](docs/weft/programming-model/index.md) walks through
-these relationships with the paper's quantized projection example.
+Ordinary Python factories can bind Encodings and JIT helpers once. In the
+library's [`organized_projection.py`](python/triton/kernels/weft/ggml/blocks/mul_mat/organized_projection.py),
+Q4_K and Q6_K share the typed entry, preparation framework, weighted computation
+and both output-state traversals. Each format supplies its field helper; Q4_K
+also supplies its correction fields.
 
-| Target | Vector route | Matrix route |
-|---|---|---|
-| SG2044 | RVV, VLEN 128 | — |
-| K1 | RVV, VLEN 256 | IME1 |
-| K3 X100 / A100 | RVV, VLEN 256 / 1024 | IME2 on A100 |
-| x86 | AVX2 / AVX-512, VNNI | Intel AMX INT8/BF16 |
+## Run complete examples
 
-`triton.cpu.target()` constructs compilation targets; `triton.tools.cpu` selects
-execution cores before JIT. [Choose a target and engine](docs/weft/getting-started/hardware.md).
-
-## Learn by running
-
-After cloning this repository, run from its root with the installed wheel:
+Run these from the source root after installation:
 
 ```sh
-python -m examples.weft.language.triton_basics --operation softmax
-python -m examples.weft.language.encoding
-python -m examples.weft.language.levels
-python -m examples.weft.language.contraction --engine vector
-python -m examples.weft.deployment.autotune_export /tmp/affine-artifact
+python -m examples.weft.kernels.projection
+python -m examples.weft.kernels.welford
+python -m examples.weft.kernels.attention
+python -m examples.weft.kernels.gemm
+python -m pytest python/test/weft -s --tb=short
 ```
 
-The [bilingual example guide](examples/weft/README.md) explains inputs, expected
-outputs and the source construct to change. Continue with
-[PyTorch](docs/weft/integrations/overview.md),
-[native C++ deployment](docs/weft/compiler/native-sdk.md), or
-[llama.cpp](docs/weft/integrations/llama-cpp.md).
+Every example prepares its own inputs, invokes the installed product and checks
+the complete output against an independent reference. The product tests also
+cover factory specialization, native export/reload, logical tails and the x86
+integer/BF16 matrix paths. Matrix tests require the corresponding CPU facilities.
 
-For llama.cpp, Triton compiles a kernel and exports a native library plus its typed
-ABI. The adapter binds it to a matching GGML call site; GGML workers call that
-function during inference. The [deployment tutorial](docs/weft/integrations/llama-cpp.md)
-covers source, export, adapter build, loading and replacement counters.
+Host programs under `triton.kernels.weft.programs` retain the normal `Program`,
+`Operators`, workspace, KV-cache, MoE and state-space interfaces. Import only the
+task or host integration needed by the application. The
+[handbook](docs/weft/index.md) and [example guide](examples/weft/README.md)
+explain the language and deployment interfaces.
 
-## Experiments and reproduction
+## Native deployment
 
-**The paper's kernel and model experiments can be reproduced with Triton–Weft
-and [Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench).**
-Bench provides the author programs, workload shapes, reference-library recipes,
-model protocols, numerical checks and timing commands.
+Call `compiled.export(directory)` to save the native library, typed ABI and
+runtime dependencies. `triton.runtime.weft.artifact.load(directory)` reloads it.
+The SDK installs `<weft/runtime.h>` and `<weft/runtime.hpp>`; their source lives
+in `third_party/weft/runtime/include/weft`. The native ABI and include names are
+the same on both CPU families. See the
+[C++ deployment example](examples/weft/deployment) and
+[native SDK guide](docs/weft/compiler/native-sdk.md).
 
-[![Representative kernels and the distribution of all 543 matched comparisons](docs/weft/assets/paper/operators.png)](docs/weft/assets/paper/operators.png)
+## Recorded results
 
-*Paper dataset: 553 operator–platform cases, including 543 matched native comparisons.
-Geometric mean speedups are 1.60× on SG2044, 1.55× on K1, 1.82× on K3 A100 and
-1.56× on Xeon Platinum 8470Q. The distribution includes every matched case.*
+The accompanying `results/*.csv` files contain the measured operator, model and
+controlled-study results with their comparison boundaries. Values and counts
+come from those files. The source package contains the complete compiler,
+normal kernel library, examples and correctness tests.
 
-| Platform | Registered cases | Matched native comparisons | Geometric mean speedup |
-|---|---:|---:|---:|
-| SG2044 · RVV128 | 133 | 132 | **1.60×** |
-| K1 · RVV256 / IME1 | 137 | 136 | **1.55×** |
-| K3 A100 · RVV1024 / IME2 | 136 | 135 | **1.82×** |
-| Xeon Platinum 8470Q · AVX-512 / VNNI / AMX | 147 | 140 | **1.56×** |
+## Source map
 
-Speedup is reference time divided by Triton–Weft time. The matched references
-include 541 GGML cases and two oneDNN cases. [All operator measurements (CSV)](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/operators.csv).
-
-[![All nine model configurations, with prefill and decode shown separately](docs/weft/assets/paper/models.png)](docs/weft/assets/paper/models.png)
-
-*Nine model configurations cover Llama 2 7B, DeepSeek 8B and Qwen 2.5 14B.
-Each pair shows prefill and decode against its matching normal llama.cpp backend.
-K3 CPU–RVV and vendor IME2 are separate reference policies.*
-
-| Platform | Model | Reference | Prefill | Decode |
-|---|---|---|---:|---:|
-| x86 | Llama 2 7B Q4_0 | normal llama.cpp | 1.75× | 1.20× |
-| x86 | DeepSeek 8B Q4_K_M | normal llama.cpp | 1.23× | 1.27× |
-| x86 | Qwen 2.5 14B Q4_K_M | normal llama.cpp | 1.18× | 1.25× |
-| SG2044 | Llama 2 7B Q4_0 | normal llama.cpp | 1.26× | 1.02× |
-| SG2044 | DeepSeek 8B Q4_K_M | normal llama.cpp | 1.15× | 0.957× |
-| K1 | Llama 2 7B Q4_0 | normal llama.cpp | 1.62× | 0.997× |
-| K1 | DeepSeek 8B Q4_K_M | normal llama.cpp | 1.15× | 1.01× |
-| K3 A100 | DeepSeek 8B Q4_K_M | CPU–RVV | 1.93× | 1.92× |
-| K3 A100 | DeepSeek 8B Q4_K_M | vendor IME2 | 0.985× | 1.17× |
-
-SG2044 model runs use 64 threads; K1, K3 and x86 use eight. SG2044/K1/x86 use 128-token prefill and
-32-token decode after a 512-token context; K3 uses 32-token prefill and
-8-token decode after a 32-token context. [All 18 model stages (CSV)](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/models.csv).
-
-Start by inspecting a case, then run it with your configured target:
-
-```sh
-git clone https://github.com/Tianchen-ai/triton-weft-bench.git
-cd triton-weft-bench
-python -m pip install '.[verification]'
-mkdir -p .local
-cp configs/example.json .local/bench.local.json
-export WEFT_BENCH_CONFIG="$PWD/.local/bench.local.json"
-# Configure the target, connection and references using the target setup guide.
-weft-bench list --kind suites --target k1
-weft-bench show q4_k_dot --target k1
-weft-bench op q4_k_dot --target k1 --output output/current/k1/q4_k_dot
-```
-
-The [reproduction chapter](docs/weft/experiments/reproduce.md) covers full suites,
-target-side JIT, fixed references, model packages and output files. The
-[results and figure sources](docs/weft/experiments/results.md) identify the paper's
-measured snapshots and timing boundaries.
-
-## Project map
-
-| Area | Location |
+| Component | Location |
 |---|---|
-| Language and common Triton frontend | `python/triton/language`, `python/triton/compiler` |
-| JIT, CPU backend and native loading | `python/triton/runtime`, `python/triton/backends/weft` |
-| Canonical IR and shared analysis | `third_party/weft/lib/Dialect/Kernel`, `third_party/weft/lib/Analysis` |
-| RISC-V / x86 physical compilation | `third_party/weft/lib/Target/RISCV`, `third_party/weft/lib/Target/X86` |
-| Native runtime and application adapters | `third_party/weft/lib/Runtime`, `integrations` |
-| Runnable tutorials / bilingual handbook | `examples/weft`, `docs/weft` |
-| Detailed design contracts | `docs/specification` |
+| Language and frontend | `python/triton/language`, `python/triton/compiler` |
+| JIT, CPU backend and native calls | `python/triton/runtime`, `python/triton/backends/weft` |
+| Normal CPU kernel library | `python/triton/kernels/weft` |
+| Canonical IR and common analysis | `third_party/weft/lib/Dialect/Kernel`, `third_party/weft/lib/Analysis` |
+| Physical RISC-V IR | `third_party/weft/lib/Dialect/RISCV` |
+| Lowering, optimization and emission | `third_party/weft/lib/Target` |
+| Native runtime and public SDK | `third_party/weft/lib/Runtime`, `third_party/weft/runtime/include` |
+| Examples and product regressions | `examples/weft`, `python/test/weft` |
 
-This is a fork of [Triton v3.8.0](https://github.com/triton-lang/triton/tree/v3.8.0);
-`main` is the product branch. The [upstream map](docs/weft/development/upstream.md)
-explains each extension seam. See [Contributing](CONTRIBUTING.md) to develop a pass
-or a hardware extension.
-
-Upstream Triton retains MIT licensing. Weft additions retain Apache-2.0;
-[NOTICE](NOTICE) records component attribution.
+This complete fork is based on Triton v3.8.0. Upstream Triton retains its MIT
+license; Weft additions retain Apache-2.0. Component attribution and third-party
+notices are preserved in `LICENSE`, `NOTICE` and `third_party/weft/licenses`.

@@ -5,7 +5,7 @@
 - This fork uses `main` for the product, with upstream `v3.8.0` as its base. Keep upstream changes focused on the documented extension seams in `docs/weft/development/upstream.md`.
 - Weft supports RISC-V intrinsic C/local assembly and x86 LLVM IR. Preserve Canonical numerical, Encoding and lifecycle contracts; physical passes own layout, local instruction selection and resource decisions.
 - Authors constrain each contraction with `engine`. Default to a legal matrix implementation, otherwise vector; an explicit matrix requirement must not silently execute a vector route.
-- Weft verification, optimized kernel corpus, reference libraries and performance outputs belong to the independent `triton-weft-bench` project. Use its affected cases and fixed baselines; do not add a second Weft test runner here. The upstream testing instructions below continue to apply to upstream GPU work.
+- Normal CPU kernels, formats, host composition and tuning resources live in `triton.kernels.weft`. Product correctness regressions use pytest under `python/test/weft`; examples run with the installed product. Reference libraries, comparative measurements, devices and research drivers belong to the independent `triton-weft-bench` project. Use its affected cases and fixed baselines without creating a second benchmark runner. The upstream testing instructions below continue to apply to upstream GPU work.
 - Product examples must work with the installed `triton` wheel. Compiler and generic runtime must not depend on Bench or optional llama.cpp integrations. Keep private environments and generated artifacts outside tracked product sources.
 
 ## Build and Testing Guidelines

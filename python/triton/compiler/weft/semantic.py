@@ -1501,13 +1501,12 @@ class WeftSemantic:
                     dimension > 0
                     and record_extent is not None
                     and dimension < record_extent
-                ) or (
-                    dimension > 0
-                    and local_dimension > 0
-                    and dimension < local_dimension
                 ):
                     kinds.append("group_index")
                 else:
+                    # A dense extent smaller than its tile is a masked domain,
+                    # not one compressed field per tile. Only the explicit
+                    # record relationship above admits group-index projection.
                     kinds.append("domain")
                     result_shape.append(local_dimension)
                     result_axes.append(axis)

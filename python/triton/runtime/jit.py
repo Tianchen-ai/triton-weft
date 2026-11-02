@@ -115,7 +115,15 @@ class DependenciesFinder(ast.NodeVisitor):
 
     def record_reference(self, val, var_dict=None, name=None):
         from ..language.core import constexpr
+        from ..language.core import dtype
+        from ..language.weft.dtypes import DType
         from ..language.weft.declarations import EncodingDefinition, DerivedEncodingDefinition, OverloadSet
+        if var_dict is self.nonlocals and (val is None or type(val) in (bool, int, float, str)):
+            # Different instances of one Python factory share source and name.
+            # Their captured scalar choices are part of the program identity.
+            self.hasher.update(repr((name, val)).encode("utf-8"))
+        if var_dict is self.nonlocals and isinstance(val, (dtype, DType)):
+            self.hasher.update(repr((name, str(val))).encode("utf-8"))
         if isinstance(val, EncodingDefinition):
             self.hasher.update(val.source.text.encode("utf-8"))
             for dependency in val.dependencies():
@@ -181,12 +189,11 @@ class DependenciesFinder(ast.NodeVisitor):
             return None
 
         def name_lookup(name):
+            if name in self.nonlocals:
+                return self.nonlocals[name], self.nonlocals
             val = self.globals.get(name, None)
             if val is not None:
                 return val, self.globals
-            val = self.nonlocals.get(name, None)
-            if val is not None:
-                return val, self.nonlocals
             return None, None
 
         val, var_dict = name_lookup(node.id)
@@ -539,10 +546,11 @@ class JITCallable:
 
     def get_capture_scope(self):
         fn = self.fn
+        scope = self.__globals__ | getattr(self, "_annotation_scope", {})
         if fn.__closure__ is None:
-            return self.__globals__
+            return scope
         nonlocals = {name: cell.cell_contents for name, cell in zip(fn.__code__.co_freevars, fn.__closure__)}
-        return self.__globals__ | nonlocals
+        return scope | nonlocals
 
     @property
     def cache_key(self) -> str:
@@ -553,7 +561,7 @@ class JITCallable:
             # Set a placeholder hash to break recursion in case the function
             # transitively calls itself. The full hash is set after.
             self.hash = f"recursion:{self._fn_name}"
-            nonlocals = inspect.getclosurevars(self.fn).nonlocals
+            nonlocals = getattr(self, "_annotation_scope", {}) | inspect.getclosurevars(self.fn).nonlocals
             dependencies_finder = DependenciesFinder(name=self._fn_name, globals=self.__globals__, nonlocals=nonlocals,
                                                      src=self.src + repr((getattr(self, "model", "triton"),
                                                                          getattr(self, "explicit_model", False),
@@ -1051,7 +1059,7 @@ def jit(
                                        do_not_specialize_on_alignment=do_not_specialize_on_alignment, debug=debug,
                                        noinline=noinline, repr=repr, launch_metadata=launch_metadata)
         else:
-            return JITFunction(
+            function = JITFunction(
                 fn,
                 version=version,
                 do_not_specialize=do_not_specialize,
@@ -1064,6 +1072,23 @@ def jit(
                 alias_groups=alias_groups,
                 strided=strided,
             )
+            if model == "weft":
+                # Deferred annotations do not create Python closure cells.
+                # Capture only names used by the signature, allowing an
+                # ordinary factory to bind an Encoding without global aliases.
+                frame = inspect.currentframe().f_back
+                try:
+                    definition = function.parse().body[0]
+                    names = {node.id for arg in (*definition.args.posonlyargs,
+                             *definition.args.args, *definition.args.kwonlyargs)
+                             if arg.annotation is not None
+                             for node in ast.walk(arg.annotation)
+                             if isinstance(node, ast.Name)}
+                    function._annotation_scope = {name: frame.f_locals[name]
+                                                  for name in names if name in frame.f_locals}
+                finally:
+                    del frame
+            return function
 
     if fn is not None:
         return decorator(fn)

@@ -463,6 +463,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
   target_link_libraries(triton PRIVATE ${TRITON_LIBRARIES} WeftRISCVTarget WeftX86Target)
   target_include_directories(triton PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/weft/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/weft/runtime/include
     ${CMAKE_CURRENT_BINARY_DIR}/third_party/weft/include)
   add_dependencies(triton WeftRuntime)
 

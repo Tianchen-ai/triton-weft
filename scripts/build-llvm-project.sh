@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 LLVM_TARGETS=${LLVM_TARGETS:-Native;NVPTX;AMDGPU}
 LLVM_PROJECTS=${LLVM_PROJECTS:-mlir;llvm;lld;clang}
+LLVM_RUNTIME_PROJECTS=${LLVM_RUNTIME_PROJECTS:-openmp}
 LLVM_DISTRIBUTION_COMPONENTS=${LLVM_DISTRIBUTION_COMPONENTS:-"llvm-headers;llvm-libraries;cmake-exports;mlir-headers;mlir-libraries;mlir-cmake-exports;lld-headers;lld-libraries;lld-cmake-exports;clang;clang-resource-headers;FileCheck;not;split-file;llc;opt;llvm-config;mlir-tblgen;mlir-translate"}
 LLVM_BUILD_TYPE=${LLVM_BUILD_TYPE:-RelWithDebInfo}
 LLVM_COMMIT_HASH=${LLVM_COMMIT_HASH:-$(jq -r '.llvm_hash' "$REPO_ROOT/cmake/llvm-info.json")}
@@ -40,6 +41,7 @@ if [ -z "$CMAKE_ARGS" ]; then
               -DLLVM_TARGETS_TO_BUILD="$LLVM_TARGETS"
               -DCMAKE_EXPORT_COMPILE_COMMANDS=1
               -DLLVM_ENABLE_PROJECTS="$LLVM_PROJECTS"
+              -DLLVM_ENABLE_RUNTIMES="$LLVM_RUNTIME_PROJECTS"
               -DLLVM_BUILD_UTILS=ON
               -DLLVM_INSTALL_UTILS=ON
               -DLLVM_DISTRIBUTION_COMPONENTS="$LLVM_DISTRIBUTION_COMPONENTS"
@@ -66,3 +68,4 @@ echo "Configuring with ${CMAKE_ARGS[@]}"
 cmake "${CMAKE_ARGS[@]}"
 echo "Building LLVM"
 ninja -C "$LLVM_BUILD_PATH"
+cmake --install "$LLVM_BUILD_PATH"

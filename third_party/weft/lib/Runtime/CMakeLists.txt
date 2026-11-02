@@ -3,7 +3,7 @@ add_library(WeftRuntime SHARED Metadata.cpp Library.cpp CallContract.cpp Layout.
 add_library(Weft::Runtime ALIAS WeftRuntime)
 target_link_libraries(WeftRuntime PRIVATE WeftRISCVPlatform WeftX86Platform ${CMAKE_DL_LIBS} Threads::Threads)
 target_include_directories(WeftRuntime PUBLIC
-  $<BUILD_INTERFACE:${WEFT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${WEFT_SOURCE_DIR}/runtime/include>
   $<INSTALL_INTERFACE:${WEFT_INSTALL_ROOT}/include>)
 target_include_directories(WeftRuntime SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_options(WeftRuntime PRIVATE -fexceptions -fvisibility=hidden -Wall -Wextra -Werror)
