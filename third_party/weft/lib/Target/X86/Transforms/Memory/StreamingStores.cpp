@@ -83,8 +83,9 @@ public:
         for (int64_t offset = 0; offset < type.getNumElements(); offset += lanes) {
           Value packet = vector::ExtractStridedSliceOp::create(b, loc, store.getValue(),
               ArrayRef<int64_t>{offset}, ArrayRef<int64_t>{lanes}, ArrayRef<int64_t>{1});
+          Value displacement = arith::ConstantIntOp::create(b, loc, offset, 64);
           Value pointer = LLVM::GEPOp::create(b, loc, address.getType(), b.getF32Type(), address,
-              ArrayRef<LLVM::GEPArg>{offset});
+              ArrayRef<LLVM::GEPArg>{displacement});
           auto write = LLVM::StoreOp::create(b, loc, packet, pointer);
           write.setAlignment(alignment);
           write.setNontemporal(true);
