@@ -1303,7 +1303,7 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
     const int64_t temporaryGroups = std::max<int64_t>(
         1, (resultType.getLayout().getLmulEighths() + 7) / 8);
     auto cloned = riscv::RVVReplicaStorageLoadOp::create(rewriter,
-        load.getLoc(), resultType, load.getField(), issueBase, projectedPlan, uint64_t{0},
+        load.getLoc(), resultType, load.getField(), issueBase, projectedPlan, rewriter.getI64IntegerAttr(0),
         zero, empty, zero, zero, zero, zero, zero, zero, load.getAccess(),
         riscv_internal::leaf(
             rewriter, selected.getEngine(), selected.getFamily(),
