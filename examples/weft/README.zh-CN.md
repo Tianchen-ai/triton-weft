@@ -44,7 +44,7 @@ python -m examples.weft.language.levels
 GGML 基础 Encoding 位于
 [`triton.integrations.ggml_formats`](../../python/triton/integrations/ggml_formats.py)。
 独立 Encoding 教程在消费者旁边声明自己的布局；
-Bench 的 `weft_bench.kernels.ggml.layouts` 保存显式硬件布局。
+产品库中的 `triton.kernels.weft.ggml.layouts` 保存显式硬件布局。
 
 ## 3. 向量与矩阵算术
 

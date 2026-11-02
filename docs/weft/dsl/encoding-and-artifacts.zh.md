@@ -48,7 +48,7 @@ from triton.integrations import ggml_formats
 # 参数类型示例：tl.View[ggml_formats.Q4_K, (N, K)]
 ```
 
-该模块保存基础存储声明。Bench 的 `weft_bench.kernels.ggml.layouts`
+该模块保存基础存储声明。产品库中的 `triton.kernels.weft.ggml.layouts`
 保存显式候选布局与 builder，按 IME1、IME2、AMX 和行排列组织。
 
 ## View、切片与 alias

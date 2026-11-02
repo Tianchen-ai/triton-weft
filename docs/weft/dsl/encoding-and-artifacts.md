@@ -51,8 +51,8 @@ from triton.integrations import ggml_formats
 # Example annotation: tl.View[ggml_formats.Q4_K, (N, K)]
 ```
 
-The module contains base storage declarations. Bench's
-`weft_bench.kernels.ggml.layouts` contains explicit candidate layouts and builders,
+The module contains base storage declarations. The product library's
+`triton.kernels.weft.ggml.layouts` contains explicit candidate layouts and builders,
 organized by IME1, IME2, AMX and row arrangement.
 
 ## Views, slices and aliasing

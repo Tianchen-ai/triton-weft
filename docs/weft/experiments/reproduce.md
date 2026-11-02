@@ -1,7 +1,7 @@
 # Reproduce the kernel and model experiments
 
 Use **Triton–Weft to compile the author programs** and **Triton–Weft Bench to prepare,
-check and measure the workloads**. Bench contains the installed kernel corpus,
+check and measure the workloads**. The product supplies the installed kernel corpus; Bench contains
 target catalogs, reference-library recipes and model protocols.
 
 ## 1. Install and configure
@@ -40,7 +40,7 @@ weft-bench show q4_k_dot --target k1
 
 `show` resolves the DSL file/symbol, source parameters, target, physical options,
 reference and timing scope. Base Encodings are in `triton.integrations.ggml_formats`;
-explicit candidate layouts are in `weft_bench.kernels.ggml.layouts`.
+explicit candidate layouts are in `triton.kernels.weft.ggml.layouts`.
 
 ## 3. Run a matched operator comparison
 

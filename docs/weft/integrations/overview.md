@@ -51,7 +51,7 @@ The seam carries model identity, effects, FakeTensor metadata and launch behavio
 The host owns model state, workspace and preparation. Use explicit sequences
 when several kernels cooperate. Author backward kernels and register them through
 the framework's autograd interfaces; the corpus includes a
-`weft_bench.kernels.dense.torch_affine` example.
+`triton.kernels.weft.dense.torch_affine` example.
 
 Continue with [model composition](../dsl/programs.md), [native SDK](../compiler/native-sdk.md)
 or [llama.cpp deployment](llama-cpp.md).

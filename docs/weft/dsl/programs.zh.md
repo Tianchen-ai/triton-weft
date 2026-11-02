@@ -1,6 +1,6 @@
 # 模型程序与宿主组合
 
-可安装的 `weft_bench.kernels` 包含完整作者程序，
+可安装的 `triton.kernels.weft` 包含完整作者程序，
 与教程使用相同 Triton 语言、编译器和 runtime。
 
 | 程序族 | 源码表达的计算 |
@@ -15,7 +15,7 @@
 ## 调用程序
 
 ```python
-from weft_bench.kernels.programs.normalization import rms_norm
+from triton.kernels.weft.programs.normalization import rms_norm
 rms_norm[(1,)](X, Weight, Y, epsilon=1e-5, BLOCK=32)
 ```
 
@@ -25,7 +25,7 @@ BLOCK 是显式 source 参数，一个实例覆盖源码中的遍历。
 ## 组合宿主操作
 
 ```python
-from weft_bench.kernels.programs import get, Operators
+from triton.kernels.weft.programs import get, Operators
 
 config = get("rms_norm").config(BLOCK=64)
 with Operators(configs={"rms_norm": config}) as operators:
@@ -38,5 +38,5 @@ with Operators(configs={"rms_norm": config}) as operators:
 应用持有 KV cache、workspace、prepared weight 与递推状态，
 决定准备何时执行、哪些调用共享状态。训练通过显式 backward kernel 或框架注册表达。
 
-[Bench catalog](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/catalogs.md)
-提供 source symbol、所选布局和登记工作负载。
+`triton.kernels.weft.programs.catalog` 描述每个程序的源码符号、必需参数与默认配置。
+硬件布局在 `triton.kernels.weft.ggml.layouts` 中独立定义。

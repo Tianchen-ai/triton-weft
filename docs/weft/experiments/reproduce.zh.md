@@ -1,7 +1,7 @@
 # 复现算子与模型实验
 
 使用 **Triton–Weft 编译作者程序**，使用 **Triton–Weft Bench 准备、检查并测量工作负载**。
-Bench 包含可安装 kernel corpus、目标 catalog、参考库配方和模型协议。
+产品提供可安装 kernel corpus；Bench 包含目标 catalog、参考库配方和模型协议。
 
 ## 1. 安装与配置
 
@@ -36,7 +36,7 @@ weft-bench show q4_k_dot --target k1
 
 `show` 解析 DSL 文件／symbol、source 参数、target、物理选项、参考与计时范围。
 基础 Encoding 位于 `triton.integrations.ggml_formats`，
-显式候选布局位于 `weft_bench.kernels.ggml.layouts`。
+显式候选布局位于 `triton.kernels.weft.ggml.layouts`。
 
 ## 3. 运行匹配的算子比较
 

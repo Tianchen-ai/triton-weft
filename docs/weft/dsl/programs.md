@@ -1,6 +1,6 @@
 # Model programs and host composition
 
-The installable `weft_bench.kernels` package contains complete author programs.
+The installable `triton.kernels.weft` package contains complete author programs.
 They use the same Triton language, compiler and runtime as the tutorials.
 
 | Program family | Computation expressed by the source |
@@ -15,7 +15,7 @@ They use the same Triton language, compiler and runtime as the tutorials.
 ## Call a program
 
 ```python
-from weft_bench.kernels.programs.normalization import rms_norm
+from triton.kernels.weft.programs.normalization import rms_norm
 rms_norm[(1,)](X, Weight, Y, epsilon=1e-5, BLOCK=32)
 ```
 
@@ -26,7 +26,7 @@ Its single instance covers the source traversal.
 ## Compose host operations
 
 ```python
-from weft_bench.kernels.programs import get, Operators
+from triton.kernels.weft.programs import get, Operators
 
 config = get("rms_norm").config(BLOCK=64)
 with Operators(configs={"rms_norm": config}) as operators:
@@ -41,5 +41,6 @@ Applications own KV cache, workspace, prepared weights and recurrent state.
 They decide when preparation runs and which calls share that state.
 Training uses explicitly authored backward kernels or framework registration.
 
-Use the [Bench catalog](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/catalogs.md)
-to inspect source symbols, selected layouts and registered workloads.
+`triton.kernels.weft.programs.catalog` describes each program's source symbol,
+required parameters and default configuration. Hardware-oriented layouts are
+defined separately in `triton.kernels.weft.ggml.layouts`.

@@ -47,7 +47,7 @@ python -m examples.weft.language.levels
 Base GGML Encodings are declared in
 [`triton.integrations.ggml_formats`](../../python/triton/integrations/ggml_formats.py).
 The standalone Encoding example declares its own layout next to the consumer.
-Bench's `weft_bench.kernels.ggml.layouts` contains explicit hardware-oriented layouts.
+The product library's `triton.kernels.weft.ggml.layouts` contains explicit hardware-oriented layouts.
 
 ## 3. Vector and matrix arithmetic
 

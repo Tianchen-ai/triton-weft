@@ -50,7 +50,7 @@ Inductor 提供图分解、融合与 Triton 生成，
 宿主持有模型 state、workspace 和准备过程。
 多个 kernel 协作时显式排列调用顺序；
 backward kernel 通过框架 autograd 接口注册，
-corpus 的 `weft_bench.kernels.dense.torch_affine` 提供例子。
+corpus 的 `triton.kernels.weft.dense.torch_affine` 提供例子。
 
 继续阅读[模型组合](../dsl/programs.md)、[原生 SDK](../compiler/native-sdk.md)
 或 [llama.cpp 部署](llama-cpp.md)。
