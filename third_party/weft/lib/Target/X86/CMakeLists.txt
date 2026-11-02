@@ -17,6 +17,7 @@ add_library(WeftX86Target STATIC
   Transforms/Memory/ArrayForwarding.cpp
   Analysis/Resources.cpp
   Transforms/Control/ReductionSchedules.cpp
+  Transforms/Control/DeferredIntegerReductions.cpp
   Transforms/Arithmetic/UniformValidity.cpp
   Transforms/Memory/IndexedValues.cpp
   Transforms/Contraction/ContractionSchedules.cpp

@@ -15,6 +15,8 @@
 using namespace mlir;
 namespace {
 constexpr int64_t maxLookahead = 4;
+constexpr int64_t minLookaheadWindows = 4;
+constexpr int64_t cacheResidentBudget = 1 << 20;
 constexpr int64_t hintSpan = 64;
 constexpr int64_t minFootprint = 8 * hintSpan;
 constexpr int64_t maxFootprint = 32768;
@@ -66,7 +68,8 @@ public:
       APInt start, step;
       if (!matchPattern(loop.getLowerBound(), m_ConstantInt(&start)) || start.isNegative() ||
           !matchPattern(loop.getStep(), m_ConstantInt(&step)) || step.isNegative() || step.isZero() ||
-          step.getZExtValue() > uint64_t(std::numeric_limits<int64_t>::max() / maxLookahead)) continue;
+          step.getZExtValue() > uint64_t(std::numeric_limits<int64_t>::max() /
+                                        (maxLookahead * minLookaheadWindows))) continue;
       bool flat = true;
       for (Operation &op : *loop.getBody()) {
         if (op.getNumRegions()) flat = false;
@@ -118,11 +121,46 @@ public:
       // bounded hint footprint. The source tile and its traversal stay intact.
       int64_t lookahead = std::min(maxLookahead, maxFootprint / totalBytes);
       OpBuilder b(packets.back().load);
-      b.setInsertionPointAfter(packets.back().load);
+      // A short counted stream pays a second address stream and guarded hints
+      // for almost its whole execution. Require several complete lookahead
+      // windows. For dynamic domains this remains an invocation-time decision,
+      // rather than assuming that an unknown traversal is long.
+      b.setInsertionPoint(loop);
       Location loc = loop.getLoc();
+      Value span = arith::SubIOp::create(b, loc, loop.getUpperBound(), loop.getLowerBound());
+      Value minimum = arith::ConstantIndexOp::create(b, loc,
+          step.getSExtValue() * lookahead * minLookaheadWindows);
+      Value longStream = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ugt, span, minimum);
+      // An inner stream can be short while a surrounding traversal streams a
+      // large working set. Keep that useful prefetching: compare the complete
+      // traversal against a bounded cache-resident budget without multiplying
+      // dynamic trip counts (which could overflow).
+      Value budget = arith::ConstantIndexOp::create(b, loc, cacheResidentBudget / totalBytes);
+      Value one = arith::ConstantIndexOp::create(b, loc, 1);
+      Value zero = arith::ConstantIndexOp::create(b, loc, 0);
+      Value largeTraversal = arith::ConstantIntOp::create(b, loc, 0, 1);
+      for (Operation *parent = loop; parent && parent != function.getOperation();
+           parent = parent->getParentOp()) {
+        auto counted = dyn_cast<scf::ForOp>(parent);
+        if (!counted || !counted.getInductionVar().getType().isIndex()) continue;
+        Value extent = arith::SubIOp::create(b, loc, counted.getUpperBound(), counted.getLowerBound());
+        extent = arith::MaxSIOp::create(b, loc, extent, zero);
+        Value quotient = arith::DivUIOp::create(b, loc, extent, counted.getStep());
+        Value remainder = arith::RemUIOp::create(b, loc, extent, counted.getStep());
+        Value tail = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, remainder, zero);
+        Value increment = arith::IndexCastUIOp::create(b, loc, b.getIndexType(), tail);
+        Value count = arith::AddIOp::create(b, loc, quotient, increment);
+        Value exceeds = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ugt, count, budget);
+        largeTraversal = arith::OrIOp::create(b, loc, largeTraversal, exceeds);
+        Value divisor = arith::MaxUIOp::create(b, loc, count, one);
+        budget = arith::DivUIOp::create(b, loc, budget, divisor);
+      }
+      longStream = arith::OrIOp::create(b, loc, longStream, largeTraversal);
+      b.setInsertionPointAfter(packets.back().load);
       Value distance = arith::ConstantIndexOp::create(b, loc, step.getSExtValue() * lookahead);
       Value remaining = arith::SubIOp::create(b, loc, loop.getUpperBound(), loop.getInductionVar());
       Value available = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ugt, remaining, distance);
+      available = arith::AndIOp::create(b, loc, available, longStream);
       auto guard = scf::IfOp::create(b, loc, available, false);
       b.setInsertionPointToStart(guard.thenBlock());
       // The subtraction and guard prove the addition cannot overflow and the
@@ -155,6 +193,8 @@ public:
       schedules.push_back(b.getDictionaryAttr({
           b.getNamedAttr("bytes_per_iteration", b.getI64IntegerAttr(totalBytes)),
           b.getNamedAttr("lookahead_iterations", b.getI64IntegerAttr(lookahead)),
+          b.getNamedAttr("minimum_iterations", b.getI64IntegerAttr(lookahead * minLookaheadWindows + 1)),
+          b.getNamedAttr("cache_resident_budget", b.getI64IntegerAttr(cacheResidentBudget)),
           b.getNamedAttr("hints_per_iteration", b.getI64IntegerAttr(hints)),
           b.getNamedAttr("address_operations", b.getI64IntegerAttr(allAddresses.size()))}));
     }

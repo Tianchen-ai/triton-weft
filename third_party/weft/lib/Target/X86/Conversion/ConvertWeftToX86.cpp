@@ -4735,6 +4735,13 @@ private:
       SmallVector<Value> resultOrigins;
       for (auto [position, axis] : llvm::enumerate(axes(result.getType()))) {
         Value origin = indexConstant(op.getLoc(), 0);
+        // A scalar initializer supplies a value, not coordinates. A state
+        // whose named axis belongs to the current instance must retain that
+        // instance's origin so a descendant point indexes the local state.
+        // Explicit axes on an initializer still carry their own coordinates.
+        if (isa<wk::NewOp>(op))
+          for (const Point &point : llvm::reverse(activePoints))
+            if (point.domain.getAxisId() == axis) { origin = point.base; break; }
         for (Value operand : op.getOperands()) {
           auto ids = axes(operand.getType());
           auto found = llvm::find(ids, axis);

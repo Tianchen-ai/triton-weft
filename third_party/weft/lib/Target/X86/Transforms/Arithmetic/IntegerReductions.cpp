@@ -624,10 +624,23 @@ public:
       if (reduce.getAcc()) result = arith::AddIOp::create(b, loc, reduce.getAcc(), result);
       b.replaceOp(reduce, result);
     }
-    combineReductionGroups(getOperation(), b);
     coalesceByteDotMasks(getOperation(), b);
     foldDotAccumulators(getOperation(), b);
     foldProvenIntegerRestorations(getOperation(), b);
+  }
+};
+
+class CombineIntegerReductionGroups
+    : public PassWrapper<CombineIntegerReductionGroups, OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CombineIntegerReductionGroups)
+  StringRef getArgument() const override { return "weft-x86-combine-integer-reduction-groups"; }
+  StringRef getDescription() const override {
+    return "Pack completed integer reductions after state representation selection";
+  }
+  void runOnOperation() override {
+    IRRewriter b(&getContext());
+    combineReductionGroups(getOperation(), b);
   }
 };
 } // namespace
@@ -924,6 +937,10 @@ std::optional<weft::IntegerPairResult> weft::selectX86IntegerGroups(
 
 std::unique_ptr<Pass> weft::createX86IntegerReductionPass() {
   return std::make_unique<SelectIntegerReductions>();
+}
+
+std::unique_ptr<Pass> weft::createX86IntegerReductionGroupPass() {
+  return std::make_unique<CombineIntegerReductionGroups>();
 }
 
 std::unique_ptr<Pass> weft::createX86IntegerProductPass() {

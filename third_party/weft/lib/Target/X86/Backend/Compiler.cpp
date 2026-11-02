@@ -17,11 +17,12 @@ using namespace mlir;
 void weft::registerX86Passes() {
   for (auto factory : {createX86MathPass, createX86HalfCarrierPass,
        createX86VectorProjectionPass, createX86ProjectionLoopPass,
-       createX86IntegerReductionPass, createX86IntegerProductPass,
+       createX86IntegerReductionPass, createX86IntegerReductionGroupPass, createX86IntegerProductPass,
        createX86SnapshotLoadPass, createX86LookupProjectionPass,
        createX86IntegerPacketMergePass, createX86FullTilePass,
        createX86VectorCarryPass, createX86ArrayPacketPass,
        createX86ArrayForwardingPass, createX86ReductionSchedulePass,
+       createX86DeferredIntegerReductionPass,
        createX86UniformValidityPass, createX86IndexedValuePass,
        createX86IndexedPacketPass, createX86ContractionSchedulePass,
        createX86ReductionTreePass, createX86LocalStoragePass,
@@ -93,6 +94,12 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
   pm.addPass(createX86IntegerReductionPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+  pm.addPass(createX86DeferredIntegerReductionPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+  pm.addPass(createX86IntegerReductionGroupPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
   pm.addPass(createX86ReductionTreePass());
