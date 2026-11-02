@@ -21,6 +21,10 @@ constexpr int64_t hintSpan = 64;
 constexpr int64_t minFootprint = 8 * hintSpan;
 constexpr int64_t maxFootprint = 32768;
 constexpr int64_t maxAddressOps = 1024;
+// Charge both hint instructions and their shared address graph. A contiguous
+// stream can amortize many hints over a short address chain; interleaved
+// packets must also pay for rebuilding their longer address graph.
+constexpr int64_t maxPrefetchWork = 128;
 bool readOnlyArgument(Value pointer) {
   if (cast<LLVM::LLVMPointerType>(pointer.getType()).getAddressSpace() != 0) return false;
   while (auto gep = pointer.getDefiningOp<LLVM::GEPOp>()) pointer = gep.getBase();
@@ -107,7 +111,8 @@ public:
       // loads; leave these windows to hardware streaming. This is a physical
       // scheduling budget, independent of the operation or Encoding name.
       if (totalBytes < minFootprint || totalBytes > maxFootprint || hints > 512 ||
-          allAddresses.size() > maxAddressOps) continue;
+          allAddresses.size() > maxAddressOps ||
+          allAddresses.size() + hints > maxPrefetchWork) continue;
       // Count the complete finite stream, including enclosing traversals.
       // A short traversal already contained in the lookahead budget does not
       // amortize a second address stream and guarded hints. Unknown extents
