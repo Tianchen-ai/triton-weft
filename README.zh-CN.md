@@ -14,7 +14,7 @@ Weft 是通过扩展 Triton 实现的编程模型。源程序显式表达数据�
 ## 构建与安装
 
 源码在没有 `.git` 目录时也可构建。需要 Python 3.10 或更新版本、Git、CMake、
-Ninja、支持 C++20 的编译器，以及
+Ninja、GCC 12 或更新版本，以及
 [`cmake/llvm-info.json`](cmake/llvm-info.json) 固定的 LLVM/MLIR 版本。
 该版本提供 Clang 23；OpenMP 运行时须使用匹配的调度 ABI。
 
@@ -30,11 +30,12 @@ LLVM_INSTALL_PATH="$PWD/.deps/llvm" \
 bash scripts/build-llvm-project.sh
 ```
 
-也可以选用由同一版本构建的现有 SDK。显式指定 SDK、本机 Clang 和 OpenMP：
+也可以选用由同一版本构建的现有 SDK。显式指定宿主 GCC、SDK、本机 Clang 和 OpenMP；
+若系统使用版本化命令名，可将 `gcc`/`g++` 换成 `gcc-12`/`g++-12`：
 
 ```sh
-CC="$PWD/.deps/llvm/bin/clang" \
-CXX="$PWD/.deps/llvm/bin/clang++" \
+CC=gcc \
+CXX=g++ \
 LLVM_SYSPATH="$PWD/.deps/llvm" \
 TRITON_WEFT_CLANG_ROOT="$PWD/.deps/llvm" \
 TRITON_WEFT_OPENMP_LIBRARY="$PWD/.deps/llvm/lib/libomp.so" \
@@ -46,7 +47,8 @@ python -m pip install numpy pytest
 ```
 
 若 LLVM 将库安装到目标专属目录，应传入该目录中的 `libomp.so`。
-构建会检查 OpenMP 入口、头文件与 Clang 本机目标。
+构建会检查 OpenMP 入口、头文件与 Clang 本机目标。GCC 编译产品，随附的 Clang 23
+编译生成的 CPU 内核。
 [安装指南](docs/weft/getting-started/installation.zh.md)进一步说明显式工具链与交叉编译。
 
 ## 编写和调用内核

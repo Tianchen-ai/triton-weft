@@ -18,7 +18,7 @@ optional host-buffer integrations.
 ## Build and install
 
 The source tree builds without a `.git` directory. Use Python 3.10 or newer,
-Git, CMake, Ninja, a C++20 compiler and the LLVM/MLIR revision in
+Git, CMake, Ninja, GCC 12 or newer and the LLVM/MLIR revision in
 [`cmake/llvm-info.json`](cmake/llvm-info.json). The pinned revision supplies
 Clang 23; its OpenMP runtime must use the same dispatch ABI.
 
@@ -35,11 +35,12 @@ bash scripts/build-llvm-project.sh
 ```
 
 An existing SDK built from that exact revision can be selected instead. Build
-the product with the SDK, host Clang and OpenMP locations explicitly:
+the product with the host GCC and SDK locations explicitly (`gcc-12`/`g++-12`
+can be used on systems where those are the installed compiler names):
 
 ```sh
-CC="$PWD/.deps/llvm/bin/clang" \
-CXX="$PWD/.deps/llvm/bin/clang++" \
+CC=gcc \
+CXX=g++ \
 LLVM_SYSPATH="$PWD/.deps/llvm" \
 TRITON_WEFT_CLANG_ROOT="$PWD/.deps/llvm" \
 TRITON_WEFT_OPENMP_LIBRARY="$PWD/.deps/llvm/lib/libomp.so" \
@@ -52,7 +53,8 @@ python -m pip install numpy pytest
 
 LLVM installations with a target-specific library directory should pass that
 directory's `libomp.so`. The build checks the OpenMP entry points, headers and
-native Clang target. The [installation guide](docs/weft/getting-started/installation.md)
+native Clang target. GCC compiles the product; the bundled Clang 23 compiles
+generated CPU kernels. The [installation guide](docs/weft/getting-started/installation.md)
 also describes explicit and cross-compilation toolchains.
 
 ## Write and call a kernel
