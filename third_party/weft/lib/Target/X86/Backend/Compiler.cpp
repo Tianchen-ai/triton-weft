@@ -148,6 +148,9 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   pm.addPass(createX86IntegerProductPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  pm.addPass(createX86IntegerProjectionPass(true, true));
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
   pm.addPass(weft::x86::createAMXPackingReusePass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());

@@ -20,6 +20,22 @@ namespace {
 
 bool integerLaneLocal(Operation *op, bool byteMultiply = false);
 
+bool storedConsumer(Operation *operation) {
+  auto loop = operation->getParentOfType<scf::ForOp>();
+  if (!loop || loop.getNumRegionIterArgs()) return false;
+  APInt step;
+  // A multi-point consumer already expands shared fields across several
+  // outputs. Hoisting its whole decoded packet set lengthens all those live
+  // ranges together; keep the existing local packet schedule in that case.
+  if (!matchPattern(loop.getStep(), m_ConstantInt(&step)) || !step.isOne())
+    return false;
+  bool writes = false;
+  loop.walk([&](Operation *nested) {
+    writes |= isa<LLVM::StoreOp, LLVM::MaskedStoreOp>(nested);
+  });
+  return writes;
+}
+
 llvm::DenseSet<Operation *> nativeIntegerClosure(ModuleOp module) {
   llvm::DenseSet<Operation *> result;
   auto local = [](Operation *op) {
@@ -50,9 +66,12 @@ llvm::DenseSet<Operation *> nativeIntegerClosure(ModuleOp module) {
     SmallVector<Value> inputs;
     if (lookup) inputs.push_back(call.getOperand(1));
     else llvm::append_range(inputs, call.getOperands());
+    bool sharedConsumer = storedConsumer(call);
     while (!inputs.empty()) {
       Operation *op = inputs.pop_back_val().getDefiningOp();
-      if (!op || op->getBlock() != call->getBlock() || !local(op) || !result.insert(op).second) continue;
+      if (!op || op->getParentOfType<func::FuncOp>() != call->getParentOfType<func::FuncOp>() ||
+          (op->getBlock() != call->getBlock() && !sharedConsumer) ||
+          !local(op) || !result.insert(op).second) continue;
       llvm::append_range(inputs, op->getOperands());
     }
     SmallVector<Operation *> consumers(call->getUsers());
@@ -463,6 +482,7 @@ bool integerLaneLocal(Operation *op, bool byteMultiply) {
 class ProjectIntegerExpressions
     : public PassWrapper<ProjectIntegerExpressions, OperationPass<ModuleOp>> {
   bool selectedConsumersOnly;
+  bool sharedConsumersOnly;
   bool uniformWordShift(Value value, ArrayRef<int64_t> indices, unsigned depth = 0) {
     Operation *op = value.getDefiningOp();
     auto type = dyn_cast<VectorType>(value.getType());
@@ -643,7 +663,8 @@ class ProjectIntegerExpressions
     }
   }
 public:
-  explicit ProjectIntegerExpressions(bool selectedConsumersOnly = false) : selectedConsumersOnly(selectedConsumersOnly) {}
+  explicit ProjectIntegerExpressions(bool selectedConsumersOnly = false, bool sharedConsumersOnly = false)
+      : selectedConsumersOnly(selectedConsumersOnly), sharedConsumersOnly(sharedConsumersOnly) {}
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ProjectIntegerExpressions)
   StringRef getArgument() const override { return "weft-x86-project-integer-expressions"; }
   StringRef getDescription() const override {
@@ -655,6 +676,23 @@ public:
   void runOnOperation() override {
     IRRewriter b(&getContext());
     if (!selectedConsumersOnly) conversionPackets(b);
+    SmallVector<Operation *> fieldExtensions;
+    getOperation().walk([&](Operation *op) {
+      if (!isa<arith::ExtUIOp, arith::ExtSIOp>(op)) return;
+      auto type = dyn_cast<VectorType>(op->getOperand(0).getType());
+      Operation *source = op->getOperand(0).getDefiningOp();
+      // A state-carrying traversal already has a selected live packet set.
+      // Keep its local extension rather than lengthening those live ranges.
+      if (!storedConsumer(op)) return;
+      if (type && !type.isScalable() && type.getElementTypeBitWidth() > 1 &&
+          type.getElementTypeBitWidth() < 8 && source && source->getBlock() != op->getBlock())
+        fieldExtensions.push_back(op);
+    });
+    // Exact integer extension belongs with the immutable source field. Sharing
+    // its projected byte packets there avoids repeating the decoder in each
+    // consumer and avoids transferring a subbyte vector across the CFG edge.
+    for (Operation *extension : fieldExtensions)
+      extension->moveAfter(extension->getOperand(0).getDefiningOp());
     auto lookup = selectedConsumersOnly ? nativeIntegerClosure(getOperation()) : llvm::DenseSet<Operation *>();
     SmallVector<Operation *> roots;
     getOperation().walk([&](Operation *op) {
@@ -664,15 +702,17 @@ public:
     for (Operation *root : llvm::reverse(roots)) {
       auto type = dyn_cast<VectorType>(root->getResult(0).getType());
       if (!type || type.isScalable() || type.getRank() != 1 || root->use_empty()) continue;
+      if (sharedConsumersOnly && !llvm::any_of(root->getUsers(), storedConsumer)) continue;
       llvm::SetVector<Operation *> consumers;
       for (Operation *user : root->getUsers()) consumers.insert(user);
       SmallVector<SmallVector<int64_t>> unique, reverse;
       SmallVector<unsigned> packetForConsumer;
       int64_t total = 0;
-      bool eligible = true;
+      bool eligible = true, sharedAcrossBlocks = false;
       for (Operation *consumer : consumers) {
         auto shuffle = dyn_cast<vector::ShuffleOp>(consumer);
-        if (!shuffle || shuffle->getBlock() != root->getBlock()) { eligible = false; break; }
+        if (!shuffle) { eligible = false; break; }
+        sharedAcrossBlocks |= shuffle->getBlock() != root->getBlock();
         int64_t firstSize = cast<VectorType>(shuffle.getV1().getType()).getNumElements();
         llvm::SetVector<int64_t> demand;
         SmallVector<int64_t> expand;
@@ -695,6 +735,9 @@ public:
         } else packetForConsumer.push_back(existing - unique.begin());
         reverse.push_back(std::move(expand));
       }
+      if (sharedAcrossBlocks)
+        if (!llvm::all_of(consumers, storedConsumer))
+          continue;
       // Total decoded lanes cannot increase, and every packet must shrink.
       if (!eligible || total > type.getNumElements() || llvm::any_of(unique, [&](auto &demand) {
             return demand.size() >= static_cast<size_t>(type.getNumElements());
@@ -733,13 +776,19 @@ public:
       SmallVector<Value> packets;
       for (auto [packet, demand] : llvm::enumerate(unique)) {
         Operation *first = nullptr;
-        for (auto [index, consumer] : llvm::enumerate(consumers))
-          if (packetForConsumer[index] == packet && (!first || consumer->isBeforeInBlock(first))) first = consumer;
+        if (!sharedAcrossBlocks)
+          for (auto [index, consumer] : llvm::enumerate(consumers))
+            if (packetForConsumer[index] == packet && (!first || consumer->isBeforeInBlock(first))) first = consumer;
         // Pure packets are needed at their first consumer, not simultaneously
         // at the old wide definition. Source reads remain saved SSA values.
         // Keep this issue order visible to LLVM without extending every
         // decoded packet's live interval across unrelated consumers.
-        b.setInsertionPoint(first);
+        // Project an immutable shared producer once at its original scope.
+        // Rebuilding its packets inside a descendant row loop would repeat
+        // decode work; keeping the unsliced subbyte value across that loop
+        // instead makes native lowering reconstruct it element by element.
+        if (sharedAcrossBlocks) b.setInsertionPointAfter(root);
+        else b.setInsertionPoint(first);
         packets.push_back(project(b, root->getLoc(), root->getResult(0), demand, root));
       }
       for (auto [index, consumer] : llvm::enumerate(consumers)) {
@@ -1017,8 +1066,8 @@ std::unique_ptr<Pass> weft::createX86SubbyteProjectionPass(bool selectedConsumer
   return std::make_unique<LegalizeSubbyteProjections>(selectedConsumersOnly);
 }
 
-std::unique_ptr<Pass> weft::createX86IntegerProjectionPass(bool selectedConsumersOnly) {
-  return std::make_unique<ProjectIntegerExpressions>(selectedConsumersOnly);
+std::unique_ptr<Pass> weft::createX86IntegerProjectionPass(bool selectedConsumersOnly, bool sharedConsumersOnly) {
+  return std::make_unique<ProjectIntegerExpressions>(selectedConsumersOnly, sharedConsumersOnly);
 }
 
 std::unique_ptr<Pass> weft::createX86IntegerPacketMergePass() {

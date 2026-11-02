@@ -18,7 +18,8 @@ std::unique_ptr<mlir::Pass> createX86IntegerReductionGroupPass();
 std::unique_ptr<mlir::Pass> createX86IntegerProductPass();
 std::unique_ptr<mlir::Pass> createX86SnapshotLoadPass();
 std::unique_ptr<mlir::Pass> createX86SubbyteProjectionPass(bool selectedConsumersOnly = false);
-std::unique_ptr<mlir::Pass> createX86IntegerProjectionPass(bool selectedConsumersOnly = false);
+std::unique_ptr<mlir::Pass> createX86IntegerProjectionPass(bool selectedConsumersOnly = false,
+                                                        bool sharedConsumersOnly = false);
 std::unique_ptr<mlir::Pass> createX86LookupProjectionPass();
 std::unique_ptr<mlir::Pass> createX86IntegerPacketMergePass();
 std::unique_ptr<mlir::Pass> createX86FullTilePass();
