@@ -1,8 +1,8 @@
 """GGML base storage encodings and the shared Q4_K row derivation.
 
 These declarations describe bytes and logical fields, not reference kernels.
-GGML-specific author layouts for benchmark candidates live in Bench's
-weft_bench.kernels.ggml.layouts package. Applications prepare persistent storage
+GGML-specific author layouts live in the product's
+triton.kernels.weft.ggml.layouts package. Applications prepare persistent storage
 explicitly before passing it to a kernel or binding a native GGML call site.
 """
 from __future__ import annotations
