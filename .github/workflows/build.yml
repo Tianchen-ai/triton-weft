@@ -51,6 +51,7 @@ jobs:
           git -C "$RUNNER_TEMP/llvm-runtime-source" remote add origin https://github.com/llvm/llvm-project.git
           git -C "$RUNNER_TEMP/llvm-runtime-source" fetch --depth 1 origin "$revision"
           git -C "$RUNNER_TEMP/llvm-runtime-source" checkout --detach FETCH_HEAD
+          install -m 644 "$RUNNER_TEMP/llvm-runtime-source/llvm/LICENSE.TXT" "$LLVM_SYSPATH/LICENSE.TXT"
           cmake -S "$RUNNER_TEMP/llvm-runtime-source/runtimes" -B "$RUNNER_TEMP/openmp-build" -G Ninja \
             -DLLVM_ENABLE_RUNTIMES=openmp -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="$LLVM_SYSPATH/bin/clang" \
