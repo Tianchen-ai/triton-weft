@@ -247,6 +247,13 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     // subsequent memory pass completes the ordinary byte snapshot here.
     if (hasOnlyFragmentSupplyUses(field.getResult())) continue;
     auto value = dyn_cast<riscv::ValueType>(field.getResult().getType());
+    bool indexedLocal = value && value.getLayout().getCarrier() == "local" &&
+        llvm::any_of(field.getResult().getUsers(), [](Operation *user) {
+          auto extract = dyn_cast<riscv::ExtractOp>(user);
+          return extract && llvm::count_if(extract.getSelectors(), [](Attribute selector) {
+            return cast<StringAttr>(selector).getValue() == "gather";
+          }) > 1;
+        });
     if (isa<riscv::MemDescType>(field.getResult().getType())) {
       auto owner = dyn_cast<riscv::MemDescType>(field.getOwner().getType());
       auto facts = fieldFacts(field);
@@ -285,7 +292,7 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
       // projection here, without replacing those existing transfer programs.
       bool general = value && value.getLayout().getCarrier() != "scalar" &&
           ((facts.mapping == "natural" && bits % 8) ||
-           (facts.mapping == "joined" && value.getLayout().getCarrier() == "local"));
+           (facts.mapping == "joined" && value.getLayout().getCarrier() == "local") || indexedLocal);
       if (!encoding || encoding.getKind() != "base" || !general) continue;
       auto declaration = findEncoding(field, baseEncodingFamily(field, encoding));
       if (!declaration || owner.getShape().empty() || owner.getShape().asArrayRef().back() != declaration.getElements())
@@ -350,7 +357,7 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
       auto groups = riscv_internal::operationRegisterGroups(user);
       return !groups || *groups > target.getVectorRegisters();
     });
-    bool general = numericSnapshot || renamedCoordinates || localJoined || oversizedProjection || (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
+    bool general = numericSnapshot || renamedCoordinates || localJoined || indexedLocal || oversizedProjection || (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
         (owner.getShape().size() > 1 && facts.mapping == "joined");
     if (!general) continue;
     if (owner.getShape().empty() || owner.getShape().asArrayRef().back() != owner.getElements())

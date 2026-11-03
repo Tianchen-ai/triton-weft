@@ -5,6 +5,7 @@
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "Weft/Dialect/RISCV/IR/Stream.h"
 #include "Weft/Dialect/RISCV/IR/DenseRelations.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Dominance.h"
 #include <functional>
 #include <limits>
@@ -497,7 +498,7 @@ bool DenseProducerGraph::analyze(bool required, bool allowGuards) {
       // fixed index axis can still be complete, even when a row axis is short.
       // Prove that fact through the typed suppliers instead of fabricating a
       // Level point for the independent index domain.
-      llvm::DenseSet<Value> visiting;
+      llvm::DenseSet<Value> visiting, induction;
       std::function<bool(Value)> complete = [&](Value value) {
         auto type = dyn_cast<riscv::ValueType>(value.getType());
         if (!type) return false;
@@ -506,6 +507,25 @@ bool DenseProducerGraph::analyze(bool required, bool allowGuards) {
             type.getShape()[found - type.getAxisIds().asArrayRef().begin()] != domain.getShape()[position])
           return false;
         if (type.getLayout().getValidity() == "full") return true;
+        if (auto argument = dyn_cast<BlockArgument>(value)) {
+          auto loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp());
+          if (!loop || !argument.getArgNumber()) return false;
+          // Prove the fixed coordinate by induction over the real carry: it
+          // is complete initially and the actual backedge preserves it. The
+          // assumed carry closes only that recurrence, never another source.
+          if (induction.contains(value)) return true;
+          unsigned index = argument.getArgNumber() - 1;
+          if (!complete(loop.getInitArgs()[index]) || visiting.size() >= 128)
+            return false;
+          auto incoming = std::move(visiting);
+          visiting.clear();
+          induction.insert(value);
+          auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+          bool preserved = complete(yield.getOperand(index));
+          induction.erase(value);
+          visiting = std::move(incoming);
+          return preserved;
+        }
         Operation *producer = value.getDefiningOp();
         if (auto broadcast = dyn_cast_or_null<riscv::RVVAxisBroadcastOp>(producer))
           if (!llvm::is_contained(broadcast.getInput().getType().getAxisIds().asArrayRef(), axis))
