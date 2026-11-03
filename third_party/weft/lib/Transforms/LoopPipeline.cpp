@@ -14,6 +14,15 @@ struct StageInstance {
 };
 } // namespace
 
+FailureOr<std::optional<unsigned>> weft::requestedPipelineDepth(Operation *loop) {
+  Attribute attribute = loop->getAttr("weft.pipeline.depth");
+  if (!attribute) return std::optional<unsigned>{};
+  auto depth = dyn_cast<IntegerAttr>(attribute);
+  if (!depth || depth.getInt() < 0 || depth.getInt() > 4)
+    return loop->emitError("loop-local pipeline depth must be an integer from zero through four"), failure();
+  return std::optional<unsigned>(depth.getInt());
+}
+
 void weft::addPipelineMemoryOrder(PhysicalPipeline &schedule, ArrayRef<Operation *> accesses) {
   for (unsigned i = 1; i < accesses.size(); ++i) {
     auto &before = schedule.orderedAfter[accesses[i]];

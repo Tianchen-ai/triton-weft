@@ -5,6 +5,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/STLExtras.h"
+#include <optional>
 
 namespace weft {
 
@@ -66,6 +67,10 @@ using PipelineBufferSelector = llvm::function_ref<mlir::FailureOr<mlir::Value>(
 void addPipelineMemoryOrder(PhysicalPipeline &schedule,
                            llvm::ArrayRef<mlir::Operation *> accesses);
 void closePhysicalPipelineBuffers(PhysicalPipeline &schedule);
+
+// A frontend's loop-local physical request overrides the backend default for
+// that loop. Zero and one both disable overlap; neither changes source births.
+mlir::FailureOr<std::optional<unsigned>> requestedPipelineDepth(mlir::Operation *loop);
 
 // Subdivide the existing independent producer frontier along its read/use-def
 // chain. Ownership/shape dependencies that cannot travel remain in one stage.

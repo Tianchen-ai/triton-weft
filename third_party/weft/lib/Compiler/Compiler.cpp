@@ -536,7 +536,10 @@ int weft_compiler_target_info(const char *query, const char *optionsText, char *
       json::Object matrix;
       for (const auto &[name,cpus] : native.matrixExtensions) matrix[name] = array(cpus);
       facts["native_matrix_extensions"] = std::move(matrix);
-      facts["execution_isa_extensions"] = array(native.isaExtensions);
+      json::Object extensions;
+      for (const auto &[name, version] : native.isaExtensions)
+        extensions[name] = json::Array{version.first, version.second};
+      facts["execution_isa_extensions"] = std::move(extensions);
       output = std::move(facts);
 #endif
     } else throw std::invalid_argument("unknown Weft target query");

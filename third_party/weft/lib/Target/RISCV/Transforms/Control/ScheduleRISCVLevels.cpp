@@ -74,12 +74,21 @@ public:
   void runOnOperation() override {
     SmallVector<scf::ForOp> loops;
     getOperation().walk<WalkOrder::PostOrder>([&](scf::ForOp loop) {
-      if (loop->hasAttr("weft.riscv.schedule")) loops.push_back(loop);
+      if (loop->hasAttr("weft.riscv.schedule") || loop->hasAttr("weft.pipeline.depth")) loops.push_back(loop);
     });
     IRRewriter b(&getContext());
     unsigned selected = 0;
     int64_t reduction = 0;
     for (auto loop : loops) {
+      auto request = requestedPipelineDepth(loop);
+      if (failed(request)) { signalPassFailure(); return; }
+      const bool explicitRequest = request->has_value();
+      if (explicitRequest) {
+        unsigned depth = **request;
+        loop->removeAttr("weft.pipeline.depth");
+        if (depth < 2) { loop->removeAttr("weft.riscv.schedule"); continue; }
+        loop->setAttr("weft.riscv.schedule", riscv_internal::schedule(b, 1, depth));
+      }
       auto binding = loop->getAttrOfType<riscv::ScheduleAttr>("weft.riscv.schedule");
       if (binding.getPipelineDepth() == 1) continue;
       bool nested = false;
@@ -87,12 +96,20 @@ public:
         nested |= child != loop && child->hasAttr("weft.riscv.schedule");
       });
       if (nested) {
+        if (explicitRequest) {
+          loop.emitError("loop-local pipeline cannot clone a nested semantic Level or selected pipeline");
+          signalPassFailure(); return;
+        }
         loop->removeAttr("weft.riscv.schedule");
         continue;
       }
       auto candidate = schedulePipeline(loop);
       if (failed(candidate)) { signalPassFailure(); return; }
       if (!*candidate) {
+        if (explicitRequest) {
+          loop.emitError("loop-local pipeline has no independent numerical supply crossing stages");
+          signalPassFailure(); return;
+        }
         // No independent supply is a fact of this graph. Consume the optional
         // local schedule without manufacturing a producer or copying a read.
         loop->removeAttr("weft.riscv.schedule");

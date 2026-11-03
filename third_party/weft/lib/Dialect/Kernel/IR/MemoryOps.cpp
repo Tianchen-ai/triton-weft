@@ -48,6 +48,8 @@ mlir::LogicalResult PointerStoreOp::verify() {
 }
 
 mlir::LogicalResult PointerAtomicOp::verify() {
+  if (getKind() == "store" && !getResult().use_empty())
+    return emitOpError("atomic store has no observable previous-value result");
   auto element = logicalElement(getResult().getType());
   auto pointer = mlir::cast<PointerType>(getBase().getType());
   auto index = mlir::dyn_cast<mlir::IntegerType>(logicalElement(getOffsets().getType()));

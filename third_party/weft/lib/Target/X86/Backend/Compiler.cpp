@@ -57,6 +57,7 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
     pipelines.push_back(StringAttr::get(source.getContext(), pipeline));
   };
   pm.addPass(createBindSourceParametersPass(bindings));
+  pm.addPass(createNormalizeCanonicalControlPass());
   pm.addPass(x86::createCanonicalConversionPass(target, tuneCPU));
   pm.addPass(createX86MathPass());
   pm.addPass(createCanonicalizerPass());
@@ -171,7 +172,9 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   pm.addPass(createX86UniformValidityPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
-  if (pipelineDepth > 1) {
+  bool loopPipeline = false;
+  module->walk([&](scf::ForOp loop) { loopPipeline |= loop->hasAttr("weft.pipeline.depth"); });
+  if (pipelineDepth > 1 || loopPipeline) {
     // Preserve iteration-private allocation identity until versioning is done;
     // stack slot reuse must analyze the expanded lifetimes, not the source loop.
     pm.addPass(createX86PipelineSchedulePass(pipelineDepth));

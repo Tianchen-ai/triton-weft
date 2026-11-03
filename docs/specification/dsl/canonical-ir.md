@@ -45,11 +45,19 @@ base 的读写 effect。只有 mask 为真的元素可解引用；非活动 load
 pointer 的实际对齐；显式 extent/stride 是 index SSA。packed Encoding 使用自身的连续
 record 映射，不能叠加 dense element stride。可访问容量与布局是作者的存储前置合同，
 同一个 storage 的 raw pointer 和多个 View 保留同一 alias 来源。
+前端的逐循环物理调度请求保存在 `scf.for` 的 `weft.pipeline.depth` 属性中；范围为
+0/1/2/3/4，0/1 禁用该循环的跨迭代重叠，2/3/4 由既有目标 scheduler 与共同 expander
+实现。该请求覆盖此循环的全局默认，不改变源级 state/stage 或 Level 树。无法调度的
+显式请求给出具体诊断；不把它静默当作普通串行循环。手工 order/stage 需完整操作覆盖
+与依赖证明，尚不支持的手工请求明确拒绝。
 `pointer_atomic` 保存 storage origin、offset、mask、更新值、比较值、操作、ordering 和 scope。
 它返回实际更新前的值；mask 为假时不访问内存，其返回值不供作者依赖。
 普通 Triton `atomic_add/min/max/and/or/xor/xchg/cas` 使用共同 semantic 的类型与参数检查。
 CPU 对 `cta/gpu/sys` 均提供系统范围原子性，不由这些 GPU 名称引入另一套线程所有权。
 ordering 保留 relaxed/acquire/release/acq_rel/seq_cst；CAS 失败路径不携带 release 语义。
+同一 typed atomic 合同也包含 `load/store`，分别保留只读/只写 ABI effect；load 不接受
+release/acq_rel，store 不接受 acquire/acq_rel，store 的结果不可观察。物理操作仍保持
+atomic ordering，不能作为普通可移动的 load/store 对待。
 同 storage 字节宽度的 `pointer_cast` 只重解释元素类型，保留来源、偏移单位和 alias；
 它不把指针变成没有存储来源的整数，也不增强地址对齐。
 

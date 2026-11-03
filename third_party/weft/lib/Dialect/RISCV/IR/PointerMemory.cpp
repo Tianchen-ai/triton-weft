@@ -97,12 +97,15 @@ LogicalResult PointerAtomicOp::verify() {
   auto encoding = cast<weft::kernel::EncodingType>(memory.getEncoding());
   Type payload = element(getResult().getType());
   auto index = dyn_cast<IntegerType>(element(getOffsets().getType()));
-  if (memory.getAddressClass() != "pointer" || memory.getAccess() != "readwrite" ||
+  bool access = memory.getAccess() == "readwrite" ||
+      (getKind() == "load" && memory.getAccess() == "read") ||
+      (getKind() == "store" && memory.getAccess() == "write");
+  if (memory.getAddressClass() != "pointer" || !access ||
       memory.getAlignment() < payload.getIntOrFloatBitWidth() / 8 ||
       encoding.getKind() != "dense" || !index || !index.isSigned() || index.getWidth() != 64 ||
       !element(getMask().getType()).isInteger(1) || !domain(getOffsets().getType(), getResult().getType()) ||
       element(getValue().getType()) != payload || element(getCompare().getType()) != payload)
-    return emitOpError("atomic requires an aligned readwrite pointer and matching typed operands");
+    return emitOpError("atomic requires an aligned pointer with the required access mode and matching typed operands");
   for (Value value : {getMask(), getValue(), getCompare()})
     if (isa<ValueType>(value.getType()) && !domain(value.getType(), getResult().getType()))
       return emitOpError("atomic operands must share the pointer domain");

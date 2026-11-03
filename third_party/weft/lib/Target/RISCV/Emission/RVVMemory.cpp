@@ -37,7 +37,12 @@ mlir::LogicalResult Emitter::compilePointerAtomic(riscv::PointerAtomicOp op) {
   std::string result = floating ? fresh("atomic_old_bits") : old;
   if (floating) line(bits + " " + result + ";");
   auto kind = op.getKind();
-  if (kind == "cas") {
+  if (kind == "load") {
+    line(result + " = __atomic_load_n(" + pointer + ", " + order + ");");
+  } else if (kind == "store") {
+    line("__atomic_store_n(" + pointer + ", " + argument + ", " + order + ");");
+    line(result + " = 0;");
+  } else if (kind == "cas") {
     line(result + " = " + expected + ";");
     line("__atomic_compare_exchange_n(" + pointer + ", &" + result + ", " + argument + ", 0, " + order + ", " + failure + ");");
   } else if (kind == "xchg") {

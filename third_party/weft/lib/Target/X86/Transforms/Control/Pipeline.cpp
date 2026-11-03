@@ -384,24 +384,30 @@ public:
   StringRef getArgument() const override { return "weft-x86-schedule-levels"; }
   StringRef getDescription() const override { return "Select a dependency- and ownership-preserving pipeline frontier"; }
   void runOnOperation() override {
-    if (depth == 1) return;
     llvm::LLVMContext context;
     SmallVector<scf::ForOp> loops;
     getOperation().walk([&](scf::ForOp loop) {
+      if (loop->hasAttr("weft.pipeline.depth")) { loops.push_back(loop); return; }
+      if (depth == 1) return;
       if (!loop->hasAttr("weft.x86.level") || loop.getInitArgs().empty()) return;
       bool nested = false;
       loop.getBody()->walk([&](scf::ForOp inner) { nested |= inner->hasAttr("weft.x86.level"); });
       if (!nested) loops.push_back(loop);
     });
-    if (loops.empty()) {
+    if (loops.empty() && depth > 1) {
       getOperation().emitError("requested x86 pipeline has no eligible innermost Level with numerical carries");
       signalPassFailure(); return;
     }
     IRRewriter b(&getContext());
     for (auto loop : loops) {
-      auto selected = schedule(loop, depth, context);
+      auto request = weft::requestedPipelineDepth(loop);
+      if (failed(request)) { signalPassFailure(); return; }
+      unsigned selectedDepth = request->value_or(depth);
+      if (selectedDepth < 2) { loop->removeAttr("weft.pipeline.depth"); continue; }
+      auto selected = schedule(loop, selectedDepth, context);
       if (failed(selected)) { signalPassFailure(); return; }
-      loop->setAttr(scheduleDepth, b.getI64IntegerAttr(depth));
+      loop->removeAttr("weft.pipeline.depth");
+      loop->setAttr(scheduleDepth, b.getI64IntegerAttr(selectedDepth));
       for (const auto &buffer : selected->buffers)
         buffer.allocation->setAttr(bufferVersions, b.getI64IntegerAttr(buffer.versions()));
       for (auto [position, op] : llvm::enumerate(selected->ordered)) {

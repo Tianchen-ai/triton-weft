@@ -63,7 +63,8 @@ def argument_accesses(body: Region) -> list[set[str]]:
             elif name in ("weft_kernel.pointer_load", "weft_kernel.pointer_store"):
                 memory.append((args[0], ("read" if name.endswith("load") else "write",)))
             elif name == "weft_kernel.pointer_atomic":
-                memory.append((args[0], ("read", "write")))
+                kind = json.loads(operation.attributes["kind"])
+                memory.append((args[0], ("read",) if kind == "load" else ("write",) if kind == "store" else ("read", "write")))
             elif name == "weft_kernel.commit":
                 memory.append((args[1], ("write",)))
             elif name == "weft_kernel.atomic_rmw":

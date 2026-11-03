@@ -17,6 +17,8 @@ namespace weft {
 std::unique_ptr<mlir::Pass> createBindSourceParametersPass(
     const llvm::StringMap<int64_t> &bindings = {});
 
+std::unique_ptr<mlir::Pass> createNormalizeCanonicalControlPass();
+
 } // namespace weft
 
 #endif // WEFT_TARGET_SOURCESPECIALIZATION_H

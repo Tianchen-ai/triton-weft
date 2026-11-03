@@ -2012,7 +2012,17 @@ private:
           elem, mapped(op.getBase()), ValueRange{offset});
       Value old;
       unsigned alignment = elem.getIntOrFloatBitWidth() / 8;
-      if (op.getKind() == "cas") {
+      if (op.getKind() == "load") {
+        auto load = LLVM::LoadOp::create(b, loc, elem, pointer);
+        load.setOrdering(order);
+        load.setAlignment(alignment);
+        old = load;
+      } else if (op.getKind() == "store") {
+        auto store = LLVM::StoreOp::create(b, loc, update, pointer);
+        store.setOrdering(order);
+        store.setAlignment(alignment);
+        old = zero(loc, elem);
+      } else if (op.getKind() == "cas") {
         Type bits = b.getIntegerType(elem.getIntOrFloatBitWidth());
         if (isa<FloatType>(elem)) {
           update = operation(loc, "arith.bitcast", bits, update);
