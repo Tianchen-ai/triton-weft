@@ -91,7 +91,7 @@ public:
     for (auto [c, d] : llvm::zip(constancy, dims)) {
       assert(llvm::isPowerOf2_32(c));
       for (int i = 0; i < llvm::Log2_32(c); i++) {
-        bases_inv[d][i] = {0};
+        bases_inv[d][i].assign(1, 0);
       }
     }
     auto invBroadcast = LinearLayout(std::move(bases_inv), invReg.getOutDims(),
