@@ -3459,6 +3459,15 @@ public:
       }
       auto original = mlir::dyn_cast<riscv::ValueType>(operation.getValue().getType());
       auto memoryType = mlir::dyn_cast<riscv::MemDescType>(operation.getRegion().getType());
+      if (operation.getRegion().getDefiningOp<riscv::BindViewOp>() && memoryType) {
+        rewriter.setInsertionPoint(operation);
+        auto slice = riscv::SliceOp::create(rewriter, operation.getLoc(), memoryType,
+            operation.getRegion(), mlir::ValueRange{},
+            rewriter.getArrayAttr(llvm::SmallVector<mlir::Attribute>(memoryType.getShape().size(),
+                rewriter.getStringAttr("all"))));
+        riscv_internal::copyOrigin(operation, slice);
+        operation.getRegionMutable().assign(slice.getResult());
+      }
       if (original && memoryType &&
           mlir::cast<kernel::EncodingType>(memoryType.getEncoding()).getKind() == "dense") {
         if (auto flat = linearLocalCarrier(operation.getRegion(), original, operation, builder)) {

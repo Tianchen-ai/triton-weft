@@ -539,11 +539,40 @@ bool DenseProducerGraph::analyze(bool required, bool allowGuards) {
           if (llvm::is_contained(window.getWindowAxes(), axis)) return true;
         if (auto entry = dyn_cast_or_null<riscv::RVVIndexedEntryLoadOp>(producer);
             entry && axis == static_cast<int64_t>(entry.getPayloadAxis())) return true;
+        if (auto window = dyn_cast_or_null<riscv::RVVReplicaStorageLoadOp>(producer)) {
+          auto plan = window.getPlan();
+          auto source = window.getField().getType();
+          auto base = integerRange(window.getLogicalBase());
+          if (auto fixed = constantInt(window.getLogicalBase())) base = IntegerRange(*fixed, *fixed);
+          // A fixed strided window can be complete on its newly introduced
+          // lane axis while another source coordinate still has a tail.
+          // Prove every selected source index against the completed snapshot.
+          if (axis == plan.getReductionAxis() && !window.getRecordRank() &&
+              source.getShape().size() == 1 && source.getLayout().getValidity() == "full" &&
+              (plan.getKind() == "unit" || plan.getKind() == "strided") &&
+              plan.getProjectionBase() == 0 && plan.getProjectionRepeat() == 1 &&
+              base && !base->minimum.isNegative()) {
+            __int128 span = __int128(domain.getShape()[position] - 1) * plan.getProjectionStride() + 1;
+            int64_t capacity = source.getShape()[0];
+            bool bounded = span > 0 && span <= capacity;
+            for (int64_t offset : window.getWindowOffsets()) {
+              if (!bounded || offset < 0 || offset > capacity - span) { bounded = false; break; }
+              bounded &= llvm::APSInt::compareValues(base->maximum,
+                  llvm::APSInt(APInt(64, capacity - static_cast<int64_t>(span) - offset), true)) <= 0;
+            }
+            if (bounded) return true;
+          }
+        }
         if (!producer || visiting.size() >= 128 || !visiting.insert(value).second ||
             !(isDensePointwise(producer) || isa<riscv::ConvertLayoutOp, riscv::RVVAxisBroadcastOp,
                  riscv::ExtractOp, riscv::LookupOp, riscv::RVVIndexedEntryLoadOp,
                  riscv::RegisterMaterializeOp, riscv::RVVWidenAddOp,
-                 riscv::RVVWidenDotOp, riscv::ReduceOp>(producer))) return false;
+                 riscv::RVVWidenDotOp, riscv::ReduceOp>(producer))) {
+          if (producer)
+            failureReason += " at " + producer->getName().getStringRef().str() +
+                " on axis " + std::to_string(axis);
+          return false;
+        }
         bool supplied = false, full = true;
         for (Value operand : producer->getOperands()) {
           auto input = dyn_cast<riscv::ValueType>(operand.getType());
