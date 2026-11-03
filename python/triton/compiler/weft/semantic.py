@@ -606,6 +606,20 @@ class WeftSemantic:
     def _declare_encoding(self, definition: EncodingDefinition) -> _EncodingInfo:
         if definition.__name__ in self._declared_encodings:
             return self._declared_encodings[definition.__name__]
+        if hasattr(definition, "schema"):
+            schema = definition.schema
+            from weft_core import dtypes
+            fields = tuple(_FieldInfo(field.name, getattr(dtypes, field.dtype), field.shape,
+                                      tuple(_LayoutInfo(**layout) for layout in field.layouts),
+                                      field.bit_offset, field.storage_bits) for field in schema.fields)
+            info = _EncodingInfo(definition, EncodingType(schema.name, "base", schema.name, ()),
+                                 schema.bit_order, schema.byte_order, schema.alignment, fields,
+                                 tuple(_PaddingInfo(*pad) for pad in schema.padding), schema.storage_bits, schema.elements)
+            self._declared_encodings[schema.name] = info
+            location = SourceLocation(definition.source.filename, definition.source.first_line, 0)
+            self._declarations.append(self.builder.operation("weft_kernel.encoding_decl", location,
+                                                              attributes=schema.attributes()))
+            return info
         tree = definition.tree
         classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
         if len(classes) != 1:

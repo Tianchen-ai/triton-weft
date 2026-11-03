@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import textwrap
 from dataclasses import dataclass
 
@@ -30,7 +31,19 @@ class EncodingDefinition:
         self.__qualname__ = declaration.__qualname__
         self.__module__ = declaration.__module__
 
+    @classmethod
+    def from_schema(cls, schema):
+        result = cls.__new__(cls)
+        result.schema = schema
+        result.__name__ = result.__qualname__ = schema.name
+        result.__module__ = "weft_core.formats"
+        result.source = DeclarationSource(__file__, 1, json.dumps(schema.to_dict(), sort_keys=True))
+        result.tree, result.bindings = None, {}
+        return result
+
     def dependencies(self):
+        if self.tree is None:
+            return ()
         names = {node.id for node in ast.walk(self.tree)
                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
         return tuple(self.bindings[name] for name in sorted(names) if name in self.bindings)
