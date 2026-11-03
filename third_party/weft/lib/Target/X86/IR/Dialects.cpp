@@ -15,6 +15,7 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 
 using namespace mlir;
 namespace wk = weft::kernel;
@@ -55,5 +56,6 @@ void weft::loadX86Dialects(MLIRContext &context) {
   context.loadDialect<wk::WEFTKernelDialect, arith::ArithDialect, func::FuncDialect,
                       scf::SCFDialect, cf::ControlFlowDialect, vector::VectorDialect,
                       math::MathDialect, LLVM::LLVMDialect, memref::MemRefDialect, bufferization::BufferizationDialect>();
+  registerBuiltinDialectTranslation(context);
   registerLLVMDialectTranslation(context);
 }

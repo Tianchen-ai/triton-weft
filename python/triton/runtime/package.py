@@ -8,11 +8,12 @@ from collections.abc import Mapping
 
 
 def sdk_prefix():
-    prefix = Path(__file__).parents[1] / "_C/weft"
+    from weft_core import sdk_path
+    prefix = sdk_path()
     for name in ("include/weft/runtime.h", "include/weft/runtime.hpp",
                  "lib/libweft_runtime.so", "lib/cmake/Weft/WeftConfig.cmake"):
         if not (prefix / name).is_file():
-            raise FileNotFoundError(f"the installed Triton native SDK is incomplete: {prefix / name}")
+            raise FileNotFoundError(f"the installed Weft native SDK is incomplete: {prefix / name}")
     return prefix
 
 

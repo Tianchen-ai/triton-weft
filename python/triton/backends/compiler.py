@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Union
 from types import ModuleType
+from weft_core.target import CPUTarget
 
 
 @dataclass(frozen=True)
@@ -21,22 +22,18 @@ class Language(Enum):
     WEFT = 2
 
 
-@dataclass(frozen=True)
-class CPUTarget:
-    backend: str
-    arch: str
-    march: str
-    abi: str
-    vlen_bits: int
-    matrix_extension: str = "none"
-
-
 class BaseBackend(metaclass=ABCMeta):
     supports_native_tensor_specialization = True
 
     def __init__(self, target: GPUTarget) -> None:
         self.target = target
         assert self.supports_target(target)
+
+    def create_context(self):
+        from triton._C.libtriton import ir
+        context = ir.context()
+        ir.load_dialects(context)
+        return context
 
     @staticmethod
     @abstractmethod

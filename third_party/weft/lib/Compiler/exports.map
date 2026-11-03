@@ -1,0 +1,4 @@
+WEFT_COMPILER_1 {
+  global: weft_compiler_*;
+  local: *;
+};

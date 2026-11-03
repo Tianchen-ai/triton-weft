@@ -5,7 +5,7 @@ device, borrows Tensor storage, or compiles a native library.
 """
 import inspect
 
-from triton._C.libtriton import ir, weft
+from weft_core import compiler as weft
 
 
 def describe(function, arguments, *, signature=None):
@@ -29,8 +29,7 @@ def describe(function, arguments, *, signature=None):
         signature = {name: WeftBackend.specialize_argument("weft", value, False, False, False)[0]
                      for name, value in arguments.items() if name in function.arg_names and name not in constants}
     source = ASTSource(function, signature, constexprs=constants)
-    context = ir.context()
-    weft.load_dialects(context)
+    context = weft.Context()
     from triton.backends.weft.compiler import WeftBackend
     module = source.make_ir(None, WeftOptions(), {}, WeftBackend.get_module_map(None), context)
     result = weft.interface(module)["interface"]

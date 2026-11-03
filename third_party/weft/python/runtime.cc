@@ -321,7 +321,7 @@ public:
       throw py::value_error("native launcher needs a complete SDK and kernel binding");
     threads = py::cast<int>(metadata.attr("num_cpu_threads"));
     if (threads < 0) throw py::value_error("num_cpu_threads must be nonnegative");
-    bufferType = py::module_::import("triton.runtime.weft.buffer").attr("Buffer");
+    bufferType = py::module_::import("weft_core.buffer").attr("Buffer");
     auto numbers = py::module_::import("numbers");
     integralType = numbers.attr("Integral");
     realType = numbers.attr("Real");
@@ -444,3 +444,5 @@ void init_weft_runtime(py::module_ &m) {
       .def(py::init<py::object, py::object, const py::dict &>())
       .def("__call__", &NativeLauncher::launch);
 }
+
+PYBIND11_MODULE(_runtime, m) { init_weft_runtime(m); }

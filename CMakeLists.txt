@@ -318,7 +318,6 @@ include_directories(${PROJECT_BINARY_DIR}/third_party) # Tablegen'd files
 
 add_subdirectory(include)
 add_subdirectory(lib)
-add_subdirectory(third_party/weft)
 
 # TODO: Figure out which target is sufficient to fix errors; triton is
 # apparently not enough. Currently set linking libstdc++fs for all targets
@@ -455,17 +454,10 @@ if(TRITON_BUILD_PYTHON_MODULE)
                   ${PYTHON_SRC_PATH}/passes.cc
                   ${PYTHON_SRC_PATH}/interpreter.cc
                   ${PYTHON_SRC_PATH}/llvm.cc
-                  ${PYTHON_SRC_PATH}/specialize.cc
-                  ${PYTHON_SRC_PATH}/weft.cc
-                  ${PYTHON_SRC_PATH}/weft_runtime.cc)
+                  ${PYTHON_SRC_PATH}/specialize.cc)
 
   # Link triton with its dependencies
-  target_link_libraries(triton PRIVATE ${TRITON_LIBRARIES} WeftRISCVTarget WeftX86Target)
-  target_include_directories(triton PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/weft/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/weft/runtime/include
-    ${CMAKE_CURRENT_BINARY_DIR}/third_party/weft/include)
-  add_dependencies(triton WeftRuntime)
+  target_link_libraries(triton PRIVATE ${TRITON_LIBRARIES})
 
   # Do not propagate libraries that libtriton depends on. This ensures that
   # targets that link against libtriton do not accidentally link in their own

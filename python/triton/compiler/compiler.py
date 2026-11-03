@@ -95,8 +95,16 @@ class IRSource:
         self.ext = path.suffix[1:]
         self.language = Language.TRITON
         self.src = path.read_text()
-        ir.load_dialects(context)
         backend.load_dialects(context)
+
+        if self.ext in ("weftir", "riscvir", "x86ir"):
+            from weft_core.compiler import parse_module, interface
+            self.language = Language.WEFT
+            self.module = parse_module(self.src, context)
+            description = interface(self.module)
+            self.name = description["symbol"]
+            self.signature = {}
+            return
 
         # We don't have a easy-to-use PTX parser that we can use, so keep that regex for now.
         # TODO - replace with a proper parser
@@ -139,13 +147,16 @@ def max_shared_mem(device):
 
 
 def parse(full_name, ext, context):
+    if ext in ("weftir", "riscvir", "x86ir"):
+        from weft_core.compiler import parse_module
+        return parse_module(Path(full_name).read_text(), context)
     if ext == "ttir" or ext == "ttgir":
         module = ir.parse_mlir_module(full_name, context)
         module.context = context
         return module
-    if ext == "llir" or ext == "ptx" or ext == "amdgcn":
+    if ext in ("llir", "ptx", "amdgcn", "c"):
         return Path(full_name).read_text()
-    if ext == "cubin" or ext == "hsaco":
+    if ext in ("cubin", "hsaco", "so"):
         return Path(full_name).read_bytes()
 
 
@@ -240,7 +251,7 @@ def compile(src, target=None, options=None, _env_vars=None):
     # create backend
     if ir_source:
         assert isinstance(src, str), "source must be either AST or a filepath"
-        context = ir.context()
+        context = backend.create_context()
         src = IRSource(src, context, backend)
 
     extra_options = src.parse_options()
@@ -309,8 +320,7 @@ def compile(src, target=None, options=None, _env_vars=None):
     # For IRSource, we have already grabbed the context + called both
     # ir.load_dialects and backend.load_dialects.
     if not isinstance(src, IRSource):
-        context = ir.context()
-        ir.load_dialects(context)
+        context = backend.create_context()
         backend.load_dialects(context)
 
     codegen_fns = backend.get_codegen_implementation(options)

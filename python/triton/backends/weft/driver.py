@@ -24,21 +24,23 @@ class WeftDriver(DriverBase):
         return "void*" if ty.startswith(("*", "view:")) else types[ty]
 
     def get_current_target(self):
-        return self._target_for_affinity(tuple(sorted(os.sched_getaffinity(0))), os.environ.get("TRITON_CPU_PROFILE"))
+        return self._target_for_affinity(tuple(sorted(os.sched_getaffinity(0))),
+                                         os.environ.get("WEFT_CPU_PROFILE", os.environ.get("TRITON_CPU_PROFILE")))
 
     @staticmethod
     @lru_cache(maxsize=32)
     def _target_for_affinity(affinity, profile):
         # Cache hardware facts for the discovered CPU set, not execution
         # permission. The SDK still checks each actual worker on every launch.
-        from triton._C.libtriton import weft
+        from weft_core import compiler as weft
         from triton.cpu import _execution_target
         return _execution_target(weft.native_target(), profile)
 
     def get_current_device(self):
         if platform.machine() not in ("riscv64", "x86_64"):
             raise RuntimeError("Weft CPU JIT execution requires RISC-V or x86-64 Linux; use an explicit cross target otherwise")
-        return ("weft:cpu", tuple(sorted(os.sched_getaffinity(0))), os.environ.get("TRITON_CPU_PROFILE"))
+        return ("weft:cpu", tuple(sorted(os.sched_getaffinity(0))),
+                os.environ.get("WEFT_CPU_PROFILE", os.environ.get("TRITON_CPU_PROFILE")))
 
     def get_current_stream(self, device):
         return None

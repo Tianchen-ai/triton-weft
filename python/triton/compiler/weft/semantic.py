@@ -410,10 +410,10 @@ class WeftSemantic:
             },
             regions=(body,),
         )
-        from triton._C.libtriton import weft
+        from weft_core import compiler as weft
+        from .types import emit_type
         module = weft.create_module(self.generator.context, self.definition.__module__,
-                                    tuple(self._declarations) + (kernel,))
-        module.context = self.generator.context
+                                    tuple(self._declarations) + (kernel,), type_encoder=emit_type)
         self.generator.module = module
         return module
 

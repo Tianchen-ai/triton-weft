@@ -1,53 +1,9 @@
-from dataclasses import asdict, dataclass, field, fields
-import hashlib
-import json
+from dataclasses import asdict, fields
 
-from triton._C.libtriton import weft
+from weft_core import compiler as weft
+from weft_core.options import CPUOptions, X86Options, WeftOptions
 from triton.backends.compiler import BaseBackend, CPUTarget, Language
-
-
-@dataclass(frozen=True)
-class CPUOptions:
-    # Shared builtin semantics, independent of CPU scheduling and physical tuning.
-    allowed_dot_input_precisions = ("ieee",)
-    default_dot_input_precision = "ieee"
-    sanitize_overflow = False
-    meta: dict = field(default_factory=dict)
-    num_cpu_threads: int = 0
-    pipeline_depth: int = 1
-    toolchain: dict = field(default_factory=dict)
-    debug: bool = False
-    instrumentation_mode: str = ""
-
-    def hash(self):
-        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()
-
-
-@dataclass(frozen=True)
-class X86Options(CPUOptions):
-    tune_cpu: str = ""
-
-
-@dataclass(frozen=True)
-class WeftOptions(CPUOptions):
-    lmul_eighths: int = 8
-    native_loop_alignment: int = 32
-    unroll: int = 1
-    scalar_load_prime: int = 0
-    pointwise_issue_copies: int = 1
-    contraction_column_copies: int = 4
-    panel_transfer_fields: int = 4
-    panel_transfer_strategy: str = "issue-work"
-    contraction_panel_k: int = 128
-    contraction_k_steps: int = 4
-    partial_combine_policy: str = "independent-multilevel"
-    record_axis_policy: str = "within-record"
-    max_widening_combine_groups: int = 2
-    matrix_extension: str = "auto"
-    required_extensions: tuple = ()
-    local_tile_strategy: str = "target-default"
-    private_stack_bytes: int = 65536
-    data_cache: dict | None = None
+from .diagnostics import compiler_call
 
 
 class WeftBackend(BaseBackend):
@@ -59,7 +15,7 @@ class WeftBackend(BaseBackend):
         return isinstance(target, CPUTarget) and target.backend == "weft" and target.arch in ("riscv64", "x86_64")
 
     def hash(self):
-        return str(self.target)
+        return str((self.target, weft.identity()))
 
     @staticmethod
     def merge_options(options, source_options):
@@ -114,7 +70,11 @@ class WeftBackend(BaseBackend):
         return result
 
     def load_dialects(self, context):
-        weft.load_dialects(context)
+        if not isinstance(context, weft.Context):
+            raise TypeError("Weft compilation requires its owned core Context")
+
+    def create_context(self):
+        return weft.Context()
 
     def get_module_map(self):
         from triton.language.weft import libdevice
@@ -161,20 +121,20 @@ class WeftBackend(BaseBackend):
 
         def physical(module, metadata):
             bindings = asdict(options)
+            metadata["interface"] = weft.interface(module)
             interface = metadata["interface"]["interface"]
             names = set(interface["source_parameters"]) | set(interface["shape_parameters"])
             bindings["meta"] = {name: value for name, value in options.meta.items() if name in names}
             bindings.update(march=self.target.march, abi=self.target.abi, vlen_bits=self.target.vlen_bits)
-            lower = weft.lower_x86 if self.target.arch == "x86_64" else weft.lower
-            lowered, report = lower(module, bindings)
-            lowered.context = module.context
+            bindings["arch"] = self.target.arch
+            lowered, report = compiler_call(weft.lower, module, bindings)
             metadata["compilation"] = report
             metadata["source_bindings"] = bindings["meta"]
             return lowered
 
         def emit(module, metadata):
             x86 = self.target.arch == "x86_64"
-            result = weft.emit_x86(module) if x86 else weft.emit(module)
+            result = compiler_call(weft.emit, module)
             if x86:
                 result["kernels"] = [result["kernel"]]
             if len(result["kernels"]) != 1:
@@ -187,8 +147,8 @@ class WeftBackend(BaseBackend):
             return result["llvm_ir"] if x86 else result["intrinsic_c"]
 
         def native(source, metadata):
-            from .toolchain import Toolchain
-            return Toolchain(**options.toolchain).compile(source, metadata, self.target)
+            from .toolchain import Toolchain, compile_native
+            return compile_native(Toolchain(**options.toolchain), source, metadata, self.target)
 
         stages["weftir"] = canonical
         stages["x86ir" if self.target.arch == "x86_64" else "riscvir"] = physical

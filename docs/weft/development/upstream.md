@@ -15,7 +15,7 @@ git diff v3.8.0 -- CMakeLists.txt setup.py python/src
 | `compiler/code_generator.py`, `compiler/weft/` | Shared Python AST, scopes and SSA; Encoding/Level analysis and Canonical builder |
 | `runtime/jit.py`, `runtime/autotuner.py` | Per-model target selection, specialization, common cache and author configuration tuning |
 | `backends/weft/` | Target options, physical pipelines, toolchain stage and CPU driver |
-| `python/src/weft.cc` | In-process Canonical/physical bindings and native capability query |
+| `third_party/weft/lib/Compiler`, `third_party/weft/python/weft_core` | Independent compiler C ABI, owned contexts/modules, shared type schema, capabilities and native launcher |
 | `third_party/weft/lib/Dialect/Kernel/IR` | Canonical types, Encoding, control, memory and numerical contracts, split by semantic responsibility |
 | `third_party/weft/lib/Dialect/Kernel/Transforms` | Source specialization before either target lowering |
 | `third_party/weft/lib/Analysis` | Shared integer, logical-axis, index, storage, lifetime and dependence analysis |
@@ -24,7 +24,7 @@ git diff v3.8.0 -- CMakeLists.txt setup.py python/src
 | `third_party/weft/lib/Runtime` | Native ABI, library lifetime and worker capability checks |
 | `python/triton/integrations`, `integrations/llama.cpp` | Optional application contracts and thin GGML hooks |
 | `cpu.py`, `tools/cpu.py` | Target construction, homogeneous CPU discovery and explicit process launch |
-| `CMakeLists.txt`, `setup.py` | One LLVM/MLIR SDK, one `triton` distribution and bundled native toolchain |
+| `CMakeLists.txt`, `setup.py`, `third_party/weft/pyproject.toml` | One LLVM/MLIR SDK; the `triton` frontend depends on the same `weft-core` SDK used by other embedding frontends |
 
 The normal GPU routes and upstream tests remain in the fork. Weft verification,
 optimized kernel programs, baseline recipes and performance outputs live in
