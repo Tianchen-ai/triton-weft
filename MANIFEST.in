@@ -14,6 +14,7 @@ graft test
 graft unittest
 graft third_party
 include CMakeLists.txt
+include README.md README.zh-CN.md LICENSE CONTRIBUTING.md
 include Makefile
 include python/build_helpers.py
 include python/requirements.txt
