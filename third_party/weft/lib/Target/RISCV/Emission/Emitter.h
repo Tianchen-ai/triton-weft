@@ -776,7 +776,8 @@ private:
   mlir::LogicalResult compileFor(mlir::scf::ForOp operation);
   mlir::LogicalResult compileIf(mlir::scf::IfOp operation);
   mlir::LogicalResult compileWhile(mlir::scf::WhileOp operation);
-  mlir::LogicalResult compileMemoryView(riscv::MemoryViewOp operation);
+  mlir::LogicalResult compileMemoryView(mlir::Operation *operation, mlir::Value base,
+      mlir::ValueRange extents, mlir::ValueRange strides, mlir::ValueRange origins, mlir::Value result);
   mlir::LogicalResult compileStorageDisjoint(riscv::StorageDisjointOp operation);
   mlir::LogicalResult compileDenseElementwiseAlias(riscv::DenseElementwiseAliasOp operation);
   mlir::LogicalResult compileDenseInjective(riscv::DenseInjectiveOp operation);

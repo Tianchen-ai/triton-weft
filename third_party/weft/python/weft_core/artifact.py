@@ -65,6 +65,11 @@ class NativeArtifact:
 
     def write_metadata(self, directory):
         root = Path(directory)
+        for source in self.directory.glob("kernel.*"):
+            if source.suffix in (".weftir", ".riscvir", ".x86ir", ".llir", ".c"):
+                destination = root / source.name
+                if source.resolve() != destination.resolve():
+                    shutil.copyfile(source, destination)
         values = dict(vars(self.metadata))
         values["target"] = asdict(self.metadata.target)
         values["runtime_files"] = {}
@@ -83,6 +88,21 @@ class NativeArtifact:
         description["grid"] = {**manifest(self.metadata), "launcher": "triton_weft_grid"}
         (root / "manifest.json").write_text(json.dumps(description, indent=2))
         (root / "kernel.h").write_text(header(self.metadata))
+
+    @staticmethod
+    def required_files(directory):
+        root = Path(directory)
+        path = root / "kernel.native.json"
+        if not path.is_file():
+            return [path]
+        metadata = json.loads(path.read_text())
+        dependencies = []
+        for relative in metadata["runtime_files"].values():
+            dependency = (root / relative).resolve()
+            if not dependency.is_relative_to(root.resolve()):
+                raise ValueError(f"native runtime dependency escapes the artifact: {relative}")
+            dependencies.append(dependency)
+        return [path, *dependencies]
 
     def export(self, directory):
         destination = Path(directory).absolute()

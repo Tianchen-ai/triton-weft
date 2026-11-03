@@ -3636,6 +3636,20 @@ mlir::LogicalResult StagedViewOp::verify() {
   return mlir::success();
 }
 
+mlir::LogicalResult BindViewOp::verify() {
+  const int64_t rank = getResult().getType().getShape().size();
+  if (getBase().getType().getAddressClass() != "pointer" ||
+      static_cast<int64_t>(getExtents().size()) != rank ||
+      static_cast<int64_t>(getStrides().size()) != rank ||
+      static_cast<int64_t>(getOrigins().size()) != rank)
+    return emitOpError("bind_view requires a pointer and complete logical descriptor coordinates");
+  if (getResult().getType().getAccess() != getBase().getType().getAccess() ||
+      getResult().getType().getAliasSet() != getBase().getType().getAliasSet() ||
+      getResult().getType().getAlignment() > getBase().getType().getAlignment())
+    return emitOpError("bind_view preserves source access and alias and cannot strengthen pointer alignment");
+  return mlir::success();
+}
+
 mlir::LogicalResult MemoryViewOp::verify() {
   const int64_t rank = getBase().getType().getShape().size();
   if (getBase().getType() != getResult().getType() ||

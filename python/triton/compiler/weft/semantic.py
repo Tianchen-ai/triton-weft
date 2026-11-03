@@ -4,8 +4,9 @@ import ast
 import inspect
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Sequence
+from weft_core.encoding import Encoding as EncodingSchema, Field as EncodingField
 
 from triton.language.weft.declarations import (
     DerivedEncodingDefinition,
@@ -81,27 +82,6 @@ def _i64_array(values: Sequence[int]) -> str:
 
 def _type_array(values: Sequence[ValueType]) -> str:
     return "[" + ", ".join(emit_type(value) for value in values) + "]"
-
-
-def _layout_array(fields: Sequence[_FieldInfo]) -> str:
-    rendered: list[str] = []
-    for field in fields:
-        atoms: list[str] = []
-        for layout in field.layouts:
-            values = [f"kind = {_string(layout.kind)}"]
-            if layout.size:
-                values.append(f"size = {layout.size} : i64")
-            if layout.order:
-                values.append(f"order = {_string(layout.order)}")
-            if layout.fields:
-                values.append(f"fields = {layout.fields} : i64")
-            if layout.low_bits:
-                values.append(f"low_bits = {layout.low_bits} : i64")
-            if layout.role >= 0:
-                values.append(f"role = {layout.role} : i64")
-            atoms.append("{" + ", ".join(values) + "}")
-        rendered.append("[" + ", ".join(atoms) + "]")
-    return "[" + ", ".join(rendered) + "]"
 
 
 class _AssignedNames(ast.NodeVisitor):
@@ -836,39 +816,18 @@ class WeftSemantic:
         )
         self._declared_encodings[definition.__name__] = info
         location = SourceLocation(definition.source.filename, definition.source.first_line, 0)
+        schema = EncodingSchema(
+            definition.__name__, bit_order, byte_order, alignment, elements,
+            tuple(EncodingField(field.name, field.dtype.name, field.shape,
+                                tuple(asdict(layout) for layout in field.layouts),
+                                field.bit_offset, field.storage_bits) for field in fields),
+            tuple((pad.bit_offset, pad.storage_bits, pad.fill) for pad in paddings), offset,
+        )
         self._declarations.append(
             self.builder.operation(
                 "weft_kernel.encoding_decl",
                 location,
-                attributes={
-                    "sym_name": _string(definition.__name__),
-                    "kind": _string("base"),
-                    "layout_identity": _string(definition.__name__),
-                    "bit_order": _string(bit_order),
-                    "byte_order": _string(byte_order),
-                    "alignment": str(alignment),
-                    "elements": str(elements),
-                    "storage_bits": str(offset),
-                    "field_names": _strings([field.name for field in fields]),
-                    "field_types": _type_array([ScalarType(field.dtype) for field in fields]),
-                    "field_shapes": "["
-                    + ", ".join(_i64_array(field.shape) for field in fields)
-                    + "]",
-                    "field_layouts": _layout_array(fields),
-                    "field_bit_offsets": _i64_array([field.bit_offset for field in fields]),
-                    "field_storage_bits": _i64_array([field.storage_bits for field in fields]),
-                    "padding": _i64_array(
-                        [
-                            component
-                            for padding in paddings
-                            for component in (
-                                padding.bit_offset,
-                                padding.storage_bits,
-                                padding.fill,
-                            )
-                        ]
-                    ),
-                },
+                attributes=schema.attributes(),
             )
         )
         return info

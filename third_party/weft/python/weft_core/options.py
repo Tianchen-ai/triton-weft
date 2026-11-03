@@ -45,4 +45,3 @@ class WeftOptions(CPUOptions):
     local_tile_strategy: str = "target-default"
     private_stack_bytes: int = 65536
     data_cache: dict | None = None
-

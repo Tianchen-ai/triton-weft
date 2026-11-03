@@ -90,6 +90,7 @@ bool incomingStorage(Value value, llvm::SmallVectorImpl<Value> &pending) {
 Value borrowedStorage(Value value) {
   if (auto op = value.getDefiningOp<PointerCastOp>()) return op.getInput();
   if (auto op = value.getDefiningOp<MemoryViewOp>()) return op.getBase();
+  if (auto op = value.getDefiningOp<BindViewOp>()) return op.getBase();
   if (auto op = value.getDefiningOp<StagedViewOp>()) return op.getSource();
   if (auto op = value.getDefiningOp<FieldViewOp>()) return op.getField();
   if (auto op = value.getDefiningOp<SliceOp>()) return op.getBase();
@@ -218,7 +219,7 @@ bool weft::riscv::isCoordinateIdentity(Operation *operation) {
 
 bool weft::riscv::isAddressableDenseDescriptor(Value source) {
   for (unsigned depth = 0; depth < 32; ++depth) {
-    if (source.getDefiningOp<MemoryViewOp>() || source.getDefiningOp<LocalViewOp>() ||
+    if (source.getDefiningOp<MemoryViewOp>() || source.getDefiningOp<BindViewOp>() || source.getDefiningOp<LocalViewOp>() ||
         source.getDefiningOp<FieldViewOp>() || source.getDefiningOp<LinearViewOp>() ||
         source.getDefiningOp<DenseSnapshotOp>())
       return true;
@@ -426,7 +427,7 @@ bool weft::riscv::isInnermostDenseAxis(Value memory, int64_t axis) {
     else if (auto rename = memory.getDefiningOp<ReaxisOp>()) {
       axis = rename.getBase().getType().getAxisIds()[position];
       memory = rename.getBase();
-    } else return isa<BlockArgument>(memory) || memory.getDefiningOp<MemoryViewOp>() ||
+    } else return isa<BlockArgument>(memory) || memory.getDefiningOp<MemoryViewOp>() || memory.getDefiningOp<BindViewOp>() ||
         memory.getDefiningOp<LocalViewOp>();
   }
   return false;

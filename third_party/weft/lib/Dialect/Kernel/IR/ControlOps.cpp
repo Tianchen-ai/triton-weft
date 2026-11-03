@@ -138,6 +138,10 @@ mlir::LogicalResult KernelOp::verify() {
 
   auto rootArgument = [&](mlir::Value value) -> std::optional<unsigned> {
     while (mlir::Operation *producer = value.getDefiningOp()) {
+      if (auto view = mlir::dyn_cast<BindViewOp>(producer)) {
+        value = view.getBase();
+        continue;
+      }
       if (auto slice = mlir::dyn_cast<SliceOp>(producer)) {
         value = slice.getBase();
         continue;

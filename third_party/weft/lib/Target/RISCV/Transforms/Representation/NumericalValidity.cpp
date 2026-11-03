@@ -819,6 +819,15 @@ public:
             extract.getSelectorsAttr(), unassignedAccess(b), unselectedLeaf(b));
         if (extract.getResult().getType().isIntOrIndexOrFloat())
           extract->setAttr("weft.riscv.validity_lowered", b.getUnitAttr());
+      } else if (auto update = dyn_cast<riscv::UpdateOp>(op)) {
+        Value active = knownOrFull(update.getValue(), loc);
+        for (Value index : update.getIndices())
+          if (Value valid = masks.lookup(index))
+            active = conjunction(active, valid, update.getValue().getType(), loc);
+        masks[update.getResult()] = riscv::UpdateOp::create(b, loc,
+            cast<riscv::ValueType>(predicateType(b, update.getResult().getType())),
+            knownOrFull(update.getInput(), loc), active, update.getIndices(),
+            update.getSelectorsAttr(), unselectedLeaf(b));
       } else if (auto reshape = dyn_cast<riscv::ReshapeOp>(op)) {
         masks[reshape.getResult()] = riscv::ReshapeOp::create(b, loc,
             cast<riscv::ValueType>(predicateType(b, reshape.getResult().getType())), masks.lookup(reshape.getInput()),

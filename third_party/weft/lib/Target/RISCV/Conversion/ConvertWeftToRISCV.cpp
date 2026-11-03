@@ -1037,6 +1037,33 @@ private:
       attrs.emplace_back(builder.getStringAttr("lifetime_end_domain_id"),
                          builder.getI64IntegerAttr(currentOwnerDomainId));
       targetName = riscv::MaterializeOp::getOperationName();
+    } else if (auto view = mlir::dyn_cast<kernel::BindViewOp>(source)) {
+      auto base = mlir::cast<riscv::MemDescType>(mapped(view.getBase()).getType());
+      auto result = mlir::cast<riscv::MemDescType>(results.front());
+      llvm::SmallVector<int64_t> declaredStrides(result.getStrides().asArrayRef());
+      if (!view.getStrides().empty())
+        declaredStrides.assign(view.getStrides().size(), -1);
+      result = riscv::MemDescType::get(builder.getContext(), result.getEncoding(), result.getShape(),
+          result.getAxisIds(), builder.getDenseI64ArrayAttr(declaredStrides), result.getOrigins(), base.getAlignment(), "slice",
+          base.getAccess(), base.getAliasSet(), result.getLayoutIdentity(), result.getStorageBits(),
+          result.getElements(), result.getInterleaveRows());
+      llvm::SmallVector<mlir::Value> extents, strides, origins;
+      for (auto extent : view.getExtents()) extents.push_back(mapped(extent));
+      if (view.getStrides().empty()) {
+        auto running = mlir::arith::ConstantIndexOp::create(builder, source->getLoc(), 1).getResult();
+        strides.resize(extents.size());
+        for (int64_t i = extents.size() - 1; i >= 0; --i) {
+          strides[i] = running;
+          if (i) running = mlir::arith::MulIOp::create(builder, source->getLoc(), running, extents[i]);
+        }
+      } else for (auto stride : view.getStrides()) strides.push_back(mapped(stride));
+      for (size_t i = 0; i < extents.size(); ++i)
+        origins.push_back(mlir::arith::ConstantIndexOp::create(builder, source->getLoc(), 0));
+      auto bound = riscv::BindViewOp::create(builder, source->getLoc(), result, mapped(view.getBase()),
+                                            extents, strides, origins);
+      riscv_internal::copyOrigin(source, bound);
+      mapping.map(view.getResult(), bound.getResult());
+      return mlir::success();
     } else if (auto slice = mlir::dyn_cast<kernel::SliceOp>(source)) {
       auto base = mlir::cast<riscv::MemDescType>(operands.front().getType());
       auto result = mlir::cast<riscv::MemDescType>(results.front());

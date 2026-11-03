@@ -36,4 +36,3 @@ def target_capabilities(target: CPUTarget, *, matrix_extension=None):
 
 def native_capabilities():
     return compiler.native_target()
-

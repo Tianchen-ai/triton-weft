@@ -96,7 +96,7 @@ public:
       for (unsigned i = 0; i < captures.size(); ++i) {
         Value value = captures[i];
         if (auto definition = value.getDefiningOp(); definition &&
-            !isa<riscv::MemoryViewOp, riscv::PointerCastOp, riscv::LocalViewOp>(definition) &&
+            !isa<riscv::MemoryViewOp, riscv::BindViewOp, riscv::PointerCastOp, riscv::LocalViewOp>(definition) &&
             (isa<riscv::MemDescType, riscv::DomainType, riscv::PointType>(value.getType()) ||
              isa<riscv::FieldOp>(definition)))
           captures.insert(definition->operand_begin(), definition->operand_end());

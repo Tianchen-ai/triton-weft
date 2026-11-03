@@ -22,6 +22,21 @@ mlir::LogicalResult PointerCastOp::verify() {
   return mlir::success();
 }
 
+mlir::LogicalResult BindViewOp::verify() {
+  auto result = getResult().getType();
+  if (getExtents().size() != result.getShape().size() ||
+      (!getStrides().empty() && getStrides().size() != getExtents().size()))
+    return emitOpError("bind_view requires one extent and optional stride per logical axis");
+  auto encoding = mlir::cast<EncodingType>(result.getEncoding());
+  if (!getStrides().empty() && encoding.getKind() != "dense")
+    return emitOpError("packed bind_view uses its declared contiguous storage mapping");
+  for (auto [shape, extent] : llvm::zip(result.getShape().asArrayRef(), getExtents()))
+    if (auto constant = extent.getDefiningOp<mlir::arith::ConstantIndexOp>();
+        constant && (constant.value() < 0 || (shape > 0 && shape != constant.value())))
+      return emitOpError("bind_view runtime extent disagrees with its logical shape");
+  return mlir::success();
+}
+
 mlir::LogicalResult PointerLoadOp::verify() {
   if (getOther().getType() != getResult().getType())
     return emitOpError("masked load fill must have the result type");

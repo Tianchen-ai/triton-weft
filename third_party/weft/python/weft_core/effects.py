@@ -24,7 +24,7 @@ def argument_accesses(body: Region) -> list[set[str]]:
     def walk(block):
         for operation in block.operations:
             name, args, results, regions = operation.name, operation.operands, operation.results, operation.regions
-            if name in ("weft_kernel.slice", "weft_kernel.subview", "weft_kernel.field", "weft_kernel.pointer_cast"):
+            if name in ("weft_kernel.slice", "weft_kernel.subview", "weft_kernel.field", "weft_kernel.pointer_cast", "weft_kernel.bind_view"):
                 connect(results, args[:1])
             elif name == "scf.if":
                 for region in regions:

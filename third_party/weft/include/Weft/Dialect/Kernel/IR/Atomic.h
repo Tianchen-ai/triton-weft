@@ -18,7 +18,8 @@ inline mlir::LogicalResult verifyAtomicContract(mlir::Operation *op, mlir::Type 
   if ((integral && !integer) || (kind == "fadd" && !floating) ||
       (!integral && kind != "fadd" && kind != "xchg" && kind != "cas"))
     return op->emitOpError("atomic operation and storage dtype disagree");
-  if (ordering != "relaxed" && ordering != "acquire" && ordering != "release" && ordering != "acq_rel")
+  if (ordering != "relaxed" && ordering != "acquire" && ordering != "release" &&
+      ordering != "acq_rel" && ordering != "seq_cst")
     return op->emitOpError("unsupported atomic ordering");
   if (scope != "cta" && scope != "gpu" && scope != "sys")
     return op->emitOpError("unsupported atomic synchronization scope");

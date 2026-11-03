@@ -2002,7 +2002,8 @@ private:
     if (op.getKind() == "cas") logical = arith::AndIOp::create(b, loc, logical, validAs(op.getCompare(), domain, loc));
     auto order = op.getOrdering() == "relaxed" ? LLVM::AtomicOrdering::monotonic :
         op.getOrdering() == "acquire" ? LLVM::AtomicOrdering::acquire :
-        op.getOrdering() == "release" ? LLVM::AtomicOrdering::release : LLVM::AtomicOrdering::acq_rel;
+        op.getOrdering() == "release" ? LLVM::AtomicOrdering::release :
+        op.getOrdering() == "seq_cst" ? LLVM::AtomicOrdering::seq_cst : LLVM::AtomicOrdering::acq_rel;
     auto lane = [&](Value offset, Value mask, Value update, Value comparison) -> Value {
       auto branch = scf::IfOp::create(b, loc, TypeRange{elem}, mask, true);
       OpBuilder::InsertionGuard guard(b);
@@ -4808,6 +4809,35 @@ private:
       Value value = dimensions.lookup(symbol.getName());
       if (!value || symbol.getKind() != "shape") return unsupported(op, "unbound x86 entry shape symbol");
       values.map(symbol.getResult(), value); return success();
+    }
+    if (auto view = dyn_cast<wk::BindViewOp>(op)) {
+      Memory result;
+      result.base = mapped(view.getBase());
+      result.offset = indexConstant(loc, 0);
+      result.guard = constant(loc, b.getI1Type(), b.getBoolAttr(true));
+      for (auto extent : view.getExtents()) {
+        result.extents.push_back(mapped(extent));
+        result.origins.push_back(result.offset);
+      }
+      result.limits = result.extents;
+      if (view.getStrides().empty()) {
+        result.strides.resize(result.extents.size());
+        Value running = indexConstant(loc, 1);
+        for (int64_t i = result.extents.size() - 1; i >= 0; --i) {
+          result.strides[i] = running;
+          if (i) running = b.createOrFold<arith::MulIOp>(loc, running, result.extents[i]);
+        }
+      } else for (auto stride : view.getStrides()) result.strides.push_back(mapped(stride));
+      initializeStorage(result, loc);
+      if (auto encoding = packedType(view.getResult().getType())) {
+        auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
+        if (failed(layout)) return view.emitError("bound View has no closed Encoding storage mapping");
+        result.recordBytes = indexConstant(loc, layout->bytes());
+        result.recordColumns = arith::DivUIOp::create(b, loc, result.extents.back(), indexConstant(loc, layout->elements()));
+        result.interleaveRows = indexConstant(loc, layout->rows);
+      }
+      memories[view.getResult()] = std::move(result);
+      return success();
     }
     if (auto region = dyn_cast<wk::SliceOp>(op)) return slice(region);
     if (auto projection = dyn_cast<wk::FieldOp>(op)) return field(projection);

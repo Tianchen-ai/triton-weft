@@ -277,6 +277,14 @@ def WeftKernel_PointerCastOp : WeftKernel_Op<"pointer_cast", [Pure]> {
   let hasVerifier = 1;
 }
 
+def WeftKernel_BindViewOp : WeftKernel_Op<"bind_view", [Pure, AttrSizedOperandSegments]> {
+  let summary = "Author-declared logical storage view of an existing pointer";
+  let arguments = (ins WeftKernel_PointerType:$base,
+                       Variadic<Index>:$extents, Variadic<Index>:$strides);
+  let results = (outs WeftKernel_ViewType:$result);
+  let hasVerifier = 1;
+}
+
 def WeftKernel_PointerLoadOp : WeftKernel_Op<"pointer_load", [MemoryEffects<[MemRead]>]> {
   let arguments = (ins WeftKernel_PointerType:$base, AnyType:$offsets,
                        AnyType:$mask, AnyType:$other);

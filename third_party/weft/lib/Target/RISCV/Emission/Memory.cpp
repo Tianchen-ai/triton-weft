@@ -655,14 +655,13 @@ mlir::FailureOr<Binding> Emitter::materializeNumeric(mlir::Value value,
   return binding;
 }
 
-mlir::LogicalResult Emitter::compileMemoryView(riscv::MemoryViewOp operation) {
-  Binding base = bindings.lookup(operation.getBase());
+mlir::LogicalResult Emitter::compileMemoryView(mlir::Operation *operation, mlir::Value source,
+    mlir::ValueRange extents, mlir::ValueRange strides, mlir::ValueRange origins, mlir::Value result) {
+  Binding base = bindings.lookup(source);
   if (base.kind != Binding::Kind::Memory)
     return fail(operation, "memory view base has no physical pointer binding");
-  const size_t rank = operation.getResult().getType().getShape().size();
-  if (operation.getExtents().size() != rank ||
-      operation.getStrides().size() != rank ||
-      operation.getOrigins().size() != rank)
+  const size_t rank = mlir::cast<riscv::MemDescType>(result.getType()).getShape().size();
+  if (extents.size() != rank || strides.size() != rank || origins.size() != rank)
     return fail(operation, "memory view runtime metadata rank is incomplete");
   base.memory.extents.clear();
   base.memory.strides.clear();
@@ -677,16 +676,28 @@ mlir::LogicalResult Emitter::compileMemoryView(riscv::MemoryViewOp operation) {
     }
     return true;
   };
-  if (!appendScalars(operation.getExtents(), base.memory.extents) ||
-      !appendScalars(operation.getStrides(), base.memory.strides) ||
-      !appendScalars(operation.getOrigins(), base.memory.origins))
+  if (!appendScalars(extents, base.memory.extents) ||
+      !appendScalars(strides, base.memory.strides) ||
+      !appendScalars(origins, base.memory.origins))
     return fail(operation,
                 "memory view extent, stride, and origin must be explicit index SSA values");
-  auto descriptor = operation.getResult().getType();
+  auto descriptor = mlir::cast<riscv::MemDescType>(result.getType());
+  if (mlir::isa<riscv::BindViewOp>(operation)) {
+    base.memory.encoding = descriptor.getEncoding();
+    base.memory.axes.assign(descriptor.getAxisIds().asArrayRef().begin(),
+                            descriptor.getAxisIds().asArrayRef().end());
+    auto element = denseElementType(descriptor.getEncoding());
+    base.memory.elementType = element ? *element : mlir::Type();
+    auto pointee = base.memory.elementType ? scalarCType(base.memory.elementType)
+                                           : std::optional<std::string>("uint8_t");
+    if (!pointee) return fail(operation, "bound View has no storage pointer element spelling");
+    base.memory.name = "((" + std::string(base.memory.isConst ? "const " : "") +
+                       *pointee + " *)(" + base.memory.name + "))";
+  }
   base.memory.recordBytes = descriptor.getStorageBits() / 8;
   base.memory.logicalElements = descriptor.getElements();
   base.memory.interleaveRows = descriptor.getInterleaveRows();
-  bindings[operation.getResult()] = std::move(base);
+  bindings[result] = std::move(base);
   return mlir::success();
 }
 

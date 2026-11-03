@@ -1262,6 +1262,16 @@ def WeftRISCV_MemoryViewOp
   let hasVerifier = 1;
 }
 
+def WeftRISCV_BindViewOp
+    : WeftRISCV_TerminalOp<"bind_view", [Pure, AttrSizedOperandSegments]> {
+  let arguments = (ins WeftRISCV_MemDescType:$base,
+                       Variadic<Index>:$extents,
+                       Variadic<Index>:$strides,
+                       Variadic<Index>:$origins);
+  let results = (outs WeftRISCV_MemDescType:$result);
+  let hasVerifier = 1;
+}
+
 def WeftRISCV_FieldViewOp : WeftRISCV_TerminalOp<"field_view", [Pure]> {
   let arguments = (ins WeftRISCV_MemDescType:$field, Index:$origin);
   let results = (outs WeftRISCV_MemDescType:$result);

@@ -26,6 +26,7 @@ class Bounds {
   FailureOr<Value> origin(Value view, unsigned axis, unsigned depth) {
     if (depth > 64) return failure();
     if (auto root = view.getDefiningOp<riscv::MemoryViewOp>()) return root.getOrigins()[axis];
+    if (auto root = view.getDefiningOp<riscv::BindViewOp>()) return root.getOrigins()[axis];
     if (view.getDefiningOp<riscv::LocalViewOp>()) return constant(0);
     if (auto subview = view.getDefiningOp<riscv::SubviewOp>()) return origin(subview.getBase(), axis, depth + 1);
     if (auto reaxis = view.getDefiningOp<riscv::ReaxisOp>()) return origin(reaxis.getBase(), axis, depth + 1);
@@ -67,7 +68,7 @@ public:
       Value extent = riscv::ExtentOp::create(b, loc, b.getIndexType(), view, axis);
       valid = both(valid, arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ult, logical, extent));
     }
-    if (isa_and_nonnull<riscv::MemoryViewOp, riscv::LocalViewOp>(view.getDefiningOp())) return valid;
+    if (isa_and_nonnull<riscv::MemoryViewOp, riscv::BindViewOp, riscv::LocalViewOp>(view.getDefiningOp())) return valid;
     Value parent;
     SmallVector<Value> coordinates(point);
     SmallVector<bool> absoluteAxes(point.size(), false);

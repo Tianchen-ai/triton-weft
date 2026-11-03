@@ -36,6 +36,7 @@ public:
       return IntegerAttr::get(IndexType::get(memory.getContext()), value);
     };
     if (auto view = memory.getDefiningOp<MemoryViewOp>()) return view.getExtents()[axis];
+    if (auto view = memory.getDefiningOp<BindViewOp>()) return view.getExtents()[axis];
     if (auto view = memory.getDefiningOp<LocalViewOp>()) return view.getExtents()[axis];
     if (auto subview = memory.getDefiningOp<SubviewOp>()) {
       int64_t size = subview.getExtents()[axis];

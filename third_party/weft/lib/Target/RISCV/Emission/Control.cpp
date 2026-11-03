@@ -202,7 +202,9 @@ mlir::LogicalResult Emitter::compileOperation(mlir::Operation &operation) {
   if (auto loop = mlir::dyn_cast<mlir::scf::WhileOp>(operation))
     return compileWhile(loop);
   if (auto view = mlir::dyn_cast<riscv::MemoryViewOp>(operation))
-    return compileMemoryView(view);
+    return compileMemoryView(view, view.getBase(), view.getExtents(), view.getStrides(), view.getOrigins(), view.getResult());
+  if (auto view = mlir::dyn_cast<riscv::BindViewOp>(operation))
+    return compileMemoryView(view, view.getBase(), view.getExtents(), view.getStrides(), view.getOrigins(), view.getResult());
   if (auto view = mlir::dyn_cast<riscv::LocalViewOp>(operation))
     return compileLocalView(view);
   if (auto snapshot = mlir::dyn_cast<riscv::DenseSnapshotOp>(operation))

@@ -201,4 +201,3 @@ class IRBuilder:
         operation = self.operation(name, location, **kwargs)
         block.operations.append(operation)
         return operation.results
-

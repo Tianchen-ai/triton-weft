@@ -1279,7 +1279,7 @@ Roles rolesFor(mlir::Value value) {
           storageRolesFor(value, !feedsExpandedIndexedLookup(value)))
     return *storage;
 
-  if (value.getDefiningOp<riscv::FieldOp>()) {
+  if (auto field = value.getDefiningOp<riscv::FieldOp>()) {
     for (mlir::OpOperand &use : value.getUses()) {
       mlir::Operation *owner = use.getOwner();
       auto implementation = owner->getAttrOfType<riscv::ImplementationAttr>(
@@ -1302,6 +1302,23 @@ Roles rolesFor(mlir::Value value) {
         });
     if (addressableField) {
       roles.local = true;
+      return roles;
+    }
+    auto encoding = mlir::dyn_cast<kernel::EncodingType>(
+        riscv_internal::logicalElement(field.getOwner().getType()));
+    auto facts = riscv_internal::fieldFacts(field);
+    auto type = mlir::cast<riscv::ValueType>(value.getType());
+    const int64_t rows = encoding ? riscv_internal::interleaveRows(field, encoding) : 0;
+    // A byte-major persistent layout makes adjacent rows contiguous. A whole
+    // field consumer must retain this storage relation as a physical axis
+    // choice; its record elements cannot be issued as a contiguous row load.
+    if (rows > 1 && facts.logicalRank == 1 && type.getShape().size() == 2 &&
+        type.getShape()[0] > 1 && type.getShape()[0] <= rows &&
+        facts.chunkBytes == 1 &&
+        (facts.mapping == "natural" || facts.mapping == "grouped_layered")) {
+      roles.laneAxis = type.getAxisIds()[0];
+      roles.sequentialAxes.insert(type.getAxisIds()[1]);
+      roles.anchored = true;
       return roles;
     }
   }

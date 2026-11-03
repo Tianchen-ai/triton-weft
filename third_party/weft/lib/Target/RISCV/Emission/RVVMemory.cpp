@@ -13,8 +13,10 @@ mlir::LogicalResult Emitter::compilePointerAtomic(riscv::PointerAtomicOp op) {
       instructionOf(op) != "scalar.pointer-atomic." + op.getKind().str())
     return fail(op, "pointer atomic lost its selected scalar operands");
   std::string order = op.getOrdering() == "relaxed" ? "__ATOMIC_RELAXED" : op.getOrdering() == "release" ? "__ATOMIC_RELEASE"
-      : op.getOrdering() == "acquire" ? "__ATOMIC_ACQUIRE" : "__ATOMIC_ACQ_REL";
-  std::string failure = op.getOrdering() == "release" || op.getOrdering() == "relaxed" ? "__ATOMIC_RELAXED" : "__ATOMIC_ACQUIRE";
+      : op.getOrdering() == "acquire" ? "__ATOMIC_ACQUIRE"
+      : op.getOrdering() == "seq_cst" ? "__ATOMIC_SEQ_CST" : "__ATOMIC_ACQ_REL";
+  std::string failure = op.getOrdering() == "release" || op.getOrdering() == "relaxed" ? "__ATOMIC_RELAXED"
+      : op.getOrdering() == "seq_cst" ? "__ATOMIC_SEQ_CST" : "__ATOMIC_ACQUIRE";
   auto scalar = op.getResult().getType();
   bool floating = mlir::isa<mlir::FloatType>(scalar);
   std::string bits = "uint" + std::to_string(scalar.getIntOrFloatBitWidth()) + "_t";

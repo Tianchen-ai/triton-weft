@@ -40,11 +40,16 @@ Canonical Kernel IR 是 Weft 源程序的唯一算法与数值 authority。它�
 `pointer_store(base, offsets, mask, value)` 保留逐元素 mask、填充值、数值 domain 与实际
 base 的读写 effect。只有 mask 为真的元素可解引用；非活动 load 元素返回 other。
 来源沿普通控制 SSA 传播，参数 alias/effect 与 View 使用同一合同。
+`bind_view(base, extents, strides)` 将已有 storage pointer 绑定为作者声明的逻辑 View，
+保留 Encoding、shape 和 axis identity。它不分配、不复制、不转换数据，也不加强输入
+pointer 的实际对齐；显式 extent/stride 是 index SSA。packed Encoding 使用自身的连续
+record 映射，不能叠加 dense element stride。可访问容量与布局是作者的存储前置合同，
+同一个 storage 的 raw pointer 和多个 View 保留同一 alias 来源。
 `pointer_atomic` 保存 storage origin、offset、mask、更新值、比较值、操作、ordering 和 scope。
 它返回实际更新前的值；mask 为假时不访问内存，其返回值不供作者依赖。
 普通 Triton `atomic_add/min/max/and/or/xor/xchg/cas` 使用共同 semantic 的类型与参数检查。
 CPU 对 `cta/gpu/sys` 均提供系统范围原子性，不由这些 GPU 名称引入另一套线程所有权。
-ordering 保留 relaxed/acquire/release/acq_rel；CAS 失败路径不携带 release 语义。
+ordering 保留 relaxed/acquire/release/acq_rel/seq_cst；CAS 失败路径不携带 release 语义。
 同 storage 字节宽度的 `pointer_cast` 只重解释元素类型，保留来源、偏移单位和 alias；
 它不把指针变成没有存储来源的整数，也不增强地址对齐。
 
