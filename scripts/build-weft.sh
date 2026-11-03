@@ -39,4 +39,4 @@ export TRITON_BUILD_PROTON=${TRITON_BUILD_PROTON:-OFF}
 if [[ $(uname -m) == riscv64 && -z ${LDFLAGS:-} ]]; then
     export LDFLAGS=-Wl,--no-relax
 fi
-exec "$python_command" -m pip install --no-build-isolation "$source_root" "$@"
+exec "$python_command" -m pip install --no-build-isolation "$@" "$source_root"
