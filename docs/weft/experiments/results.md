@@ -1,8 +1,13 @@
-# Final paper results and figure sources
+# Performance, control and reuse
 
-These figures use the final paper dataset. The [reproduction workflow](reproduce.md)
-connects the installed product with Triton–Weft Bench. Speedup divides reference
-time by Weft time; compiler interventions divide disabled time by enabled time.
+These selected paper results follow the model's purpose: high performance,
+composable author control and reusable compilation. **[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)**
+hosts the [complete result gallery, paper Figures 9–20](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/)
+and all sixteen CSV tables. The [reproduction workflow](reproduce.md) connects
+the installed product with matching workloads and references.
+
+Speedup divides reference time by Weft time; compiler interventions divide
+disabled time by enabled time. Each figure identifies its own comparison.
 
 ## Native operator performance
 
@@ -35,6 +40,51 @@ context. K3 measures 32-token prefill and eight-token decode after 32 tokens.
 Pairs fix models, weights, shapes and threads. Application CSVs record the
 numerical checks and process aggregation.
 
+## Author control and source reuse
+
+The Q4_K and Q6_K studies compare intrinsic C, Triton CPU, Exo 2, TensorIR and
+Weft on complete projections at `M=1,16,128`, `N=256`, `K=4096`. Each route
+implements local/shared preparation crossed with direct/grouped accumulation.
+The reference is intrinsic C local/direct at each shape, and activation
+quantization is inside the timed call.
+
+[![Paper Fig. 14a: Q4_K control tasks](../assets/paper/routes-q4.svg)](../assets/paper/routes-q4.svg)
+
+[![Paper Fig. 14b: Q6_K control tasks](../assets/paper/routes-q6.svg)](../assets/paper/routes-q6.svg)
+
+![Logarithmic speedup color scale for both control panels](../assets/paper/routes-scale.svg)
+
+[Control measurements](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/author-controls.csv)
+and [selected bindings](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/five-route-bindings.csv)
+record the full calls and configurations. Bench separately presents
+[same-compiler arithmetic and state choices](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/#arithmetic-organization-and-output-state).
+
+New formats also reuse source definitions. MXFP4, NVFP4 and IQ2_XXS first add
+dequantization, then dot. Encoding and decoder definitions established by the
+first operator serve the second; the bars separate them from newly added
+operator code.
+
+[![Paper Fig. 17: source added and reused across operators](../assets/paper/increment-measurements.svg)](../assets/paper/increment-measurements.svg)
+
+[The state and evolution studies](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/#source-increments-and-reuse)
+connect these source changes with complete attention and Welford programs.
+
+## Source relationships drive compilation
+
+The compiler uses field geometry to load and decode prepared data, value uses
+to forward arrays, and state scopes to keep matrix fragments live. These
+experiments fix the author program and Canonical operations, types and regions,
+then disable one physical mechanism at a time.
+
+| Encoding and consumption | Value forwarding and matrix state |
+|---|---|
+| [![Paper Fig. 18a: Encoding and consumption mechanisms](../assets/paper/encoding-consumption.svg)](../assets/paper/encoding-consumption.svg) | [![Paper Fig. 18b: value forwarding and matrix state mechanisms](../assets/paper/values-state.svg)](../assets/paper/values-state.svg) |
+
+Bars give geometric means of two process ratios; dots show each process and
+whiskers its paired-batch interquartile range. [Compiler measurements](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/compiler-mechanisms.csv)
+preserve the paired observations. The [complete mechanism results](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/#source-bounds-through-target-construction)
+also show range-guided execution on RISC-V and source-range propagation on x86.
+
 ## Final tables
 
 | Table | Rows | Evidence |
@@ -53,6 +103,8 @@ numerical checks and process aggregation.
 | [format-addition.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/format-addition.csv) | 5 | Q4 construction and Q6 source increments |
 | [state-algorithms.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/state-algorithms.csv) | 36 | Attention and Welford organizations |
 | [compiler-mechanisms.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/compiler-mechanisms.csv) | 214 | Paired physical mechanisms |
+| [increment-costs.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/increment-costs.csv) | 3 | Format/operator added and reused SLOC |
+| [increment-definitions.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/increment-definitions.csv) | 18 | Individual source definitions for the reuse figure |
 
 Control tasks compare complete calls in intrinsic C, Triton CPU, Exo 2,
 TensorIR and Weft. State studies compare sequential and blocked organizations;

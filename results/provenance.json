@@ -71,6 +71,18 @@
       "file": "state-algorithms.csv",
       "sha256": "fec071f8cc7d0afc6faa01df20a10bef900482c8b6b406a17dac7527c3ec648e",
       "rows": 36
+    },
+    {
+      "file": "increment-costs.csv",
+      "paper_source": "figures/increment-reuse/data-panel/increment-costs.csv",
+      "sha256": "65017804368640953a3496cdc3126213a74788913d1371da7c37988a125e8501",
+      "rows": 3
+    },
+    {
+      "file": "increment-definitions.csv",
+      "paper_source": "figures/increment-reuse/data-panel/increment-definitions.csv",
+      "sha256": "8a9db1938be2e58e2b73a8e7ad6c4b0db510c43f4b4c212e0b669b13f979741e",
+      "rows": 18
     }
   ],
   "figures": [
@@ -118,6 +130,48 @@
       "file": "models.svg",
       "paper_source": "overall-performance/applications.svg",
       "sha256": "72aab4b52d6ba3ce11759bc56a164dbae4032ecbddf27fd2ea0c1bb1fe27411a"
+    },
+    {
+      "file": "overview.svg",
+      "paper_source": "figure1.svg",
+      "paper_figure": 1,
+      "sha256": "86d468b215ccbb45b2ddf3bf28fba3612c3076887f7a4b20702f219e2dd36f9f"
+    },
+    {
+      "file": "routes-q4.svg",
+      "paper_source": "control-performance/output/routes-q4.svg",
+      "paper_figure": 14,
+      "sha256": "96d085e111bba87a5bca8f41541d8aaffbecb64d90fdcc729cc779739c0af6c3"
+    },
+    {
+      "file": "routes-q6.svg",
+      "paper_source": "control-performance/output/routes-q6.svg",
+      "paper_figure": 14,
+      "sha256": "f25fff0d407b5deeb05afc5fd55a2e47db2bfbb18b63ba11926b5a13bb701d23"
+    },
+    {
+      "file": "routes-scale.svg",
+      "paper_source": "control-performance/output/routes-scale.svg",
+      "paper_figure": 14,
+      "sha256": "181f4b9ca211527412cc8906e4612c3cb660ad275d60061d81d20140a2259378"
+    },
+    {
+      "file": "increment-measurements.svg",
+      "paper_source": "increment-reuse/output/increment-measurements.svg",
+      "paper_figure": 17,
+      "sha256": "3b80cdc918479f757033eb595c51d72382ce85b4f3b0472945fd51d5a1c84b8f"
+    },
+    {
+      "file": "encoding-consumption.svg",
+      "paper_source": "compiler-effects/output/encoding-consumption.svg",
+      "paper_figure": 18,
+      "sha256": "ea8205159b4436536b7b345dbf2116c33d900651fef6911b238631ac9fdd6842"
+    },
+    {
+      "file": "values-state.svg",
+      "paper_source": "compiler-effects/output/values-state.svg",
+      "paper_figure": 18,
+      "sha256": "6d7b7ae1cc612742a9299537706c747891653a382dcb7a8c61b5fc0256d86756"
     }
   ],
   "inference_threads": {
@@ -126,5 +180,6 @@
     "k3": 8,
     "x86": 8
   },
-  "aggregation": "Geometric mean of ratios computed from matching unrounded times"
+  "aggregation": "Geometric mean of ratios computed from matching unrounded times",
+  "figure_root": "docs/weft/assets/paper"
 }

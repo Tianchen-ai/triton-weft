@@ -110,6 +110,8 @@ markdown_extensions:
   - toc:
       permalink: true
       slugify: !!python/name:markdown.extensions.toc.slugify_unicode
+extra_css:
+  - assets/stylesheets/paper.css
 validation:
   nav:
     omitted_files: warn

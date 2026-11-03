@@ -1,9 +1,31 @@
-# Triton–Weft 1.0 handbook
+---
+hide:
+  - toc
+---
 
-Weft lets CPU kernel authors compose data representation, local arithmetic,
-shared preparation and state evolution in one program. Its Triton frontend
-preserves those choices through a common Canonical IR, then constructs native
-vector and matrix execution for x86 and RISC-V.
+# Triton–Weft 1.0
+
+**Compose expert CPU kernels. Let the compiler construct their machine execution.**
+
+An operator interface leaves many performance choices open: expanding packed
+weights or sharing a prepared region, grouping local products, and keeping state
+across updates. Each choice has its own scope. CPU kernel authors need to change
+and combine them without reconstructing their machine execution every time.
+
+[![Paper Fig. 1: from an operator's implementation choices to a Weft program and native CPU execution](assets/paper/overview.svg)](assets/paper/overview.svg)
+
+*Weft fills this abstraction gap: the program states the implementation
+relationships, and the compiler constructs the machine mapping.*
+
+Weft expresses stored fields, typed local arithmetic, shared preparation and
+initialized state as composable source objects. Implemented as a Triton
+extension, it preserves those choices through Canonical IR and builds vector or
+matrix execution for **x86 and RISC-V**. The same model supports quantized and
+dense projections, normalization, online attention and streaming statistics.
+
+[Install](getting-started/installation.md) · [Write your first kernel](getting-started/quickstart.md)
+· [Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)
+· [Complete paper results](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/)
 
 ## Start with a complete program
 
@@ -37,8 +59,10 @@ native export and application calls.
 
 ## Measured results
 
-The final paper dataset contains **553 operator/target cases**, including
-**543 matched comparisons** with optimized GGML and oneDNN references.
+Across **543 matched comparisons** from 553 operator/target cases, generated
+kernels achieve **1.32–1.83×** per-target geometric-mean speedups over optimized
+GGML and oneDNN references. The complete distributions show the performance
+across encoded arithmetic, format conversion, dense computation and row kernels.
 
 [![Cumulative distributions of all matched cases](assets/paper/operators-ecdf.svg)](assets/paper/operators-ecdf.svg)
 
@@ -55,10 +79,16 @@ K3's CPU-vector comparison accompanies its vendor IME2 deployment.
 
 [![Complete prefill and decode measurements](assets/paper/models.svg)](assets/paper/models.svg)
 
-[Results and provenance](experiments/results.md) link all fourteen final CSVs
-and current vector figures. [Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)
-owns comparison workloads, reference dispatch, numerical checks and timing;
-the product owns the compiler, runtime and installed kernel library.
+Performance follows from the source controls and the compiler's use of them.
+The [selected results](experiments/results.md) show five-route control tasks,
+format reuse and physical mechanisms under fixed source semantics.
+**[The complete Bench gallery](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/)**
+contains every paper result figure, from hardware microkernels and thread scaling
+to source increments and compiler studies, with links to all sixteen CSV tables.
+
+[Reproduce with Bench](experiments/reproduce.md): select a workload, installed
+kernel, reference and CPU. Bench prepares shared inputs, checks outputs and
+measures the matching native calls or complete llama.cpp stages.
 
 ## Version and implementation
 

@@ -1,7 +1,12 @@
-# 最终论文结果与图片来源
+# 性能、控制与复用
 
-本页采用最终论文数据。[复现流程](reproduce.md)连接已安装产品与 Triton–Weft Bench。
+本页精选论文中连接高性能、作者控制与编译复用的结果。
+**[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)** 提供
+[完整结果图集（论文图 9–20）](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/paper/gallery/)
+与十六份 CSV。[复现流程](reproduce.md)连接安装后的产品、匹配工作负载和参考实现。
+
 加速比为参考耗时除以 Weft 耗时；机制实验使用关闭耗时除以开启耗时。
+各图分别说明采用的比较基准。
 
 ## 原生算子性能
 
@@ -32,6 +37,45 @@ SG2044/K1/x86 测量 128-token prefill，以及 512-token 上下文后的
 32-token decode；K3 测量 32-token prefill，以及 32-token 上下文后的八 token decode。
 每个配对固定模型、权重、形状与线程，应用 CSV 记录正确性和进程聚合。
 
+## 作者控制与源码复用
+
+Q4_K 与 Q6_K 研究让 intrinsic C、Triton CPU、Exo 2、TensorIR 和 Weft 实现完整投影，
+固定 `M=1,16,128`、`N=256`、`K=4096`。每条路线组合局部／共享准备与直接／分组累加。
+各形状以 intrinsic C 局部／直接版本为参考，激活量化计入完整调用。
+
+[![论文图 14a：Q4_K 控制任务](../assets/paper/routes-q4.svg)](../assets/paper/routes-q4.svg)
+
+[![论文图 14b：Q6_K 控制任务](../assets/paper/routes-q6.svg)](../assets/paper/routes-q6.svg)
+
+![两幅控制图共用的对数加速色标](../assets/paper/routes-scale.svg)
+
+[控制测量](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/author-controls.csv)与
+[选定绑定](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/five-route-bindings.csv)
+记录完整调用及配置。Bench 另行展示[同一编译器下的算术和状态选择](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/paper/gallery/#算术组织与输出状态)。
+
+新增格式也复用已有定义。MXFP4、NVFP4 和 IQ2_XXS 先加入反量化，再加入 dot。
+第一个算子建立的 Encoding 和解码器继续服务第二个算子；图中将它们与新增算子代码分开。
+
+[![论文图 17：跨算子新增与复用的源码](../assets/paper/increment-measurements.svg)](../assets/paper/increment-measurements.svg)
+
+[状态与演进研究](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/paper/gallery/#源码增量与复用)
+把这些源码变化与完整注意力、Welford 程序连接起来。
+
+## 源程序关系驱动编译
+
+编译器利用字段几何直接加载、解码准备好的数据，利用值的使用关系转发数组，
+利用状态范围保留矩阵片段。这些实验固定作者程序和 Canonical 运算、类型及区域，
+每次关闭一项物理机制。
+
+| Encoding 与消费 | 值转发与矩阵状态 |
+|---|---|
+| [![论文图 18a：Encoding 与消费机制](../assets/paper/encoding-consumption.svg)](../assets/paper/encoding-consumption.svg) | [![论文图 18b：值转发与矩阵状态机制](../assets/paper/values-state.svg)](../assets/paper/values-state.svg) |
+
+柱表示两个进程倍率的几何平均，点为各进程结果，线段为配对批次的四分位范围。
+[编译器数据](https://github.com/Tianchen-ai/triton-weft-bench/blob/main/docs/paper/compiler-mechanisms.csv)
+保留配对观察。[完整机制结果](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/paper/gallery/#数值范围贯穿目标构造)
+还展示 RISC-V 的范围引导执行和 x86 的源范围传播。
+
 ## 最终数据表
 
 | 表格 | 行数 | 内容 |
@@ -50,6 +94,8 @@ SG2044/K1/x86 测量 128-token prefill，以及 512-token 上下文后的
 | [format-addition.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/format-addition.csv) | 5 | Q4 构造和新增 Q6 的源码增量 |
 | [state-algorithms.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/state-algorithms.csv) | 36 | 注意力与 Welford 组织 |
 | [compiler-mechanisms.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/compiler-mechanisms.csv) | 214 | 配对物理编译机制 |
+| [increment-costs.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/increment-costs.csv) | 3 | 各格式／算子新增与复用 SLOC |
+| [increment-definitions.csv](https://github.com/Tianchen-ai/triton-weft/blob/main/results/increment-definitions.csv) | 18 | 复用图的具体源码定义 |
 
 控制任务比较 intrinsic C、Triton CPU、Exo 2、TensorIR 与 Weft 的完整调用。
 状态研究比较顺序与分块组织；编译器研究固定源语义、改变物理机制。

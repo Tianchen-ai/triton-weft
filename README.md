@@ -1,25 +1,85 @@
 # Triton–Weft 1.0
 
-[中文](README.zh-CN.md) · [Handbook](https://tianchen-ai.github.io/triton-weft/) · [Examples](examples/weft/README.md) · [Bench](https://github.com/Tianchen-ai/triton-weft-bench) · [Release guide](docs/weft/development/release.md)
+[中文](README.zh-CN.md) · [Handbook](https://tianchen-ai.github.io/triton-weft/) · [Examples](examples/weft/README.md) · [Bench website](https://tianchen-ai.github.io/triton-weft-bench/) · [All paper results](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/)
 
-**Compose high-performance CPU kernels from encoded fields, typed computation,
-shared values and state.**
+**Compose expert CPU kernels. Let the compiler construct their machine execution.**
 
-Weft is a programming model implemented by extending Triton. Its source objects
-keep data representation, numerical groups, sharing and state updates explicit.
-The compiler uses those relationships to construct vector and matrix execution
-for x86 and RISC-V. Programs use `@triton.jit(model="weft")`, the normal
-`kernel[grid](...)` interface, configuration, autotuning, caching and native export.
+The interface `Y = X @ W.T` leaves the most consequential implementation choices
+open. Should packed weights be expanded first, or should one prepared region
+serve several outputs? Which products share a narrow partial sum, and how long
+should the output accumulator live? High-performance CPU kernels depend on these
+choices. Expressing them through blocks, explicit vectors or intrinsics also
+leaves the developer to maintain their connections as the kernel changes.
 
-The installable library `triton.kernels.weft` supplies kernels, stored formats,
-layouts, numerical helpers, tuning resources and host composition. The library
-includes dense and quantized projections, normalization, online attention,
-streaming statistics and stateful model components. NumPy and CPU Torch are
-optional host-buffer integrations.
+Weft makes those connections programmable. Encoded views describe stored fields;
+typed groups specify local arithmetic; computation levels give shared inputs and
+initialized state their own scopes. Authors can compose and evolve these choices
+while the compiler constructs operand layouts, register partitions and vector or
+matrix instructions for **x86 and RISC-V**.
+
+[![Paper Fig. 1: the abstraction gap and Weft's direct expression of implementation choices](docs/weft/assets/paper/overview.svg)](docs/weft/assets/paper/overview.svg)
+
+*One operator admits different implementations. Weft expresses the selected
+organization in source; its compiler maps that organization to the CPU.*
+
+Triton–Weft implements this model by extending Triton. Programs use
+`@triton.jit(model="weft")` and the familiar `kernel[grid](...)` interface, with
+configuration, autotuning, caching and native export. The installed
+`triton.kernels.weft` library includes dense and quantized projections,
+normalization, online attention, streaming statistics and stateful model
+components, together with reusable formats and numerical helpers.
+
+Across **543 matched operator comparisons**, per-target geometric-mean speedups
+over optimized library references are **1.32–1.83×**. The
+[results below](#performance-control-and-reuse) connect these gains to author
+control, source reuse and complete llama.cpp inference. **[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)**
+provides the workloads, references, reproduction commands and
+[complete paper figure gallery](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/).
 
 Weft's release is **1.0.0**, based on upstream Triton **3.8.0**. The distribution
 is **`triton==3.8.0+weft.1.0.0`**. `triton.__weft_version__` identifies Weft;
 `triton.__version__` preserves the upstream base identity.
+
+## Performance, control and reuse
+
+The paper evaluates **553 operator/target cases**, including **543 matched
+comparisons** with optimized GGML and oneDNN references. The distributions below
+include every matched comparison.
+
+[![All matched operator comparisons](docs/weft/assets/paper/operators-ecdf.svg)](docs/weft/assets/paper/operators-ecdf.svg)
+
+| CPU | SG2044 | K1 | K3 A100 | Xeon Platinum 8470Q |
+|---|---:|---:|---:|---:|
+| Geometric-mean speedup | **1.60×** | **1.54×** | **1.83×** | **1.32×** |
+| Matched comparisons | 132 | 136 | 135 | 140 |
+
+The same kernels accelerate complete llama.cpp prefill and decode. The figure
+covers eight model/platform deployments; K3 also shows a second reference backend.
+SG2044 uses 64 application threads and the other CPUs use eight.
+
+[![Complete llama.cpp prefill and decode speedups](docs/weft/assets/paper/models.svg)](docs/weft/assets/paper/models.svg)
+
+**Control becomes execution.** In the Q4_K study, five routes implement local or
+shared preparation crossed with direct or grouped accumulation. Calls include
+activation quantization and the complete projection at `N=256, K=4096`; each
+shape is normalized to intrinsic C local/direct. The
+[Q6_K comparison and selected bindings](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/#five-routes-for-the-same-control-tasks)
+extend the same task.
+
+[![Q4_K control tasks in intrinsic C, Triton CPU, Exo 2, TensorIR and Weft](docs/weft/assets/paper/routes-q4.svg)](docs/weft/assets/paper/routes-q4.svg)
+
+**New formats reuse existing knowledge.** Adding MXFP4, NVFP4 and IQ2_XXS
+dequantization establishes definitions that the subsequent dot operator reuses.
+The figure separates added Encoding, decoder and operator source from reused
+definitions. The [model and compiler results](https://tianchen-ai.github.io/triton-weft/experiments/results/)
+also show how source relationships enable decoding, forwarding and state retention.
+
+[![Source added and reused when introducing a second operator](docs/weft/assets/paper/increment-measurements.svg)](docs/weft/assets/paper/increment-measurements.svg)
+
+**Explore and reproduce:** [all paper result figures](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/)
+· [sixteen CSV tables](results/README.md) · [Bench commands](docs/weft/experiments/reproduce.md)
+· [measurement provenance](results/provenance.json).
+
 
 ## Build and install
 
@@ -149,21 +209,6 @@ the same on both CPU families. See the
 [C++ deployment example](examples/weft/deployment) and
 [native SDK guide](docs/weft/compiler/native-sdk.md).
 
-## Recorded results
-
-The final paper dataset covers **553 operator/target cases**, **543 matched
-comparisons**, and complete inference phases across eight model/platform
-deployments. SG2044 inference uses 64 threads; K1, K3 and x86 use eight.
-K3 CPU-vector and vendor IME2 reference policies are identified separately.
-
-[![All matched operator comparisons](docs/weft/assets/paper/operators-ecdf.svg)](docs/weft/assets/paper/operators-ecdf.svg)
-
-All fourteen [result tables](results/README.md), current figures and their
-provenance accompany the project. The
-[reproduction guide](docs/weft/experiments/reproduce.md) connects installed kernels
-with Bench's input generation, strong reference dispatch, numerical checks and
-native/application timing. The source package includes the complete compiler,
-normal kernel library, examples and tests.
 
 ## Source map
 

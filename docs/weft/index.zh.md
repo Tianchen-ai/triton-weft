@@ -1,8 +1,27 @@
-# Triton–Weft 1.0 工具书
+---
+hide:
+  - toc
+---
 
-Weft 让 CPU 内核作者在同一程序中组合数据表示、局部算术、共享准备和状态演进。
-Triton 前端把这些选择保留到共同的 Canonical IR，再为 x86 与 RISC-V
-构造原生向量和矩阵执行。
+# Triton–Weft 1.0
+
+**组合专家级 CPU 内核，由编译器构造机器执行。**
+
+算子接口留下了许多决定性能的选择：展开压缩权重，还是共享一次准备的区域？
+局部乘积如何分组？状态跨越哪些更新？这些选择各有自己的作用范围。
+CPU 内核开发需要直接改变、组合它们，并让编译器重新构造对应的机器执行。
+
+[![论文图 1：从算子的实现选择，到 Weft 程序及原生 CPU 执行](assets/paper/overview.svg)](assets/paper/overview.svg)
+
+*Weft 补上这一抽象：源程序表达实现关系，编译器构造机器映射。*
+
+Weft 将存储字段、带类型的局部算术、共享准备和初始化状态表达为可组合的源程序对象。
+它通过扩展 Triton 实现，经过 Canonical IR 保留这些选择，为 **x86 与 RISC-V**
+构造向量或矩阵执行。同一模型支持量化与稠密投影、归一化、在线注意力和流式统计。
+
+[安装](getting-started/installation.md) · [编写第一个内核](getting-started/quickstart.md)
+· [Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)
+· [完整论文结果](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/paper/gallery/)
 
 ## 从完整程序开始
 
@@ -34,8 +53,9 @@ Welford 统计和 GEMM。
 
 ## 实测结果
 
-最终论文数据集包含 **553 个算子—平台案例**，其中 **543 项**
-与优化的 GGML、oneDNN 参考实现进行匹配比较。
+在 553 个算子—平台案例中的 **543 项匹配对照**上，生成内核相对优化的 GGML、oneDNN
+参考实现取得 **1.32–1.83×** 的分平台几何平均加速。完整分布覆盖编码计算、
+格式转换、稠密计算和行算子。
 
 [![全部匹配案例的加速累积分布](assets/paper/operators-ecdf.svg)](assets/paper/operators-ecdf.svg)
 
@@ -52,9 +72,13 @@ K3 同时展示 CPU 向量参考与厂商 IME2 部署比较。
 
 [![完整 prefill 与 decode 测量](assets/paper/models.svg)](assets/paper/models.svg)
 
-[结果与来源](experiments/results.md)提供十四份最终 CSV 和当前矢量图。
-[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)
-负责比较用例、参考分派、数值检查和计时；产品负责编译器、运行时和可安装内核库。
+这些性能来自源程序的控制及编译器对它们的利用。[精选结果](experiments/results.md)
+展示五路线控制任务、格式复用，以及固定源语义后的物理编译机制。
+**[Bench 完整图集](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/paper/gallery/)**
+收录论文全部结果图，从硬件微内核、线程扩展到源码增量与编译器研究，并链接十六份 CSV。
+
+[使用 Bench 复现](experiments/reproduce.md)：选择工作负载、安装后的内核、参考与 CPU，
+Bench 统一准备输入、检查输出，测量匹配的原生调用或完整 llama.cpp 阶段。
 
 ## 版本与实现
 
