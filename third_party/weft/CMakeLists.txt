@@ -2,6 +2,12 @@
 set(WEFT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(WEFT_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 set(WEFT_INSTALL_ROOT triton/_C/weft)
+file(READ "${PROJECT_SOURCE_DIR}/python/triton/_weft_version.py" WEFT_VERSION_SOURCE)
+string(REGEX MATCH "__version__ = \"([^\"]+)\"" WEFT_VERSION_MATCH "${WEFT_VERSION_SOURCE}")
+set(WEFT_RELEASE_VERSION "${CMAKE_MATCH_1}")
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/WeftConfigVersion.cmake"
+  VERSION "${WEFT_RELEASE_VERSION}" COMPATIBILITY SameMajorVersion)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_CXX_STANDARD 20)
 if(NOT LLVM_ENABLE_RTTI)
@@ -23,6 +29,8 @@ install(FILES runtime/include/weft/runtime.h runtime/include/weft/runtime.hpp
 set(WEFT_LLAMA_INTEGRATION_DIR "${PROJECT_SOURCE_DIR}/integrations/llama.cpp")
 install(DIRECTORY "${WEFT_LLAMA_INTEGRATION_DIR}/" DESTINATION ${WEFT_INSTALL_ROOT}/share/llama.cpp)
 install(FILES cmake/WeftConfig.cmake DESTINATION ${WEFT_INSTALL_ROOT}/lib/cmake/Weft)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/WeftConfigVersion.cmake"
+  DESTINATION ${WEFT_INSTALL_ROOT}/lib/cmake/Weft)
 install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md
   DESTINATION ${WEFT_INSTALL_ROOT}/licenses)
 install(FILES lib/Runtime/ggml-threadpool-LICENSE
@@ -38,6 +46,8 @@ if(CMAKE_LIBRARY_OUTPUT_DIRECTORY)
   file(COPY licenses/ DESTINATION "${WEFT_WHEEL_ROOT}/licenses")
   file(COPY "${WEFT_LLAMA_INTEGRATION_DIR}" DESTINATION "${WEFT_WHEEL_ROOT}/share")
   file(COPY cmake/WeftConfig.cmake DESTINATION "${WEFT_WHEEL_ROOT}/lib/cmake/Weft")
+  file(COPY "${CMAKE_CURRENT_BINARY_DIR}/WeftConfigVersion.cmake"
+    DESTINATION "${WEFT_WHEEL_ROOT}/lib/cmake/Weft")
   if(TRITON_WEFT_CLANG_ROOT)
     if(NOT EXISTS "${TRITON_WEFT_CLANG_ROOT}/bin/clang")
       message(FATAL_ERROR "TRITON_WEFT_CLANG_ROOT must contain bin/clang")

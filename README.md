@@ -1,4 +1,6 @@
-# Triton–Weft
+# Triton–Weft 1.0
+
+[中文](README.zh-CN.md) · [Handbook](https://tianchen-ai.github.io/triton-weft/) · [Examples](examples/weft/README.md) · [Bench](https://github.com/Tianchen-ai/triton-weft-bench) · [Release guide](docs/weft/development/release.md)
 
 **Compose high-performance CPU kernels from encoded fields, typed computation,
 shared values and state.**
@@ -15,6 +17,10 @@ includes dense and quantized projections, normalization, online attention,
 streaming statistics and stateful model components. NumPy and CPU Torch are
 optional host-buffer integrations.
 
+Weft's release is **1.0.0**, based on upstream Triton **3.8.0**. The distribution
+is **`triton==3.8.0+weft.1.0.0`**. `triton.__weft_version__` identifies Weft;
+`triton.__version__` preserves the upstream base identity.
+
 ## Build and install
 
 The source tree builds without a `.git` directory. Use Python 3.10 or newer,
@@ -27,28 +33,20 @@ To build the dependency SDK from the public LLVM project:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install 'setuptools>=40.8.0' wheel 'pybind11>=2.13.1'
+python -m pip install -r python/requirements.txt numpy pytest
 LLVM_PROJECT_PATH="$PWD/.deps/llvm-project" \
 LLVM_BUILD_PATH="$PWD/.deps/llvm-build" \
 LLVM_INSTALL_PATH="$PWD/.deps/llvm" \
 bash scripts/build-llvm-project.sh
 ```
 
-An existing SDK built from that exact revision can be selected instead. Build
-the product with the host GCC and SDK locations explicitly (`gcc-12`/`g++-12`
-can be used on systems where those are the installed compiler names):
+An existing SDK built from that exact revision can be selected instead. The
+installer discovers the SDK's Clang and OpenMP paths and uses host GCC to build
+the extension:
 
 ```sh
-CC=gcc \
-CXX=g++ \
-LLVM_SYSPATH="$PWD/.deps/llvm" \
-TRITON_WEFT_CLANG_ROOT="$PWD/.deps/llvm" \
-TRITON_WEFT_OPENMP_LIBRARY="$PWD/.deps/llvm/lib/libomp.so" \
-TRITON_WEFT_OPENMP_INCLUDE_DIR="$PWD/.deps/llvm/lib/clang/23/include" \
-TRITON_BUILD_DIR="$PWD/.build" \
-TRITON_BUILD_PROTON=OFF \
-python -m pip install --no-build-isolation .
-python -m pip install numpy pytest
+LLVM_SYSPATH="$PWD/.deps/llvm" bash scripts/build-weft.sh
+python -c 'import triton; print("Weft", triton.__weft_version__, "on Triton", triton.__version__)'
 ```
 
 LLVM installations with a target-specific library directory should pass that
@@ -59,27 +57,44 @@ also describes explicit and cross-compilation toolchains.
 
 ## Write and call a kernel
 
+Save this complete program as `quickstart.py` and run it after installation:
+
 ```python
+from __future__ import annotations
 import numpy as np
 import triton
 import triton.language as tl
 
 @triton.jit(model="weft")
-def affine(X, Y, N, scale, bias, B: tl.constexpr):
-    i = tl.program_id(0) * B + tl.arange(0, B)
-    value = tl.load(X + i, mask=i < N, other=0.0)
-    tl.store(Y + i, value * scale + bias, mask=i < N)
+def row_sum_squares(X: tl.View[tl.f32, (M, N)], Y: tl.View[tl.f32, (M,)],
+                    BLOCK: tl.constexpr = 32):
+    with tl.level.rows(M, group=1) as row:
+        values = tl.stage(tl.load(X[row]))
+        total = tl.state(tl.f32, [1], init=0)
+        with tl.level.blocks(N, extent=BLOCK) as block:
+            part = values[:, block]
+            total += tl.reduce(part * part, axis="n")
+        tl.store(Y[row], total)
 
-x = np.arange(131, dtype=np.float32)
-y = np.empty_like(x)
-compiled = affine[(triton.cdiv(x.size, 64),)](
-    x, y, x.size, 1.25, -0.5, B=64, num_cpu_threads=2)
-np.testing.assert_array_equal(y, x * 1.25 - 0.5)
+x = np.random.default_rng(19).normal(size=(4, 65)).astype(np.float32)
+y = np.empty(4, dtype=np.float32)
+compiled = row_sum_squares[(1,)](x, y, BLOCK=32, num_cpu_threads=1)
+np.testing.assert_allclose(y, np.sum(x.astype(np.float64)**2, axis=1), rtol=1e-5)
+print(y, list(compiled.asm))
 ```
 
 The grid describes independent programs; `num_cpu_threads` selects the CPU
 worker count. Typed `tl.View` arguments additionally expose logical fields,
 shapes and storage to the compiler.
+
+The row owns one staged input observation and one accumulator. Its inner blocks
+update that same state, including the tail. The
+[runnable version](examples/weft/quickstart.py) also writes the actual IR and exports
+a native artifact:
+
+```sh
+python -m examples.weft.quickstart --dump-ir /tmp/weft-ir --export /tmp/weft-native
+```
 
 | Author object | Program expression | Information used by compilation |
 |---|---|---|
@@ -94,6 +109,12 @@ library's [`organized_projection.py`](python/triton/kernels/weft/ggml/blocks/mul
 Q4_K and Q6_K share the typed entry, preparation framework, weighted computation
 and both output-state traversals. Each format supplies its field helper; Q4_K
 also supplies its correction fields.
+
+[![Shared fields, weighted partials and output state](docs/weft/assets/paper/model.svg)](docs/weft/assets/paper/model.svg)
+
+[Online attention](python/triton/kernels/weft/attention/online_f32.py) and
+[Welford](python/triton/kernels/weft/programs/statistics.py) compose different
+coupled states through the same programming model.
 
 ## Run complete examples
 
@@ -130,12 +151,23 @@ the same on both CPU families. See the
 
 ## Recorded results
 
-The accompanying `results/*.csv` files contain the measured operator, model and
-controlled-study results with their comparison boundaries. Values and counts
-come from those files. The source package contains the complete compiler,
-normal kernel library, examples and correctness tests.
+The final paper dataset covers **553 operator/target cases**, **543 matched
+comparisons**, and complete inference phases across eight model/platform
+deployments. SG2044 inference uses 64 threads; K1, K3 and x86 use eight.
+K3 CPU-vector and vendor IME2 reference policies are identified separately.
+
+[![All matched operator comparisons](docs/weft/assets/paper/operators-ecdf.svg)](docs/weft/assets/paper/operators-ecdf.svg)
+
+All fourteen [result tables](results/README.md), current figures and their
+provenance accompany the project. The
+[reproduction guide](docs/weft/experiments/reproduce.md) connects installed kernels
+with Bench's input generation, strong reference dispatch, numerical checks and
+native/application timing. The source package includes the complete compiler,
+normal kernel library, examples and tests.
 
 ## Source map
+
+[![Canonical program and x86/RISC-V construction](docs/weft/assets/paper/compiler.svg)](docs/weft/assets/paper/compiler.svg)
 
 | Component | Location |
 |---|---|

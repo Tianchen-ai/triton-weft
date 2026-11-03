@@ -3,6 +3,12 @@
 一个逻辑 Value 可以大于单条机器向量或矩阵 fragment。
 物理程序将其坐标映射到存储与执行，同时保留源程序的数值和生命周期关系。
 
+[![Logical coordinates](../assets/paper/layout-logical.svg)](../assets/paper/layout-logical.svg)
+
+[![Coordinates mapped to lanes and issues](../assets/paper/layout-physical.svg)](../assets/paper/layout-physical.svg)
+
+两图沿用相同输出与归约坐标，映射改变执行位置，保留各结果的更新关系。
+
 ## 物理组成
 
 | 概念 | 作用 |

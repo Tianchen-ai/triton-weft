@@ -1,73 +1,81 @@
-# 安装 Triton–Weft
+# 安装 Triton–Weft 1.0
 
-在独立 Python 环境中安装。本 fork 构建名为 `triton` 的发行包，包含 Python 语言、
-原生编译绑定、CPU runtime 和应用 SDK。按宿主架构与 Python ABI 选择 wheel，
-也可以从当前源码构建。
+产品构建 `triton` 发行包，包含语言、原生编译器、CPU 运行时、内核库与 C/C++ SDK。
+Weft 1.0.0 扩展自 Triton 3.8.0，发行包版本为 `3.8.0+weft.1.0.0`。
 
-## 已发布的 wheel
+## 从源码安装
 
-```sh
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --index-url https://tianchen-ai.github.io/triton-weft/wheels/ 'triton==3.8.0+weft.2'
-python -m pip install numpy
-python -c "import triton; from triton import cpu; print(triton.__version__); print(cpu.target())"
-```
-
-[Release 资产](https://github.com/Tianchen-ai/triton-weft/releases/tag/v3.8.0-weft.2)
-包含 Clang 23、resource headers、OpenMP 和原生 SDK。
-
-| 宿主 | Python ABI | 这些 wheel 所需的系统库 |
-|---|---|---|
-| Linux x86-64 | CPython 3.10 | glibc ≥ 2.34、GLIBCXX_3.4.30、CXXABI_1.3.13、libgcc、zlib |
-| Linux RISC-V LP64D | CPython 3.11／3.12／3.14 | glibc ≥ 2.38、GLIBCXX_3.4.30、CXXABI_1.3.13、libgcc、libatomic |
-
-JIT 还使用系统 linker、libc 开发头文件和启动文件，请安装发行版的 C/C++ 开发包。
-RISC-V 的 NumPy 需要匹配解释器与架构。异构 CPU 应先使用[选核启动器](hardware.md)，
-再查询当前目标。
-
-## 从当前源码构建
-
-克隆产品仓库并安装构建依赖：
+使用原生 x86-64 或 RISC-V Linux、Python 3.10+、GCC 12+、Git，
+以及 `python/requirements.txt` 中的依赖。
+仓库与解压后的源码发行包使用相同构建方式，无需 `.git` 目录。
 
 ```sh
 git clone https://github.com/Tianchen-ai/triton-weft.git
 cd triton-weft
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r python/requirements.txt build
+python -m pip install -r python/requirements.txt numpy pytest
 ```
 
-编译器、MLIR bindings 和 TableGen 共用
-[`cmake/llvm-info.json`](https://github.com/Tianchen-ai/triton-weft/blob/main/cmake/llvm-info.json)
-记录的 LLVM revision。选择匹配的 SDK，以及宿主原生 Clang 23／OpenMP：
+LLVM/MLIR 必须对应
+`5f07f818b51b786b0a87b4e514882600ecba112f`，
+记录见 [`cmake/llvm-info.json`](https://github.com/Tianchen-ai/triton-weft/blob/main/cmake/llvm-info.json)。
+SDK 只需构建一次：
 
 ```sh
-CC=/path/to/matched-llvm-sdk/bin/clang \
-CXX=/path/to/matched-llvm-sdk/bin/clang++ \
-LLVM_SYSPATH=/path/to/matched-llvm-sdk \
-TRITON_WEFT_CLANG_ROOT=/path/to/native-clang-23 \
-TRITON_WEFT_OPENMP_LIBRARY=/path/to/libomp.so \
-TRITON_WEFT_OPENMP_INCLUDE_DIR=/path/to/openmp-headers \
-TRITON_BUILD_DIR=/path/to/build \
-TRITON_BUILD_PROTON=OFF \
-python -m pip install --no-build-isolation .
+LLVM_PROJECT_PATH="$PWD/.deps/llvm-project" \
+LLVM_BUILD_PATH="$PWD/.deps/llvm-build" \
+LLVM_INSTALL_PATH="$PWD/.deps/llvm" \
+bash scripts/build-llvm-project.sh
 ```
 
-`TRITON_WEFT_CLANG_ROOT` 包含 `bin/clang`、`LICENSE.TXT` 和
-`lib/clang/<version>/include`。OpenMP 头文件包含 `omp.h`，
-runtime 应支持 Clang 23 的 dispatch ABI；构建时会检查这些组件。
-`TRITON_BUILD_PROTON=OFF` 选择不包含可选 profiler 的构建。
+选择 SDK 安装 Weft：
 
-开发时可在相同环境使用 `pip install -e .`；生成发行包则把最后一行换为
-`python -m pip wheel --no-build-isolation --no-deps . -w /path/to/wheels`。
-[CI host wheel](https://github.com/Tianchen-ai/triton-weft/actions/workflows/build.yml)
-也提供当前构建，其 CPU 工具链需单独配置；Release wheel 随包提供工具链。
+```sh
+LLVM_SYSPATH="$PWD/.deps/llvm" bash scripts/build-weft.sh
+python -c 'import triton; print("Weft", triton.__weft_version__, "on Triton", triton.__version__)'
+python -m examples.weft.quickstart
+```
 
-## 本机与交叉工具链
+已有固定版本 SDK 时直接指定 `LLVM_SYSPATH`。
+脚本查找 Clang 和 OpenMP，使用宿主 GCC，将生成文件放入 `.build/`。
+原生 RISC-V GNU 构建使用 `-Wl,--no-relax`。
+开发时运行 `bash scripts/build-weft.sh -e` 进行 editable 安装。
 
-本机 JIT 在选核后发现目标，并使用随包 Clang。应用可以通过启动参数选择显式工具链。
-RISC-V 使用指定 GCC 安装中的 ABI runtime 与启动文件，kernel 由 Clang 编译。例如：
+## 显式选择工具链
+
+GCC 编译扩展，随包的 Clang 23 编译生成的 kernel。
+资源头和 OpenMP 使用相同 dispatch ABI。组件分开安装时可指定：
+
+```sh
+LLVM_SYSPATH=/opt/weft-llvm \
+TRITON_WEFT_CLANG_ROOT=/opt/weft-clang \
+TRITON_WEFT_OPENMP_LIBRARY=/opt/weft-openmp/lib/libomp.so \
+TRITON_WEFT_OPENMP_INCLUDE_DIR=/opt/weft-openmp/include \
+bash scripts/build-weft.sh
+```
+
+Clang 根目录包含 `bin/clang`、`LICENSE.TXT` 与 `lib/clang/23/include`，
+OpenMP 头目录包含 `omp.h`。构建检查运行库入口与原生代码生成器；
+宿主系统另需链接器、libc 开发头和启动文件。
+
+## wheel 与源码发行包
+
+保留相同工具链环境变量，构建 wheel：
+
+```sh
+python -m pip wheel --no-build-isolation --no-deps . --wheel-dir dist
+python -m pip install dist/triton-3.8.0+weft.1.0.0-*.whl
+```
+
+wheel 需匹配架构、Python ABI 和系统库。
+[宿主构建工作流](https://github.com/Tianchen-ai/triton-weft/actions/workflows/build.yml)
+提供 wheel artifact；[发布指南](../development/release.md)介绍源码包和安装后的 SDK。
+
+## 原生与交叉编译
+
+异构 CPU 先通过 [CPU launcher](hardware.md) 选择核心，再查询能力。
+JIT 识别原生目标，AOT 可以显式提供目标与工具链：
 
 ```python
 options = {"toolchain": {
@@ -79,20 +87,19 @@ options = {"toolchain": {
 }}
 ```
 
-显式交叉构建使用 `triton.compile`，传入目标和 `ASTSource`。
-[AOT 章节](../compiler/native-sdk.md)给出完整导出与应用调用。
-交叉构建 Python extension 时，还需按目标解释器的 headers 与 ABI 指定
-`TRITON_TARGET_PYTHON_INCLUDE_DIR`、`TRITON_TARGET_PYTHON_SOABI`，
-以及 `bdist_wheel --plat-name linux_riscv64`。
+将这些选项用于 `ASTSource` 与 `triton.compile`。
+Python 扩展交叉构建还指定 `TRITON_TARGET_PYTHON_INCLUDE_DIR`、
+`TRITON_TARGET_PYTHON_SOABI` 和 `bdist_wheel --plat-name linux_riscv64`。
+继续阅读[原生部署](../compiler/native-sdk.md)。
 
 ## PyTorch
 
-安装与当前 Python ABI 匹配的 CPU PyTorch 包。Eager Tensor 可以直接传给 kernel。
-图接入使用受支持的 PyTorch 2.14 源码接口，在该环境执行一次：
+安装与 Python ABI 匹配的 CPU PyTorch，Eager Tensor 可直接传给 kernel。
+对于支持的 PyTorch 2.14 源码接口，安装 Inductor 接缝：
 
 ```sh
 python -m triton.tools.pytorch
 ```
 
 随后使用 `torch.compile(..., options={"cpu_backend": "triton"})`。
-完整示例见 [PyTorch 与宿主组合](../integrations/overview.md)。
+继续阅读 [PyTorch 与宿主组合](../integrations/overview.md)。

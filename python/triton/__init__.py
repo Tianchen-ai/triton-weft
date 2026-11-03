@@ -1,5 +1,6 @@
 """isort:skip_file"""
 __version__ = '3.8.0'
+from ._weft_version import __version__ as __weft_version__
 
 # ---------------------------------------
 # Note: import order is significant here.

@@ -36,7 +36,7 @@ theme:
 plugins:
   - i18n:
       docs_structure: suffix
-      # Both page editions are provided; unlocalized figures and wheel indexes are shared.
+      # Every prose page has both editions; share unlocalized figures and wheel indexes.
       fallback_to_default: true
       languages:
         - locale: en
@@ -101,6 +101,7 @@ plugins:
             Source map and upstream: 源码与上游
             Hardware extensions: 硬件扩展
             Documentation: 文档维护
+            Weft 1.0 release: Weft 1.0 发布
   - search
 markdown_extensions:
   - admonition
@@ -155,3 +156,4 @@ nav:
       - Source map and upstream: development/upstream.md
       - Hardware extensions: development/extensions.md
       - Documentation: development/documentation.md
+      - Weft 1.0 release: development/release.md

@@ -4,6 +4,13 @@ A logical Value may be larger than one machine vector or matrix fragment.
 The physical program maps its coordinates to storage and execution while retaining
 the source program's numerical and lifetime relationships.
 
+[![Logical coordinates](../assets/paper/layout-logical.svg)](../assets/paper/layout-logical.svg)
+
+[![Coordinates mapped to lanes and issues](../assets/paper/layout-physical.svg)](../assets/paper/layout-physical.svg)
+
+Both views follow the same output and reduction coordinates. Mapping changes
+execution placement while preserving each result's updates.
+
 ## Physical building blocks
 
 | Concept | Role |

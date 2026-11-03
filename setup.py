@@ -588,15 +588,15 @@ def get_git_version_suffix():
 
 
 def get_triton_version_suffix():
-    # Release automation supplies an explicit downstream identity. Source builds
-    # retain the commit identity as well as the fork's name.
+    # Keep the upstream package version while identifying the Weft release.
     env_sfx = os.environ.get("TRITON_WHEEL_VERSION_SUFFIX")
     if env_sfx is not None:
         if not re.fullmatch(r"\+weft\.[0-9]+(?:\.[0-9A-Za-z]+)*", env_sfx):
             raise ValueError("TRITON_WHEEL_VERSION_SUFFIX must be +weft.<release>")
         return env_sfx
-    git_sfx = get_git_version_suffix()
-    return git_sfx + ".weft" if git_sfx else "+weft.dev"
+    import runpy
+    release = runpy.run_path(str(Path(__file__).parent / "python/triton/_weft_version.py"))["__version__"]
+    return "+weft." + release
 
 
 # keep it separate for easy substitution

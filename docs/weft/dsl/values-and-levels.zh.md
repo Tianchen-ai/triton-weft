@@ -49,6 +49,10 @@ with tl.level.rows(M, group=1) as row:
 
 这样就明确了读取的作用域。body 局部临时值归 body 所有；初始化捕获进入该层时的 SSA 环境。
 
+[![State partition into physical slices](../assets/paper/state-partition.svg)](../assets/paper/state-partition.svg)
+
+各物理切片持有同一逻辑状态的对应坐标，沿用声明的初始化、更新与交接。
+
 ## 更新与 handoff
 
 普通赋值表达状态变化，例如 `total += contribution`、`m = new_m`，

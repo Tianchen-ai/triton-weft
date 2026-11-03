@@ -2,8 +2,21 @@
 
 [English](README.md) · [工具书](https://tianchen-ai.github.io/triton-weft/zh/getting-started/examples/)
 
-安装本项目 Triton wheel 与 NumPy，克隆仓库，并在**仓库根目录**运行下面命令。
+安装本产品与 NumPy，克隆仓库，并在**仓库根目录**运行下面命令。
 每个文件都包含 kernel 与宿主应用；应用准备数据、启动 kernel 并打印结果。
+
+先运行完整 Weft 程序，查看实际 IR 并导出原生程序：
+
+```sh
+python -m examples.weft.quickstart --dump-ir /tmp/weft-ir --export /tmp/weft-native
+python -m examples.weft.kernels.projection
+python -m examples.weft.kernels.attention
+python -m examples.weft.kernels.welford
+python -m examples.weft.kernels.gemm
+```
+
+完整示例检查全部输出。正常内核及宿主组合由可安装的 `triton.kernels.weft` 提供，
+Bench 负责对照和计时。
 
 ## 1. 熟悉的 Triton
 

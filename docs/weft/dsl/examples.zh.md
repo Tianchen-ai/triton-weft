@@ -25,8 +25,8 @@
 
 ## Contraction：类型与 engine
 
-`language/contraction.py` 用普通指针运算构造两个 I8 矩阵块，
-`tl.dot` 产生 I32 结果。`ENGINE` 是传给 contraction 的 constexpr。
+`language/contraction.py` 使用带类型的 View 与逻辑行列层描述 I8 操作数，
+I32 状态跨归约块累加 `tl.dot` 更新。`ENGINE` 是传给 contraction 的 constexpr。
 先比较 `vector` 与 `auto`，再在支持合法整数矩阵路线的目标上选择 `matrix`，
 并读取程序打印的实际扩展。
 
@@ -36,7 +36,7 @@
 编码权重字段、显式 partial 位宽、共享 panel 和嵌套输出 state。
 对应作者程序位于已安装的 `triton.kernels.weft` 库。
 
-[![Projection 的源作用域与部分和算术](../assets/paper/model.png)](../assets/paper/model.png)
+[![Projection 的源作用域与部分和算术](../assets/paper/model.svg)](../assets/paper/model.svg)
 
 [模型程序](programs.md)提供 corpus 地图；
 [物理优化](../compiler/optimization-principles.md)说明如何区分 DSL 改进和编译器改进。

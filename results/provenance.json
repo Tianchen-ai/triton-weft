@@ -1,0 +1,130 @@
+{
+  "dataset": "Final Weft paper measurements",
+  "paper_revision": "2a31f490da1684b1e09f1a2c5e10207c8600f41e",
+  "tables": [
+    {
+      "file": "application-roles.csv",
+      "sha256": "e6e1a747fa754118b25c2dfe278f7d21bdbc6f05564bcd35d9ace1d560460290",
+      "rows": 18
+    },
+    {
+      "file": "application-x86-windows.csv",
+      "sha256": "9cd9fc240a19d739a6e781d203d97f9c026cc249e5b5d3910abd0c0e8ac9dd4e",
+      "rows": 120
+    },
+    {
+      "file": "applications.csv",
+      "sha256": "a02f1302c8e5e71daa12b60075394cbb304d224cc85a4ae1f0ef9b1e5ec562f3",
+      "rows": 18
+    },
+    {
+      "file": "author-controls.csv",
+      "sha256": "bfb968ea83ee02b6ce6a87cc58f308bf848f40204a586998af74e8077cecf072",
+      "rows": 240
+    },
+    {
+      "file": "author-organization.csv",
+      "sha256": "cfc32212fd12e02a09390cbc07fa071dc2d78856e5d3c79df5d16b59e1941701",
+      "rows": 48
+    },
+    {
+      "file": "compiler-mechanisms.csv",
+      "sha256": "271c574d133c3b8da6cbf19e6417ed0ce3d8ca85ec0a2367719bd8fadd2827a1",
+      "rows": 214
+    },
+    {
+      "file": "five-route-bindings.csv",
+      "sha256": "52f5f505060b4390f8d3e9c944b87e904e8a9374f78a7a6ca89e6a33b6024bc7",
+      "rows": 30
+    },
+    {
+      "file": "format-addition.csv",
+      "sha256": "500dd86d82aba94a99027d6c5f0b11d159443a6555f6deccebcd7c7568dc66ce",
+      "rows": 5
+    },
+    {
+      "file": "fp32-libraries.csv",
+      "sha256": "cb51b05bdbd6105a06899a7e3ce5a072d127bade42054ffef315ec4efc9a215b",
+      "rows": 12
+    },
+    {
+      "file": "ggml-compute.csv",
+      "sha256": "5b15745795a16d18342fa44321633c214ee4ff36f8fca90324c56828941c4a4a",
+      "rows": 32
+    },
+    {
+      "file": "grid.csv",
+      "sha256": "f125afb364288acde04aeceb94e287131218b282f844eea51a624f2207caeebd",
+      "rows": 48
+    },
+    {
+      "file": "operator-families.csv",
+      "sha256": "404987eeabeec66dfd37ce9703d56b996b0873a9a0149cbd27428fd2123cb15d",
+      "rows": 5
+    },
+    {
+      "file": "operators.csv",
+      "sha256": "53b46d797f637e0b60cfc2861ba2ef7950ae2c92a80e7a120c0845b6d727aa2d",
+      "rows": 553
+    },
+    {
+      "file": "state-algorithms.csv",
+      "sha256": "fec071f8cc7d0afc6faa01df20a10bef900482c8b6b406a17dac7527c3ec648e",
+      "rows": 36
+    }
+  ],
+  "figures": [
+    {
+      "file": "model.svg",
+      "paper_source": "figure4.svg",
+      "sha256": "ef0916d5a7e9ec0611fcbe7ee47644c63525549f3a605e2063bea93aaebe34e3"
+    },
+    {
+      "file": "compiler.svg",
+      "paper_source": "figure5.svg",
+      "sha256": "7ba67c4e47767ca19773f7fca44e28d10824b9fc7f946283f3395b428447fef6"
+    },
+    {
+      "file": "state-partition.svg",
+      "paper_source": "figure6.svg",
+      "sha256": "74979efd2eb1f73dd02e50c5ed06ab1d2679130a19f3c12b85d7bf548891d025"
+    },
+    {
+      "file": "layout-logical.svg",
+      "paper_source": "figure7a.svg",
+      "sha256": "ce2c974e682e448affc1a9311aa8cbd2002e47f9a9eddfc09f4434e73d0c9683"
+    },
+    {
+      "file": "layout-physical.svg",
+      "paper_source": "figure7b.svg",
+      "sha256": "f83442e33aadfeef45eb33b3351f497c5d79c15478d51d663fbb2c23fac0ec02"
+    },
+    {
+      "file": "encoding-reuse.svg",
+      "paper_source": "reuse-model/output/reuse-model.svg",
+      "sha256": "7f98d714c0521423373eb57e286aa13651e45d8a03f6d0b0496dcd712ec3a125"
+    },
+    {
+      "file": "operators-heatmap.svg",
+      "paper_source": "overall-performance/operators-heatmap.svg",
+      "sha256": "da588d6868d9d248f4a2b31ea1e9a611228a130fd92647c30e2d88f9757d1b3f"
+    },
+    {
+      "file": "operators-ecdf.svg",
+      "paper_source": "overall-performance/operators-ecdf.svg",
+      "sha256": "36d32b345fe7f567e64268c203b8bce847b22c6e62e7c5467b693f73c3ee5cdd"
+    },
+    {
+      "file": "models.svg",
+      "paper_source": "overall-performance/applications.svg",
+      "sha256": "72aab4b52d6ba3ce11759bc56a164dbae4032ecbddf27fd2ea0c1bb1fe27411a"
+    }
+  ],
+  "inference_threads": {
+    "sg2044": 64,
+    "k1": 8,
+    "k3": 8,
+    "x86": 8
+  },
+  "aggregation": "Geometric mean of ratios computed from matching unrounded times"
+}

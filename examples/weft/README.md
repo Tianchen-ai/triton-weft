@@ -2,10 +2,23 @@
 
 [中文](README.zh-CN.md) · [Handbook](https://tianchen-ai.github.io/triton-weft/getting-started/examples/)
 
-Install the project's Triton wheel and NumPy, clone this repository, and run the
+Install the product and NumPy, clone this repository, and run the
 commands below **from the repository root**. Each file contains a kernel and its
 host application. The application prepares data, launches the kernel and prints
 the result.
+
+Start with the complete Weft program, then inspect its actual IR and native export:
+
+```sh
+python -m examples.weft.quickstart --dump-ir /tmp/weft-ir --export /tmp/weft-native
+python -m examples.weft.kernels.projection
+python -m examples.weft.kernels.attention
+python -m examples.weft.kernels.welford
+python -m examples.weft.kernels.gemm
+```
+
+The complete examples check every output. Normal kernels and host composition
+live in the installable `triton.kernels.weft` library; Bench owns comparisons and timing.
 
 ## 1. Familiar Triton
 

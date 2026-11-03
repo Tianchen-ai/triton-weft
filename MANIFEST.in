@@ -5,8 +5,13 @@ graft examples
 graft include
 graft lib
 graft integrations
+graft scripts
+graft results
 graft python/src
+graft python/test
 graft python/triton
+graft test
+graft unittest
 graft third_party
 include CMakeLists.txt
 include Makefile
@@ -17,3 +22,12 @@ include mkdocs.yml
 global-exclude __pycache__
 global-exclude __pycache__/*
 global-exclude *.py[cod]
+prune python/triton/_C/weft
+prune python/triton/backends/nvidia
+prune python/triton/backends/amd
+global-exclude *.so *.so.* *.pyd *.dylib *.a *.o
+exclude python/triton/FileCheck
+prune third_party/nvidia/backend/include
+prune third_party/nvidia/backend/bin
+prune third_party/nvidia/backend/lib/cupti
+prune third_party/nvidia/backend/lib/cupti-blackwell

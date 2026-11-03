@@ -13,12 +13,11 @@
 | 哪些消费者共享一个值 | Level 与 stage | 多个输出组消费同一份 staged 权重 panel |
 | 一条更新链存活多久 | Level 与 state | F32 accumulator 跨 panel 内各 block 保留 |
 
-[![Q4_K 投影中独立的存储、分组和状态边界](../assets/paper/model.png)](../assets/paper/model.png)
+[![Q4_K 投影中独立的存储、分组和状态边界](../assets/paper/model.svg)](../assets/paper/model.svg)
 
-论文的 Q4_K 投影中，**A** 是共享权重 panel，**B** 是每个输出组的 F32 state，
-**C** 是单个 256 元素 block 的 I32 state，**D** 是 grouped I16 partial。
-改变共享 panel 的作用域会改变准备工作的重复次数；改变 partial 位宽会改变算术和转换。
-这些选择都保留在源程序中。
+蓝色字段由两条独立输出状态共享，每个 record 贡献一次带尺度的更新。
+展开部分展示提升后的整数部分和与 Q4_K 校正，最下行展示四乘积 I16 边界。
+移动字段共享范围会改变准备次数，改变部分和类型会改变数值分组，均由作者选择。
 
 ## 一个完整的小例子
 
@@ -68,3 +67,9 @@ Grid 继续表示应用对独立程序实例的数据划分。
 [Level 与状态](../dsl/values-and-levels.md)和[数值操作](../dsl/functions-and-operations.md)。
 完整[模型合同](https://github.com/Tianchen-ai/triton-weft/blob/main/docs/specification/programming-model/index.md)
 定义作者程序与物理实现的边界。
+
+## 在消费者之间复用定义
+
+[![同一 Encoding 服务不同消费者](../assets/paper/encoding-reuse.svg)](../assets/paper/encoding-reuse.svg)
+
+同一字段定义服务反量化、点积和完整投影；工厂绑定格式 helper，复用准备、算术与遍历。
