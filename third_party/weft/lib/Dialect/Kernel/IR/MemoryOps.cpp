@@ -1,4 +1,6 @@
 #include "Verification.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include <limits>
 
 using namespace weft::kernel;
 using namespace weft::kernel::detail;
@@ -12,6 +14,18 @@ static mlir::LogicalResult verifyPointerMemory(mlir::Operation *op, mlir::Value 
       !sameDomain(value.getType(), offsets.getType()) ||
       !sameDomain(value.getType(), mask.getType()))
     return op->emitOpError("pointer memory requires typed element offsets, i1 mask and matching value domains");
+  return mlir::success();
+}
+
+mlir::LogicalResult LocalAllocOp::verify() {
+  auto bits = getResult().getType().getElementType().getIntOrFloatBitWidth();
+  if (getElements() <= 0 || bits < 8 || bits % 8 || getAlignment() < int64_t(bits / 8) ||
+      (getAlignment() & (getAlignment() - 1)) ||
+      getElements() > std::numeric_limits<int64_t>::max() / (bits / 8))
+    return emitOpError("local storage requires a positive bounded byte extent and natural power-of-two alignment");
+  for (auto &use : getResult().getUses())
+    if (mlir::isa<HelperReturnOp, HandoffOp, ReturnOp, mlir::scf::YieldOp>(use.getOwner()))
+      return emitOpError("a private storage address cannot escape its lexical allocation scope");
   return mlir::success();
 }
 

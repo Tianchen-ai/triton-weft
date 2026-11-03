@@ -276,5 +276,6 @@ callback 的原生 graph 保持 RVV permission，原生 IME 的亲和性收窄�
 原生单实例、完整 grid/OpenMP launch 和模型 E2E 分开计时。
 通过独立 Weft Bench 验证导出产物、加载、数值与角色命中；prefill/decode 分开记录。
 正常 llama.cpp 的 repack、IME、OpenMP 等能力继续保留，固定 baseline 仅在测量合同变化时补测。
-集成相关源码位于 integrations/llama.cpp，Python 安装/角色接口位于
-python/triton/integrations/llama_cpp.py，具名产物集合位于 python/triton/runtime/package.py。
+集成相关源码位于 third_party/weft/integrations/llama.cpp，共享 Python 安装/角色接口位于
+third_party/weft/python/weft_core/integrations/llama_cpp.py，具名产物集合位于
+third_party/weft/python/weft_core/package.py。Triton 的同名模块保留前端对象适配。

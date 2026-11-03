@@ -103,7 +103,9 @@ FailureOr<Value> riscv_internal::allocateLocalValue(
       lifetime = state.getLifetimeEndDomainId(); purpose = "handoff"; schema = "local-state-array";
     } else if (auto empty = dyn_cast<riscv::EmptyOp>(anchor)) {
       owner = empty.getOwnerDomainId(); birth = empty.getBirthId();
-      lifetime = empty.getLifetimeEndDomainId(); purpose = "handoff"; schema = "local-state-array";
+      // An ordinary lexical temporary has a storage lifetime, but it is not
+      // an initialized state birth in its enclosing author's Level.
+      lifetime = empty.getLifetimeEndDomainId(); schema = "local-value-array";
     } else if (auto staged = dyn_cast<riscv::MaterializeOp>(anchor)) {
       owner = staged.getOwnerDomainId(); birth = staged.getBirthId();
       lifetime = staged.getLifetimeEndDomainId(); schema = "staged-value";

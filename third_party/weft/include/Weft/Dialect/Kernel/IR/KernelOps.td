@@ -271,6 +271,13 @@ def WeftKernel_CommitOp : WeftKernel_Op<"commit", [MemoryEffects<[MemWrite]>]> {
   let hasVerifier = 1;
 }
 
+def WeftKernel_LocalAllocOp : WeftKernel_Op<"local_alloc"> {
+  let summary = "Lexically owned, address-observable private numerical storage";
+  let arguments = (ins I64Attr:$elements, I64Attr:$alignment);
+  let results = (outs Res<WeftKernel_PointerType, "", [MemAlloc]>:$result);
+  let hasVerifier = 1;
+}
+
 def WeftKernel_PointerCastOp : WeftKernel_Op<"pointer_cast", [Pure]> {
   let arguments = (ins WeftKernel_PointerType:$input);
   let results = (outs WeftKernel_PointerType:$result);

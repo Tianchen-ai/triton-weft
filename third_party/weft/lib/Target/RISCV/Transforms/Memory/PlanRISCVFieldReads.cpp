@@ -1,5 +1,6 @@
 #include "Transforms/Memory/FieldReads.h"
 #include "Analysis/LocalMemory.h"
+#include "Analysis/ValueLiveness.h"
 #include "Transforms/Representation/NumericalValidity.h"
 #include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Weft/Analysis/StorageBytes.h"
@@ -221,6 +222,24 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
   });
   llvm::DenseMap<std::pair<Value, StringAttr>, Value> saved;
   int64_t identity = lastLocalIdentity(module);
+  auto replaceNumericField = [&](riscv::FieldOp field, Value value) {
+    SmallVector<riscv::FieldReadOp> readers;
+    for (Operation *user : field.getResult().getUsers())
+      if (auto read = dyn_cast<riscv::FieldReadOp>(user);
+          read && read.getIndices().empty())
+        readers.push_back(read);
+    for (auto read : readers) {
+      b.setInsertionPoint(read);
+      Value result = value;
+      auto actual = cast<riscv::ValueType>(result.getType());
+      auto expected = read.getResult().getType();
+      if (actual != expected)
+        result = riscv::ConvertLayoutOp::create(b, read.getLoc(), expected, result,
+            layoutConversion(b, actual.getLayout(), expected.getLayout()), riscv::AccessAttr(), unselectedLeaf(b));
+      b.replaceOp(read, result);
+    }
+    b.replaceOp(field, value);
+  };
   for (auto field : fields) {
     // Preserve Encoding geometry until the selected fragment materializer has
     // had the opportunity to form its exact field transfer. If it needs a
@@ -256,7 +275,7 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
       continue;
     }
     auto load = encodedReadEpoch(field.getOwner());
-    if (!load) {
+    if (!load || load.getSnapshotStorage()) {
       auto owner = dyn_cast<riscv::ValueType>(field.getOwner().getType());
       auto facts = fieldFacts(field);
       int64_t bits = logicalBitWidth(value ? value.getElementType() : field.getResult().getType());
@@ -265,7 +284,8 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
       // already realize their layouts. Close the base-record vector bit
       // projection here, without replacing those existing transfer programs.
       bool general = value && value.getLayout().getCarrier() != "scalar" &&
-          facts.mapping == "natural" && bits % 8;
+          ((facts.mapping == "natural" && bits % 8) ||
+           (facts.mapping == "joined" && value.getLayout().getCarrier() == "local"));
       if (!encoding || encoding.getKind() != "base" || !general) continue;
       auto declaration = findEncoding(field, baseEncodingFamily(field, encoding));
       if (!declaration || owner.getShape().empty() || owner.getShape().asArrayRef().back() != declaration.getElements())
@@ -279,10 +299,9 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
         result = riscv::ConvertLayoutOp::create(b, field.getLoc(), value, result,
             layoutConversion(b, actual.getLayout(), value.getLayout()), riscv::AccessAttr(), unselectedLeaf(b));
       }
-      b.replaceOp(field, result);
+      replaceNumericField(field, result);
       continue;
     }
-    if (load.getSnapshotStorage()) continue;
     auto owner = load.getRegion().getType();
     auto facts = fieldFacts(field);
     int64_t bits = logicalBitWidth(value ? value.getElementType() : field.getResult().getType());
@@ -318,7 +337,20 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     // record layout or delaying their read past an aliasing write.
     bool numericSnapshot = !riscv::isContiguousRecordRegion(load.getRegion()) &&
         needsReadSnapshot(load);
-    bool general = numericSnapshot || (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
+    bool renamedCoordinates = llvm::any_of(field.getResult().getUsers(), [](Operation *user) {
+      return isa<riscv::ReshapeOp>(user);
+    });
+    // A local joined field needs an assembled numeric backing, not a deferred
+    // projection into disjoint encoded fragments. Existing RVV transfers keep
+    // their selected representation and cost.
+    bool localJoined = facts.mapping == "joined" && value && value.getLayout().getCarrier() == "local";
+    auto target = field->getParentOfType<riscv::KernelOp>().getTarget();
+    bool oversizedProjection = llvm::any_of(field.getResult().getUsers(), [&](Operation *user) {
+      if (!isa<riscv::ExtractOp>(user)) return false;
+      auto groups = riscv_internal::operationRegisterGroups(user);
+      return !groups || *groups > target.getVectorRegisters();
+    });
+    bool general = numericSnapshot || renamedCoordinates || localJoined || oversizedProjection || (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
         (owner.getShape().size() > 1 && facts.mapping == "joined");
     if (!general) continue;
     if (owner.getShape().empty() || owner.getShape().asArrayRef().back() != owner.getElements())
@@ -337,7 +369,7 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
       result = riscv::ConvertLayoutOp::create(b, field.getLoc(), value, result,
           layoutConversion(b, actual.getLayout(), value.getLayout()), riscv::AccessAttr(), unselectedLeaf(b));
     }
-    b.replaceOp(field, result);
+    replaceNumericField(field, result);
   }
   return success();
 }

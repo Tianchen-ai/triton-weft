@@ -1631,6 +1631,13 @@ def WeftRISCV_LocalAllocOp
   let hasVerifier = 1;
 }
 
+def WeftRISCV_LocalAddressOp : WeftRISCV_TerminalOp<"local_address", [Pure]> {
+  let summary = "Typed address of an already allocated private object";
+  let arguments = (ins WeftRISCV_LocalType:$storage);
+  let results = (outs WeftRISCV_MemDescType:$result);
+  let hasVerifier = 1;
+}
+
 def WeftRISCV_LocalSlotOp : WeftRISCV_TerminalOp<"local_slot", [Pure]> {
   let summary = "Select a bounded version of a compiler-owned pipeline buffer";
   let arguments = (ins WeftRISCV_LocalType:$storage, Index:$index,

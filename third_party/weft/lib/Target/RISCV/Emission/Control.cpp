@@ -42,6 +42,19 @@ mlir::LogicalResult Emitter::compileOperation(mlir::Operation &operation) {
     line("if (!(" + predicate.scalar + ")) __builtin_unreachable();");
     return mlir::success();
   }
+  if (auto address = mlir::dyn_cast<riscv::LocalAddressOp>(operation)) {
+    auto storage = bindings.lookup(address.getStorage());
+    if (storage.kind != Binding::Kind::LocalArray)
+      return fail(address, "local address requires its allocated backing object");
+    Binding result;
+    result.kind = Binding::Kind::Memory;
+    result.memory.name = storage.scalar;
+    result.memory.encoding = address.getResult().getType().getEncoding();
+    result.memory.elementType = *denseElementType(result.memory.encoding);
+    result.memory.isConst = false;
+    bindings[address.getResult()] = std::move(result);
+    return mlir::success();
+  }
   if (auto cast = mlir::dyn_cast<riscv::PointerCastOp>(operation)) {
     auto origin = bindings.lookup(cast.getInput());
     if (origin.kind != Binding::Kind::Memory) return fail(cast, "pointer cast requires its bound storage origin");

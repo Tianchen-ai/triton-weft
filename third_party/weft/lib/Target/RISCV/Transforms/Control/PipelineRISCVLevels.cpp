@@ -84,6 +84,10 @@ public:
       if (failed(schedule)) { signalPassFailure(); return; }
       auto expanded = expandPipeline(*schedule, b, identity);
       if (failed(expanded)) { signalPassFailure(); return; }
+      auto kernel = loop->getParentOfType<riscv::KernelOp>();
+      auto previous = kernel->getAttrOfType<IntegerAttr>("weft.pipeline.expanded_depth");
+      kernel->setAttr("weft.pipeline.expanded_depth", b.getI64IntegerAttr(
+          std::max<int64_t>(schedule->depth, previous ? previous.getInt() : 1)));
       b.replaceOp(loop, expanded->guard.getResults());
       getOperation().walk([&](riscv::KernelOp kernel) {
         selectFragmentRegisterReuse(kernel);

@@ -714,11 +714,13 @@ bool shortenSharedReloadKind(Peak &peak, mlir::IRRewriter &rewriter) {
     while (!pending.empty()) {
       auto value = pending.pop_back_val();
       for (mlir::OpOperand &use : value.getUses()) {
-        auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(use.getOwner());
-        if (reshape && riscv_internal::registerStorageIdentity(reshape.getResult()) == root) {
-          if (visited.insert(reshape).second) {
-            pending.push_back(reshape.getResult());
-            if (aliases) aliases->push_back(reshape);
+        mlir::Operation *alias = use.getOwner();
+        if (!alias->hasAttr("birth_id") && alias->getNumResults() == 1 &&
+            riscv::registerAliasSource(alias->getResult(0)) == value &&
+            riscv_internal::registerStorageIdentity(alias->getResult(0)) == root) {
+          if (visited.insert(alias).second) {
+            pending.push_back(alias->getResult(0));
+            if (aliases) aliases->push_back(alias);
           }
         } else consumers.push_back(&use);
       }
@@ -802,15 +804,18 @@ bool shortenSharedReloadKind(Peak &peak, mlir::IRRewriter &rewriter) {
     }
     std::function<mlir::Value(mlir::Value)> supply = [&](mlir::Value value) -> mlir::Value {
       if (auto mapped = mapping.lookupOrNull(value)) return mapped;
-      auto reshape = mlir::cast<riscv::ReshapeOp>(value.getDefiningOp());
-      mapping.map(reshape.getInput(), supply(reshape.getInput()));
-      auto *copy = rewriter.clone(*reshape.getOperation(), mapping);
+      auto *alias = value.getDefiningOp();
+      auto source = riscv::registerAliasSource(value);
+      auto input = supply(source);
+      mapping.map(source, input);
+      auto *copy = rewriter.clone(*alias, mapping);
       return copy->getResult(0);
     };
     use->set(supply(use->get()));
   }
-  for (auto *alias : llvm::reverse(aliases)) rewriter.eraseOp(alias);
-  rewriter.eraseOp(selected);
+  for (auto *alias : llvm::reverse(aliases))
+    if (alias->use_empty()) rewriter.eraseOp(alias);
+  if (selected->use_empty()) rewriter.eraseOp(selected);
   return true;
 }
 

@@ -106,9 +106,13 @@ bool transfersIntoRegion(Operation *operation, Value value, bool captured = fals
   if (!riscv::hasUniqueRegisterUse(value) &&
       !(captured && singleUseInBlock(value, operation->getBlock(), operation))) return false;
   if (auto loop = dyn_cast<scf::ForOp>(operation))
-    return llvm::is_contained(loop.getInitArgs(), value);
+    return llvm::any_of(loop.getInitArgs(), [&](Value initial) {
+      return registerStorageIdentity(initial) == registerStorageIdentity(value);
+    });
   if (auto loop = dyn_cast<scf::WhileOp>(operation))
-    return llvm::is_contained(loop.getInits(), value);
+    return llvm::any_of(loop.getInits(), [&](Value initial) {
+      return registerStorageIdentity(initial) == registerStorageIdentity(value);
+    });
   return false;
 }
 }

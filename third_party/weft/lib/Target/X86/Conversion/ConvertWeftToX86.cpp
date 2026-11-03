@@ -4883,6 +4883,15 @@ private:
       values.map(iota.getResult(), arith::ConstantOp::create(b, loc, type, DenseElementsAttr::get(type, numbers)));
       return success();
     }
+    if (auto allocation = dyn_cast<wk::LocalAllocOp>(op)) {
+      auto element = physicalType(allocation.getResult().getType().getElementType());
+      auto storageType = MemRefType::get({int64_t(allocation.getElements())}, element);
+      auto storage = memref::AllocaOp::create(b, loc, storageType, IntegerAttr::get(b.getI64Type(), allocation.getAlignment()));
+      auto address = memref::ExtractAlignedPointerAsIndexOp::create(b, loc, storage);
+      Value bits = arith::IndexCastOp::create(b, loc, b.getI64Type(), address);
+      values.map(allocation.getResult(), LLVM::IntToPtrOp::create(b, loc, LLVM::LLVMPointerType::get(b.getContext()), bits));
+      return success();
+    }
     if (isa<wk::PointerCastOp>(op)) { values.map(op.getResult(0), mapped(op.getOperand(0))); return success(); }
     if (isa<wk::PointerLoadOp>(op)) return memory(op, true);
     if (isa<wk::PointerStoreOp>(op)) return memory(op, false);

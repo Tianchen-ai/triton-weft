@@ -1,6 +1,7 @@
 #include "Weft/Target/RISCV/RISCVPasses.h"
 #include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Analysis/LocalMemory.h"
+#include "Transforms/Memory/FieldStores.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "Weft/Dialect/RISCV/IR/Stream.h"
@@ -199,8 +200,10 @@ public:
         auto valueType = dyn_cast<riscv::ValueType>(store.getValue().getType());
         if (Value source = local(store.getValue()); source && valueType &&
             valueType.getShape() == store.getRegion().getType().getShape() &&
-            valueType.getAxisIds() == store.getRegion().getType().getAxisIds())
+            valueType.getAxisIds() == store.getRegion().getType().getAxisIds()) {
+          if (failed(riscv_internal::materializeFieldStoreView(b, store))) return failure();
           if (failed(riscv_internal::materializeDenseValueProgram(store))) return failure();
+        }
         continue;
       }
       if (op->getNumResults() != 1 ||
@@ -262,6 +265,20 @@ public:
     module.walk([](riscv::IotaOp iota) {
       if (iota.getResult().use_empty()) iota.erase();
     });
+    // Local transposes and snapshots expose complete copy consumers. Close
+    // those through the same bounded graph materializer before forwarding.
+    if (failed(riscv_internal::materializeDenseValuePrograms(module))) return failure();
+    SmallVector<riscv::StoreOp> copies;
+    module.walk([&](riscv::StoreOp store) {
+      auto conversion = store.getValue().getDefiningOp<riscv::ConvertLayoutOp>();
+      if (!conversion || !riscv_internal::isCompleteLocalRead(conversion)) return;
+      auto own = riscv_internal::residentRegisterGroups(store.getValue());
+      auto outside = riscv_internal::surroundingRegisterGroups(store, {store.getValue()});
+      auto kernel = store->getParentOfType<riscv::KernelOp>();
+      if (own && outside && *own > kernel.getTarget().getVectorRegisters() - *outside) copies.push_back(store);
+    });
+    for (auto copy : copies)
+      if (failed(riscv_internal::materializeDenseValueProgram(copy))) return failure();
     return riscv_internal::forwardLocalCopies(module, b);
   }
 
@@ -430,6 +447,10 @@ private:
   bool needsProgram(Operation *op) const {
     auto kernel = op->getParentOfType<riscv::KernelOp>();
     if (!kernel) return false;
+    for (Value result : op->getResults())
+      if (auto type = dyn_cast<riscv::ValueType>(result.getType());
+          type && type.getLayout().getCarrier() == "local" &&
+          isa<IntegerType, FloatType>(type.getElementType()) && !local(result)) return true;
     if (auto load = dyn_cast<riscv::LoadOp>(op))
       if (localMemory(load.getRegion()))
         if (auto type = dyn_cast<riscv::ValueType>(load.getResult().getType()); type &&
@@ -457,11 +478,18 @@ private:
     };
     for (Value value : op->getOperands()) account(value);
     for (Value value : op->getResults()) account(value);
-    const int64_t budget = kernel.getTarget().getVectorRegisters();
+    SmallVector<Value> current(op->getOperands());
+    llvm::append_range(current, op->getResults());
+    auto outside = riscv_internal::surroundingRegisterGroups(op, current);
+    const int64_t budget = std::max<int64_t>(1, kernel.getTarget().getVectorRegisters() - outside.value_or(0));
     if (dynamicLocal || dynamicNumeric || scalarTraversal || exceedsRegisterBudget(op, budget)) return true;
     for (Value result : op->getResults())
-      if (isa<riscv::ValueType>(result.getType()) &&
-          consumerExceedsRegisterBudget(result, budget)) return true;
+      if (auto value = dyn_cast<riscv::ValueType>(result.getType())) {
+        auto scalars = riscv_internal::scalarRegisterCount(
+            value, kernel.getTarget().getMarch().starts_with("rv32") ? 32 : 64);
+        if (value.getLayout().getCarrier() == "scalar" && scalars && *scalars <= 32) continue;
+        if (consumerExceedsRegisterBudget(result, budget)) return true;
+      }
     return false;
   }
 
@@ -547,7 +575,10 @@ private:
           auto value = load(input, type, coordinates, piece, anchor);
           if (failed(value)) return failure();
           return store(*value, *output, type, coordinates, piece, anchor);
-        }, true, input))) return anchor->emitError("whole-value copy has no bounded physical fragment"), failure();
+        // The private object owns the complete capacity. Masked source loads
+        // fill inactive coordinates with zero, so a later local transpose
+        // never observes uninitialized bytes from a shorter source window.
+        }, true))) return anchor->emitError("whole-value copy has no bounded physical fragment"), failure();
     return *destination;
   }
 

@@ -22,7 +22,7 @@ git diff v3.8.0 -- CMakeLists.txt setup.py python/src
 | `lib/Transforms` | 共享 SCF full-tile 和有界软件流水展开 |
 | `lib/Target/RISCV`、`Target/X86` | 各自 Backend、Platform、Analysis、Conversion、Transforms、Emission |
 | `lib/Runtime` | 原生 ABI、库生命周期和 worker 检查 |
-| `python/triton/integrations`、`integrations/llama.cpp` | 应用合同与 GGML 调用点 |
+| `python/triton/integrations`、`third_party/weft/integrations/llama.cpp` | 应用合同与 GGML 调用点 |
 | `cpu.py`、`tools/cpu.py` | 目标构造、同质核心发现与进程启动 |
 | `CMakeLists.txt`、`setup.py` | 统一 SDK、Triton 发行包与原生工具链 |
 

@@ -124,7 +124,8 @@ mlir::LogicalResult verifyDescriptorFacts(mlir::Operation *owner,
   auto declaration = findEncoding(module, baseFamily);
   if (!declaration || descriptor.getStorageBits() != declaration.getStorageBits() ||
       descriptor.getElements() != declaration.getElements() ||
-      descriptor.getAlignment() != declaration.getAlignment() ||
+      descriptor.getAlignment() <= 0 ||
+      declaration.getAlignment() % descriptor.getAlignment() != 0 ||
       descriptor.getInterleaveRows() != interleaveRows)
     return owner->emitError(
         "memory descriptor storage facts disagree with its physical Encoding declarations");

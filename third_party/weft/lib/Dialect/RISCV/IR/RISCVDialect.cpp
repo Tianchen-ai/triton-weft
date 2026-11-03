@@ -5830,6 +5830,15 @@ mlir::LogicalResult LocalAllocOp::verify() {
   return mlir::success();
 }
 
+mlir::LogicalResult LocalAddressOp::verify() {
+  auto result = getResult().getType();
+  if (!getStorage().getDefiningOp<LocalAllocOp>() || !result.getShape().empty() ||
+      result.getAddressClass() != "pointer" || result.getAccess() != "readwrite" ||
+      getStorage().getType().getSchema() != "author-local-storage")
+    return emitOpError("local address requires its lexical author allocation and a rank-zero readwrite pointer descriptor");
+  return mlir::success();
+}
+
 mlir::LogicalResult LocalSlotOp::verify() {
   auto backing = getStorage().getType();
   auto slot = getResult().getType();

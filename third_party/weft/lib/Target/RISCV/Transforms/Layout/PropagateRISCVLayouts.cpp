@@ -12,6 +12,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Analysis/Liveness.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
@@ -2993,6 +2994,44 @@ public:
     });
     getOperation().walk([&](mlir::scf::IfOp branch) {
       controlResidency(branch, branch.getResults());
+    });
+    // A complete read must coexist with the values live at that exact source
+    // boundary. Preserve the snapshot in addressable storage when that set
+    // cannot fit, so consumers can issue bounded windows instead of spilling
+    // and immediately reloading an impossible whole register tuple later.
+    mlir::Liveness liveness(getOperation());
+    auto projectedGroups = [&](mlir::Value value) -> std::optional<int64_t> {
+      auto type = mlir::dyn_cast<riscv::ValueType>(value.getType());
+      if (!type || roles[value].local ||
+          !mlir::isa<mlir::IntegerType, mlir::FloatType>(type.getElementType())) return 0;
+      auto layout = buildLayout(builder, value, roles[value],
+          std::max<int64_t>(1, connectedLaneSpans.lookup(value)), valueLMULBounds.lookup(value));
+      if (!layout) return std::nullopt;
+      if (layout.getCarrier() != "rvv") return 0;
+      auto count = riscv_internal::staticProduct(layout.getTimeFactors().asArrayRef());
+      return count ? riscv_internal::staticProduct({*count, layout.getRegisterGroups()}) : std::nullopt;
+    };
+    getOperation().walk([&](riscv::LoadOp load) {
+      auto encoding = mlir::dyn_cast<kernel::EncodingType>(load.getRegion().getType().getEncoding());
+      if (!encoding || encoding.getKind() != "dense" || load.getSnapshotStorage() ||
+          roles[load.getResult()].local) return;
+      auto own = projectedGroups(load.getResult());
+      if (!own || !*own) return;
+      auto *info = liveness.getLiveness(load->getBlock());
+      auto kernel = load->getParentOfType<riscv::KernelOp>();
+      if (!info || !kernel) return;
+      int64_t remaining = kernel.getTarget().getVectorRegisters() - *own;
+      for (mlir::Value value : info->currentlyLiveValues(load)) {
+        if (value == load.getResult()) continue;
+        auto count = projectedGroups(value);
+        if (!count) continue;
+        remaining -= std::min<int64_t>(*count, kernel.getTarget().getVectorRegisters() + 1);
+        if (remaining < 0) break;
+      }
+      if (remaining < 0) {
+        roles[load.getResult()].local = true;
+        localState = true;
+      }
     });
     if (localState) propagateRoles();
 

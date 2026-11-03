@@ -990,6 +990,22 @@ private:
       targetName = riscv::SymbolOp::getOperationName();
     } else if (mlir::isa<kernel::LocalShapeOp>(source)) {
       targetName = riscv::LocalShapeOp::getOperationName();
+    } else if (auto allocation = mlir::dyn_cast<kernel::LocalAllocOp>(source)) {
+      auto element = allocation.getResult().getType().getElementType();
+      auto empty = builder.getDenseI64ArrayAttr({});
+      int64_t bytes = allocation.getElements() * (element.getIntOrFloatBitWidth() / 8);
+      int64_t identity = nextBirthId++;
+      auto storageType = riscv::LocalType::get(builder.getContext(), element, empty, empty,
+          bytes, allocation.getAlignment(), identity, "handoff", currentOwnerDomainId,
+          identity, currentOwnerDomainId, "author-local-storage");
+      auto size = mlir::arith::ConstantIndexOp::create(builder, source->getLoc(), bytes);
+      auto storage = riscv::LocalAllocOp::create(builder, source->getLoc(), storageType, size);
+      auto pointer = mlir::cast<riscv::MemDescType>(convertType(allocation.getResult().getType(), "pointer", "readwrite", identity));
+      auto address = riscv::LocalAddressOp::create(builder, source->getLoc(), pointer, storage);
+      riscv_internal::copyOrigin(source, storage);
+      riscv_internal::copyOrigin(source, address);
+      mapping.map(allocation.getResult(), address.getResult());
+      return mlir::success();
     } else if (mlir::isa<kernel::EmptyOp>(source)) {
       attrs.emplace_back(builder.getStringAttr("owner_domain_id"),
                          builder.getI64IntegerAttr(currentOwnerDomainId));

@@ -61,6 +61,12 @@ atomic ordering，不能作为普通可移动的 load/store 对待。
 同 storage 字节宽度的 `pointer_cast` 只重解释元素类型，保留来源、偏移单位和 alias；
 它不把指针变成没有存储来源的整数，也不增强地址对齐。
 
+`local_alloc` 表达地址可观察的作者私有数值对象。其元素数量、元素类型和对齐明确，
+生命周期属于所在词法作用域；返回地址或经 handoff/control result 逃逸均非法。
+普通 SSA local 不因此强制变成内存。该对象通过相同 pointer load/store/atomic
+合同使用，在 RISC-V 形成真实 LocalAlloc 与 typed LocalAddress，在 x86 形成 scoped
+memref allocation，继续经过现有资源与存储分析。前端不私下向 emitter 插入数组。
+
 ### 1.3 Logical Value
 
 - element type；

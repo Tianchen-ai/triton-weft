@@ -240,7 +240,12 @@ private:
     SmallVector<ConstantIntRanges> operands;
     for (Value operand : result.getOwner()->getOperands()) {
       unsigned bits = ConstantIntRanges::getStorageBitwidth(operand.getType());
-      auto operandType = interpreted(operand.getType(), type);
+      // An index operand keeps its machine width even when the result is a
+      // one-bit comparison. Truncating index bounds to the predicate width can
+      // falsely prove a validity mask empty and then narrow live arithmetic.
+      auto operandType = operand.getType().isIndex()
+          ? IntegerType::get(value.getContext(), bits, IntegerType::Signed)
+          : interpreted(operand.getType(), type);
       auto range = operandType ? get(operand, operandType, depth + 1) : std::nullopt;
       if (!range) operands.push_back(ConstantIntRanges::maxRange(bits));
       else operands.push_back(ConstantIntRanges::range(range->minimum.extOrTrunc(bits),

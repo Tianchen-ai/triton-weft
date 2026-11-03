@@ -15,6 +15,7 @@ class CompilationError(RuntimeError):
             self.diagnostic = json.loads(message)
         except json.JSONDecodeError:
             self.diagnostic = {"message": message}
+        self.report = self.diagnostic
         super().__init__(message)
 
 

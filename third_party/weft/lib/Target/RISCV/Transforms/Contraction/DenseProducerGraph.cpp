@@ -62,7 +62,10 @@ bool DenseProducerGraph::projects(riscv::ValueType type) const {
 bool DenseProducerGraph::collect(Value value) {
   auto type = dyn_cast<riscv::ValueType>(value.getType());
   if (!type) return isa<IntegerType, FloatType, IndexType>(value.getType());
-  if (!projects(type) || !isa<IntegerType, FloatType>(type.getElementType())) return false;
+  if (!projects(type) || !isa<IntegerType, FloatType>(type.getElementType())) {
+    failureReason = "producer coordinates or element type leave the consumer domain";
+    return false;
+  }
   // Once an observed value is an input, another path through a shared DAG
   // cannot turn that same SSA into a producer owned and erased by this graph.
   if (llvm::is_contained(inputs, value)) return true;
@@ -74,7 +77,7 @@ bool DenseProducerGraph::collect(Value value) {
   Operation *op = value.getDefiningOp();
   if (!op || op->getBlock() != root->getBlock() || op->getNumResults() != 1 ||
       op->getNumRegions()) return boundary(value);
-  if (members.size() >= 128) return false;
+  if (members.size() >= 128) { failureReason = "producer graph exceeds the bounded operation domain"; return false; }
   if (members.contains(op)) return true;
   // A producer already observed before this sink must remain at its original
   // position. Supply its completed value instead of attempting to move its
@@ -97,7 +100,13 @@ bool DenseProducerGraph::collect(Value value) {
     if (!encoding || encoding.getKind() != "dense" || load.getSnapshotStorage() ||
         !riscv::isAddressableDenseDescriptor(load.getRegion()) ||
         memory.getShape() != type.getShape() || memory.getAxisIds() != type.getAxisIds() ||
-        (logicalBitWidth(type) < 8 && !(type.getElementType().isInteger(1) && memory.getStorageBits() == 8))) return false;
+        (logicalBitWidth(type) < 8 && !(type.getElementType().isInteger(1) && memory.getStorageBits() == 8))) {
+      // Encoded and sub-byte reads have their own selected transfer. Keep the
+      // completed snapshot as an input; splitting its descriptor here would
+      // reinterpret packed storage as an ordinary dense address.
+      members.erase(op);
+      return boundary(value);
+    }
     for (auto [position, axis] : llvm::enumerate(type.getAxisIds().asArrayRef())) {
       if (type.getShape()[position] == 1) continue;
       auto found = llvm::find(domain.getAxisIds().asArrayRef(), axis);
@@ -107,8 +116,14 @@ bool DenseProducerGraph::collect(Value value) {
       // A bounded consumer may project its active Level onto this snapshot;
       // the shared domain/point check below still closes that active range.
       if (type.getLayout().getValidity() == "tail" && !origin &&
-          type.getShape()[position] > 0 && !completePrivate) return false;
-      if (origin && points[output] && origin != points[output]) return false;
+          type.getShape()[position] > 0 && !completePrivate) {
+        members.erase(op);
+        return boundary(value);
+      }
+      if (origin && points[output] && origin != points[output]) {
+        members.erase(op);
+        return boundary(value);
+      }
       if (origin) points[output] = origin;
     }
     reads.push_back(load);
@@ -121,7 +136,12 @@ bool DenseProducerGraph::collect(Value value) {
         !collect(lookup.getIndices())) return false;
   } else if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(op)) {
     if (isCompleteLocalRead(conversion)) localReads.push_back(conversion);
-    else if (conversion.getConversion().getEffect() != "pure" || !collect(conversion.getInput())) return false;
+    else if (conversion.getConversion().getEffect() != "pure") {
+      // A completed read is an observed value at this boundary. It may supply
+      // a bounded consumer without moving the read into that consumer's issue.
+      members.erase(op);
+      return boundary(value);
+    } else if (!collect(conversion.getInput())) return false;
   } else if (auto broadcast = dyn_cast<riscv::RVVAxisBroadcastOp>(op)) {
     // An internal broadcast is a coordinate embedding. Reproject its smaller
     // source with this issue instead of requiring the full expanded value to
@@ -149,7 +169,11 @@ bool DenseProducerGraph::boundary(Value value) {
     auto resident = residentRegisterGroups(value);
     auto target = root->getParentOfType<riscv::KernelOp>().getTarget();
     if (!resident || *resident > target.getVectorRegisters() ||
-        llvm::any_of(type.getShape().asArrayRef(), [](int64_t n) { return n < 0; })) return false;
+        llvm::any_of(type.getShape().asArrayRef(), [](int64_t n) { return n < 0; })) {
+      failureReason = "producer boundary has unbounded or excessive register residency";
+      if (auto *op = value.getDefiningOp()) failureReason += " at " + op->getName().getStringRef().str();
+      return false;
+    }
   }
   if (!llvm::is_contained(inputs, value)) inputs.push_back(value);
   return true;
@@ -548,7 +572,12 @@ bool DenseProducerGraph::needsRealization() const {
       domain.getLayout().getTimeFactors()[lanePosition] > 1)
     return true;
   if ((!count && !dynamic) || (count && *count <= width)) return false;
-  const int64_t budget = root->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters();
+  int64_t budget = root->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters();
+  SmallVector<Value> owned(inputs);
+  for (Operation *op : order) llvm::append_range(owned, op->getResults());
+  auto surrounding = surroundingRegisterGroups(root, owned);
+  if (!surrounding) return true;
+  budget = std::max<int64_t>(1, budget - *surrounding);
   unsigned xlen = root->getParentOfType<riscv::KernelOp>().getTarget().getMarch().starts_with("rv32") ? 32 : 64;
   if (!dynamic && reductions.empty() && domain.getLayout().getCarrier() == "rvv") {
     // Compare the whole-Value schedule with the same issue resource model used

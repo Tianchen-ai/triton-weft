@@ -98,6 +98,7 @@ Value borrowedStorage(Value value) {
   if (auto op = value.getDefiningOp<ReaxisOp>()) return op.getBase();
   if (auto op = value.getDefiningOp<LinearViewOp>()) return op.getBase();
   if (auto op = value.getDefiningOp<LocalViewOp>()) return op.getSource();
+  if (auto op = value.getDefiningOp<LocalAddressOp>()) return op.getStorage();
   if (auto op = value.getDefiningOp<LocalBindOp>()) return op.getStorage();
   if (auto op = value.getDefiningOp<LocalSlotOp>()) return op.getStorage();
   if (auto op = value.getDefiningOp<LocalReuseOp>()) return op.getPrevious();

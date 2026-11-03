@@ -175,8 +175,8 @@ private:
     const unsigned axis = op.getAxis();
     auto inputType = cast<riscv::ValueType>(op.getInputs()[0].getType());
     int64_t extent = inputType.getShape()[axis];
-    if (extent <= 0 || !llvm::isPowerOf2_64(extent))
-      return op.emitOpError("tuple reduction currently requires a positive power-of-two extent");
+    if (extent <= 0)
+      return op.emitOpError("tuple reduction requires a static positive extent");
     b.setInsertionPoint(op);
     auto typeFor = [&](Type element, ArrayRef<int64_t> shape, ArrayRef<int64_t> axes) -> Type {
       if (shape.empty()) return element;
@@ -198,8 +198,9 @@ private:
     auto &body = op.getCombine().front();
     bool projected = false;
     while (extent > 1) {
-      extent /= 2;
-      Value even, odd;
+      const int64_t inputExtent = extent;
+      extent = llvm::divideCeil(inputExtent, int64_t{2});
+      Value even, odd, tailIndex, paired;
       StringRef selector;
       if (extent == 1) {
         // The last pair has no pair axis: project its two fixed coordinates
@@ -220,6 +221,21 @@ private:
         auto one = riscv::ConstantOp::create(b, op.getLoc(), unsignedType, b.getIntegerAttr(unsignedType, 1));
         even = riscv::BinaryOp::create(b, op.getLoc(), indexType, iota, two, "mul", unselectedLeaf(b));
         odd = riscv::BinaryOp::create(b, op.getLoc(), indexType, even, one, "add", unselectedLeaf(b));
+        if (inputExtent % 2) {
+          // Carry the unpaired final tuple to the next tree level. Evaluate
+          // its inactive combiner lane on an existing pair, so neither an
+          // out-of-bounds read nor an invented numerical identity is needed.
+          tailIndex = even;
+          auto bound = riscv::ConstantOp::create(b, op.getLoc(), unsignedType,
+              b.getIntegerAttr(unsignedType, inputExtent / 2));
+          auto predicateType = typeFor(b.getI1Type(), {extent}, {axes[axis]});
+          paired = riscv::CompareOp::create(b, op.getLoc(), predicateType, iota, bound,
+              "lt", unselectedLeaf(b));
+          auto zero = riscv::ConstantOp::create(b, op.getLoc(), unsignedType,
+              b.getIntegerAttr(unsignedType, 0));
+          even = riscv::SelectOp::create(b, op.getLoc(), indexType, paired, even, zero, unselectedLeaf(b));
+          odd = riscv::SelectOp::create(b, op.getLoc(), indexType, paired, odd, one, unselectedLeaf(b));
+        }
         for (Operation *created : {iota.getOperation(), two.getOperation(), one.getOperation()}) copyOrigin(op, created);
         selector = "gather";
       }
@@ -247,13 +263,20 @@ private:
         copyOrigin(op, created);
         mapping.map(inner.getResult(0), created->getResult(0));
       }
-      values.clear();
-      for (Value yielded : body.getTerminator()->getOperands()) {
+      SmallVector<Value> nextValues;
+      for (auto [i, yielded] : llvm::enumerate(body.getTerminator()->getOperands())) {
         Value value = mapping.lookup(yielded);
         if (!shape.empty() && !isa<riscv::ValueType>(value.getType()))
           return op.emitOpError("tuple combiner result independent of all tuple operands is not supported");
-        values.push_back(value);
+        if (paired) {
+          Value tail = project(values[i], tailIndex, "gather", shape, axes);
+          value = riscv::SelectOp::create(b, op.getLoc(), value.getType(), paired,
+              value, tail, unselectedLeaf(b));
+          copyOrigin(op, value.getDefiningOp());
+        }
+        nextValues.push_back(value);
       }
+      values = std::move(nextValues);
     }
     if (!projected) {
       shape.erase(shape.begin() + axis);

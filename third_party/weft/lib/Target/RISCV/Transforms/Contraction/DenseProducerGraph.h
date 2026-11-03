@@ -43,7 +43,7 @@ public:
   int64_t issueCopies = 1;
   llvm::SmallVector<int64_t> tileShape;
   DenseIssueCost issueCost;
-  llvm::StringRef failureReason;
+  std::string failureReason;
   llvm::SmallVector<DenseAliasRequirement> aliasRequirements;
 
 private:

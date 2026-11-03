@@ -1450,6 +1450,10 @@ planVectorReplicaGather(riscv::ExtractOp operation, mlir::Value index) {
       gatherDimension = dimension;
       if (operation.getIndices()[indexCursor] != index)
         return std::nullopt;
+    } else {
+      // The selected lane-to-replica ABI carries one gather only. A fixed
+      // projection of another dimension needs the general extract lowering.
+      return std::nullopt;
     }
     ++indexCursor;
   }

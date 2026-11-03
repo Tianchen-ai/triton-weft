@@ -1,5 +1,6 @@
 #include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Transforms/Memory/FieldStores.h"
+#include "Analysis/LocalMemory.h"
 #include "Weft/Analysis/StorageBytes.h"
 
 #include "mlir/IR/PatternMatch.h"
@@ -140,7 +141,12 @@ mlir::LogicalResult riscv_internal::materializeFieldStoreView(
     root = root.getDefiningOp()->getOperand(0);
   }
   auto field = root.getDefiningOp<riscv::FieldOp>();
-  if (!field || projections.empty()) return mlir::success();
+  if (!field) return mlir::success();
+  auto value = mlir::dyn_cast<riscv::ValueType>(operation.getValue().getType());
+  auto read = operation.getValue().getDefiningOp<riscv::ConvertLayoutOp>();
+  bool localSource = value && (value.getLayout().getCarrier() == "local" ||
+      (read && isCompleteLocalRead(read)));
+  if (projections.empty() && !localSource) return mlir::success();
   auto owner = mlir::dyn_cast<riscv::MemDescType>(field.getOwner().getType());
   auto type = mlir::cast<riscv::MemDescType>(field.getType());
   auto facts = fieldFacts(field);
@@ -150,7 +156,8 @@ mlir::LogicalResult riscv_internal::materializeFieldStoreView(
       owner.getInterleaveRows() || type.getStorageBits() % 8 ||
       type.getStorageBits() < 8 || type.getStorageBits() > 64 ||
       facts.alignment < type.getStorageBits() / 8 || owner.getElements() % type.getShape()[0])
-    return operation.emitError("projected field store requires an aligned natural record-local field view");
+    return projections.empty() ? mlir::success() :
+        operation.emitError("projected field store requires an aligned natural record-local field view");
   // Early memory planning precedes the lowering of Level point coordinates.
   mlir::Value recordBase;
   mlir::Value cursor = field.getOwner();
@@ -221,6 +228,12 @@ mlir::LogicalResult riscv_internal::materializeFieldStoreView(
     copyOrigin(projection, region.getDefiningOp());
   }
   operation.getRegionMutable().assign(region);
+  // The selected ordinary memory view replaces the complete field instruction.
+  // A bounded local copy can now issue it in pieces without retaining a whole
+  // field in registers or changing the serialized record layout.
+  operation->removeAttr("field_store_plan");
+  operation.setAccessAttr(unassignedAccess(rewriter));
+  operation.setLeafAttr(unselectedLeaf(rewriter));
   return mlir::success();
 }
 

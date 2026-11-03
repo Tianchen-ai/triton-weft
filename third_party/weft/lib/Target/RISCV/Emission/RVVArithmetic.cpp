@@ -1231,9 +1231,16 @@ mlir::LogicalResult Emitter::compileCastImpl(ConversionOp operation) {
     bindings[resultValue] = std::move(result);
     return mlir::success();
   }
+  auto carrierSourceInteger = mlir::dyn_cast<mlir::IntegerType>(source);
+  auto carrierTargetInteger = mlir::dyn_cast<mlir::IntegerType>(target);
+  const bool normalizedByteWidening = carrierSourceInteger && carrierTargetInteger &&
+      carrierSourceInteger.getWidth() < carrierTargetInteger.getWidth() &&
+      carrierTargetInteger.getWidth() == 8 &&
+      (carrierSourceInteger.isUnsigned() || carrierSourceInteger.getWidth() == 1 || carrierSourceInteger.isSigned());
   const bool integerReinterpret =
-      riscv_internal::isSameWidthIntegerCast(rawOperation);
-  if (selected == "rvv.identity" && !rounding && identity) {
+      riscv_internal::isSameWidthIntegerCast(rawOperation) || normalizedByteWidening;
+  if (selected == "rvv.identity" && !rounding &&
+      (identity || (normalizedByteWidening && carrierSourceInteger.isUnsigned() == carrierTargetInteger.isUnsigned()))) {
     Binding projected;
     projected.kind = Binding::Kind::Vector;
     for (int64_t part = 0; part < vectorPartCount(operation.getResult()); ++part) {

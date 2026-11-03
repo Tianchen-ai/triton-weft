@@ -1,7 +1,7 @@
 add_library(WeftCompiler SHARED Compiler.cpp)
 target_link_libraries(WeftCompiler PRIVATE WeftRISCVTarget WeftX86Target MLIRParser)
 target_compile_options(WeftCompiler PRIVATE -fexceptions -fvisibility=hidden)
-target_link_options(WeftCompiler PRIVATE "LINKER:--exclude-libs,ALL"
+target_link_options(WeftCompiler PRIVATE "LINKER:-z,defs" "LINKER:--exclude-libs,ALL"
   "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports.map")
 set_property(TARGET WeftCompiler APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/exports.map)
 set_target_properties(WeftCompiler PROPERTIES

@@ -22,7 +22,7 @@ git diff v3.8.0 -- CMakeLists.txt setup.py python/src
 | `third_party/weft/lib/Transforms` | Shared SCF full-tile transforms and bounded software-pipeline expansion |
 | `third_party/weft/lib/Target/RISCV`, `Target/X86` | Separate Backend, Platform, Analysis, Conversion, Transforms and Emission modules |
 | `third_party/weft/lib/Runtime` | Native ABI, library lifetime and worker capability checks |
-| `python/triton/integrations`, `integrations/llama.cpp` | Optional application contracts and thin GGML hooks |
+| `python/triton/integrations`, `third_party/weft/integrations/llama.cpp` | Optional application contracts and thin GGML hooks |
 | `cpu.py`, `tools/cpu.py` | Target construction, homogeneous CPU discovery and explicit process launch |
 | `CMakeLists.txt`, `setup.py`, `third_party/weft/pyproject.toml` | One LLVM/MLIR SDK; the `triton` frontend depends on the same `weft-core` SDK used by other embedding frontends |
 
