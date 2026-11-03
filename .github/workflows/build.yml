@@ -42,8 +42,12 @@ jobs:
               for key, path in values.items():
                   output.write(f"{key}={path}\n")
           PY
-          echo 'CC=gcc' >> "$GITHUB_ENV"
-          echo 'CXX=g++' >> "$GITHUB_ENV"
+      - name: Select the supported host GCC 12 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-12 g++-12
+          echo 'CC=gcc-12' >> "$GITHUB_ENV"
+          echo 'CXX=g++-12' >> "$GITHUB_ENV"
       - name: Build the OpenMP runtime matching Clang
         run: |
           revision=$(python -c 'import json; print(json.load(open("cmake/llvm-info.json"))["llvm_hash"])')
