@@ -15,9 +15,14 @@ It extends upstream Triton **3.8.0**.
 
 The public source contains the complete Triton fork, shared and target
 compilation, runtime/SDK, installed `triton.kernels.weft` library, examples,
-tests, bilingual handbook, licenses and fourteen result tables.
+tests, bilingual handbook, licenses and sixteen result tables.
 The separate [Bench project](https://github.com/Tianchen-ai/triton-weft-bench)
 owns reference adapters, workload catalogs and measurement.
+
+[Download Weft 1.0](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0)
+for wheels, source packages, the offline handbook and SHA256 checksums.
+[Bench 1.0](https://github.com/Tianchen-ai/triton-weft-bench/releases/tag/v1.0.0)
+provides its own wheel, sources and complete paper evidence archive.
 
 Build the source distribution with `python -m build --sdist --no-isolation`.
 Extract it and follow [installation](../getting-started/installation.md);

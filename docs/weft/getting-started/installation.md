@@ -4,6 +4,20 @@ The product builds the `triton` distribution: language, native compiler,
 CPU runtime, kernel library and C/C++ SDK. Weft 1.0.0 extends Triton 3.8.0;
 its distribution version is `3.8.0+weft.1.0.0`.
 
+## Install a released wheel
+
+[Weft 1.0 downloads](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0)
+include Linux x86-64 wheels for Python 3.10 and 3.12, and a RISC-V wheel for Python 3.11.
+Choose the matching architecture and Python ABI, then install the downloaded file:
+
+```sh
+python -m pip install ./triton-*.whl numpy
+python -c 'import triton; print(triton.__weft_version__, triton.__version__)'
+```
+
+The wheels include the CPU compiler and native SDK. Source installation below supports
+other Python versions and toolchain configurations.
+
 ## Install from source
 
 Use native x86-64 or RISC-V Linux, Python 3.10+, GCC 12+, Git and the

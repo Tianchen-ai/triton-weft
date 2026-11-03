@@ -1,6 +1,6 @@
 # Triton–Weft 1.0
 
-[English](README.md) · [中文手册](https://tianchen-ai.github.io/triton-weft/zh/) · [示例](examples/weft/README.zh-CN.md) · [Bench 网站](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/) · [完整论文结果](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/paper/gallery/)
+[English](README.md) · [下载 1.0](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0) · [中文手册](https://tianchen-ai.github.io/triton-weft/zh/) · [示例](examples/weft/README.zh-CN.md) · [Bench 网站](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/) · [完整论文结果](https://tianchen-ai.github.io/triton-weft-bench/zh-CN/paper/gallery/)
 
 **组合专家级 CPU 内核，由编译器构造机器执行。**
 
@@ -68,6 +68,9 @@ K3 另外展示一种参考后端。SG2044 使用 64 个应用线程，其余 CP
 
 
 ## 构建与安装
+
+从 [Weft 1.0 下载页](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0)选择匹配的 Linux wheel，运行 `python -m pip install ./triton-*.whl numpy` 即可安装。
+发布页还提供完整源码包、双语离线工具书和校验和。
 
 源码在没有 `.git` 目录时也可构建。需要 Python 3.10 或更新版本、Git、CMake、
 Ninja、GCC 12 或更新版本，以及

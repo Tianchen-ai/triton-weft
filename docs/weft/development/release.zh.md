@@ -14,9 +14,14 @@ Weft **1.0.0** 是编程模型、编译器与 CPU 运行时版本，
 ## 源码与发行包
 
 公开源码包含完整 Triton fork、共同层与目标编译、运行时/SDK、
-可安装的 `triton.kernels.weft`、示例、测试、双语工具书、许可证和十四份结果表。
+可安装的 `triton.kernels.weft`、示例、测试、双语工具书、许可证和十六份结果表。
 独立的 [Bench 项目](https://github.com/Tianchen-ai/triton-weft-bench)
 负责参考适配、工作负载目录与测量。
+
+[Weft 1.0 下载页](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0)
+提供 wheel、源码包、离线工具书和 SHA256 校验和。
+[Bench 1.0](https://github.com/Tianchen-ai/triton-weft-bench/releases/tag/v1.0.0)
+另行提供 Bench 安装包、源码与完整论文实验材料。
 
 使用 `python -m build --sdist --no-isolation` 构建源码发行包，
 解压后按照[安装章节](../getting-started/installation.md)操作，

@@ -3,6 +3,19 @@
 产品构建 `triton` 发行包，包含语言、原生编译器、CPU 运行时、内核库与 C/C++ SDK。
 Weft 1.0.0 扩展自 Triton 3.8.0，发行包版本为 `3.8.0+weft.1.0.0`。
 
+## 安装正式发布的 wheel
+
+[Weft 1.0 下载页](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0)
+提供 Python 3.10／3.12 的 Linux x86-64 wheel，以及 Python 3.11 的 RISC-V wheel。
+选择匹配 CPU 架构和 Python 版本的文件，然后安装：
+
+```sh
+python -m pip install ./triton-*.whl numpy
+python -c 'import triton; print(triton.__weft_version__, triton.__version__)'
+```
+
+wheel 包含 CPU 编译器和原生 SDK。其他 Python 版本或工具链配置可按下文从源码构建。
+
 ## 从源码安装
 
 使用原生 x86-64 或 RISC-V Linux、Python 3.10+、GCC 12+、Git，

@@ -1,6 +1,6 @@
 # Triton–Weft 1.0
 
-[中文](README.zh-CN.md) · [Handbook](https://tianchen-ai.github.io/triton-weft/) · [Examples](examples/weft/README.md) · [Bench website](https://tianchen-ai.github.io/triton-weft-bench/) · [All paper results](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/)
+[中文](README.zh-CN.md) · [Download 1.0](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0) · [Handbook](https://tianchen-ai.github.io/triton-weft/) · [Examples](examples/weft/README.md) · [Bench website](https://tianchen-ai.github.io/triton-weft-bench/) · [All paper results](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/)
 
 **Compose expert CPU kernels. Let the compiler construct their machine execution.**
 
@@ -82,6 +82,9 @@ also show how source relationships enable decoding, forwarding and state retenti
 
 
 ## Build and install
+
+Download a matching Linux wheel from [Weft 1.0](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0), then run `python -m pip install ./triton-*.whl numpy`.
+The release also provides complete source packages, the bilingual offline handbook and checksums.
 
 The source tree builds without a `.git` directory. Use Python 3.10 or newer,
 Git, CMake, Ninja, GCC 12 or newer and the LLVM/MLIR revision in
