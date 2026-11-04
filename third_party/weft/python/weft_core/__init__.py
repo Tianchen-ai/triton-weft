@@ -4,7 +4,7 @@ This package deliberately provides no Python parser, JIT decorator or tuner.
 The embedding language owns those services.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def sdk_path():
