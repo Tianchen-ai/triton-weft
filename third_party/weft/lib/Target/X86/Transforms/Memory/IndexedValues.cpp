@@ -150,8 +150,9 @@ Value indexBits(Value value, unsigned shift, unsigned width, OpBuilder &b, Locat
 }
 
 // Keep dynamically indexed SSA snapshots in addressable storage. Subbyte
-// carriers need native bytes; wide vectors need one shared private copy,
-// rather than LLVM independently materializing the full value at each extract.
+// carriers need native bytes; wide vectors need one shared private copy.
+// Short halfword projections also retain addressable storage: rebuilding a
+// wider result from a short table is not a legal same-width native permutation.
 class IndexedValues : public PassWrapper<IndexedValues, OperationPass<ModuleOp>> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(IndexedValues)
@@ -171,8 +172,10 @@ public:
       auto bits = function ? function->getAttrOfType<IntegerAttr>("weft.x86.vector_bits") : IntegerAttr{};
       bool numeric = isa<IntegerType, FloatType>(type.getElementType());
       bool subbyte = numeric && type.getElementTypeBitWidth() < 8;
+      bool shortHalfwords = numeric && type.getElementTypeBitWidth() == 16 && bits &&
+          type.getNumElements() * 16 < bits.getInt();
       bool wide = numeric && bits && type.getNumElements() * type.getElementTypeBitWidth() > bits.getInt();
-      if (type.getRank() == 1 && !type.isScalable() && (subbyte || wide) &&
+      if (type.getRank() == 1 && !type.isScalable() && (subbyte || shortHalfwords || wide) &&
           !matchPattern(op.getPosition(), m_ConstantInt(&index)))
         extracts.push_back(op);
     });
