@@ -99,6 +99,8 @@ fill/value。已证明的一维仿射访问可用 scalar i64 offset 和非零 `e
 完整地址关系；stride 以元素计，不增强 storage alignment。memory pass 固定各 operand
 的 part/lane 坐标与 masked unit、strided、indexed 或 scalar leaf；
 RVV leaf 使用显式 mask，load 保留填充值，byte-offset 和 predicate 临时寄存器计入资源。
+masked load 的数值有效域来自 offsets、mask 和 fill 的共同坐标域；mask 为假的
+坐标仍有显式 fill 值。分析不得将实际读取的 mask 真值集合当作结果的矩形有效域。
 大 Value 超出驻留预算时，value-program pass 在原 effect 位置形成有界访问循环与私有
 数值快照。该循环不把后续 store 移到较早的完整 load 之前，也不依据 mask 扩大可访问范围。
 已证明均匀的 mask 和 load 填充值可直接保留为 scalar，所需 predicate/splat 临时量显式
@@ -166,6 +168,12 @@ descriptor 和原 tail 有效域约束，私有数组的 nominal 容量不代表
 Encoding field access用 `AccessAttr` 保存 selected memory form以及 natural、grouped-layered、
 joined 的完整 storage geometry。terminal lowering可以据此计算确定地址和bit extraction，
 不能按量化格式名补布局。
+
+位置不变的数值轴重命名不能遮蔽 encoded field 的供给边。memory planning 在
+原读时点前为该边形成所需 carrier，再保留显式重命名。bitmask 子窗口沿相同逻辑轴
+追踪 record point；仅为坐标推导穿过 stage wrapper，实际读取仍消费原快照存储。
+numeric window 改为私有存储后，原寄存器 gather 的 access、leaf 和投影缓存失效，
+由同一 memory planning 重新选择，不能把原寄存器指令用于新的 local descriptor。
 
 字段 View 的 `load` 在 Canonical→Physical 转换中保留其 encoded owner，并形成数值 Field
 投影；静态 field subview 形成相应坐标的 gather。packed i4/i6 字段不能被误作独立、每元素

@@ -290,7 +290,11 @@ public:
       }
     } else if (isa<riscv::CastOp, riscv::WidenOp, riscv::NarrowOp, riscv::BitcastOp,
                    riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp,
-                   riscv::RVVAxisBroadcastOp, riscv::MacGroupsOp, riscv::Fold2Op>(op)) {
+                   riscv::RVVAxisBroadcastOp, riscv::MacGroupsOp, riscv::Fold2Op,
+                   riscv::PointerLoadOp>(op)) {
+      // A masked pointer load defines other on false lanes. Its rectangular
+      // value domain intersects the offset/mask/fill domains, independently
+      // of which mask bits actually read memory.
       auto mac = dyn_cast<riscv::MacGroupsOp>(op);
       int64_t group = mac ? mac.getGroup() : isa<riscv::Fold2Op>(op) ? 2 : 1;
       bool grouped = isa<riscv::MacGroupsOp, riscv::Fold2Op>(op);

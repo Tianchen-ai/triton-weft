@@ -2310,6 +2310,16 @@ mlir::LogicalResult Emitter::compileBinary(riscv::BinaryOp operation) {
     return fail(operation, "selected RVV binary instruction has no operand form");
   std::string stem = leaf.take_front(separator).str();
   llvm::StringRef form = leaf.drop_front(separator + 1);
+  auto intrinsicShiftAmount = [&](const std::string &value) {
+    // RVV C intrinsics type vector shift counts as unsigned. The selected
+    // instruction consumes the same low bits; reinterpret changes no lanes,
+    // layout or physical work in the verified program.
+    if ((stem == "vsll" || stem == "vsrl" || stem == "vsra") &&
+        suffix.front() == 'i')
+      return "__riscv_vreinterpret_v_" + suffix + "_u" + suffix.substr(1) +
+             "(" + value + ")";
+    return value;
+  };
   const bool leafVV = form == "vv";
   const bool leafBroadcast = form == "vv.broadcast";
   const bool leafSplatLhs = form == "vv.splat-lhs";
@@ -2348,7 +2358,7 @@ mlir::LogicalResult Emitter::compileBinary(riscv::BinaryOp operation) {
       }
       auto name = fresh("pointwise");
       line(type + " " + name + " = __riscv_" + stem + "_vv_" + suffix + "(" +
-           operands[0] + ", " + operands[1] + ", " + partVL(operation.getResult(), part) + ");");
+           operands[0] + ", " + intrinsicShiftAmount(operands[1]) + ", " + partVL(operation.getResult(), part) + ");");
       result.parts.push_back(std::move(name));
     }
     bindings[operation.getResult()] = std::move(result);
@@ -2413,7 +2423,7 @@ mlir::LogicalResult Emitter::compileBinary(riscv::BinaryOp operation) {
                             suffix + "(" + scalarPart + ", " +
                             partVL(operation.getResult(), index) + ")";
         expression = "__riscv_" + stem + "_vv_" + suffix + "(" + splat +
-                     ", " + vectorPart + ", " +
+                     ", " + intrinsicShiftAmount(vectorPart) + ", " +
                      partVL(operation.getResult(), index) + ")";
       } else {
         if (!leafScalar || leafSwap != scalarOnLeft)
@@ -2435,7 +2445,7 @@ mlir::LogicalResult Emitter::compileBinary(riscv::BinaryOp operation) {
       const std::string &lhsPart = lhs.parts[*lhsPartIndex];
       const std::string &rhsPart = rhs.parts[*rhsPartIndex];
       expression = "__riscv_" + stem + "_vv_" + suffix + "(" + lhsPart +
-                   ", " + rhsPart + ", " +
+                   ", " + intrinsicShiftAmount(rhsPart) + ", " +
                    partVL(operation.getResult(), index) + ")";
     }
     // Preserve the physical SSA operation as one C value.  Inlining the

@@ -1982,13 +1982,21 @@ materializeDomainBitmaskByteBase(riscv::FieldOp field,
                                  const riscv_internal::FieldFacts &facts,
                                  mlir::Operation *origin,
                                  mlir::IRRewriter &rewriter) {
-  auto load = field.getOwner().getDefiningOp<riscv::LoadOp>();
+  mlir::Value owner = field.getOwner();
+  while (true) {
+    if (auto stage = owner.getDefiningOp<riscv::MaterializeOp>()) owner = stage.getInput();
+    else if (auto stage = owner.getDefiningOp<riscv::RegisterMaterializeOp>()) owner = stage.getInput();
+    else break;
+  }
+  auto load = owner.getDefiningOp<riscv::LoadOp>();
   auto slice = load ? load.getRegion().getDefiningOp<riscv::SliceOp>()
                     : riscv::SliceOp();
   riscv::PhysicalPointOp recordPoint;
   if (slice)
     for (mlir::Value index : slice.getIndices())
-      if (auto candidate = index.getDefiningOp<riscv::PhysicalPointOp>()) {
+      if (auto candidate = index.getDefiningOp<riscv::PhysicalPointOp>();
+          candidate && candidate.getResult().getType().getDomain().getAxisId() ==
+                           point.getResult().getType().getDomain().getAxisId()) {
         recordPoint = candidate;
         break;
       }
@@ -3345,6 +3353,37 @@ public:
     mlir::Builder builder(&getContext());
     mlir::IRRewriter rewriter(&getContext());
     bool failed = false;
+    llvm::SmallVector<riscv::ConvertLayoutOp> renamedFieldConversions;
+    getOperation().walk([&](riscv::ConvertLayoutOp conversion) {
+      renamedFieldConversions.push_back(conversion);
+    });
+    for (auto conversion : renamedFieldConversions) {
+      auto reshape = conversion.getInput().getDefiningOp<riscv::ReshapeOp>();
+      if (!reshape || conversion.getConversion().getEffect() != "pure" ||
+          conversion->getBlock() != reshape->getBlock() ||
+          !llvm::equal(reshape.getOrder(), reshape.getInput().getType().getAxisIds().asArrayRef()) ||
+          reshape.getInput().getType().getShape() != conversion.getResult().getType().getShape() ||
+          !riscv::fieldReadProjection(reshape.getInput())) continue;
+      auto input = reshape.getInput().getType();
+      auto selected = conversion.getResult().getType();
+      auto layout = selected.getLayout();
+      auto mapped = riscv::LayoutAttr::get(&getContext(), layout.getCarrier(), input.getAxisIds(),
+          layout.getTimeFactors(), layout.getLaneFactors(), layout.getReplicaFactors(),
+          layout.getFragmentFactors(), layout.getLocalFactors(), layout.getSew(),
+          layout.getLmulEighths(), layout.getVl(), layout.getRegisterGroups(),
+          layout.getValidity(), layout.getReplicaGroup());
+      rewriter.setInsertionPoint(reshape);
+      auto supply = riscv::ConvertLayoutOp::create(rewriter, reshape.getLoc(),
+          riscv_internal::withLayout(input, mapped), reshape.getInput(),
+          riscv_internal::layoutConversion(builder, input.getLayout(), mapped),
+          riscv::AccessAttr(), riscv_internal::unselectedLeaf(builder));
+      riscv_internal::copyOrigin(conversion, supply);
+      rewriter.setInsertionPoint(conversion);
+      auto renamed = riscv::ReshapeOp::create(rewriter, conversion.getLoc(), selected, supply.getResult(),
+                                            input.getAxisIds(), mlir::DenseI64ArrayAttr());
+      riscv_internal::copyOrigin(conversion, renamed);
+      rewriter.replaceOp(conversion, renamed.getResult());
+    }
     // Select a scalar record before considering a complete numeric field
     // snapshot. Its remaining field axes can still have vector consumers.
     // readCrossesWrite above keeps the original saved-value contract.

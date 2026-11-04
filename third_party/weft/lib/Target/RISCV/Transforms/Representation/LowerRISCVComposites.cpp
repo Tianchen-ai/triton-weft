@@ -828,6 +828,13 @@ private:
         saved[extract.getInput()] = storage;
       }
       extract.getInputMutable().assign(storage);
+      // The input is now a private memory snapshot. A previously selected
+      // register gather no longer describes this use edge; memory planning
+      // must select the access for the new descriptor.
+      extract.setAccessAttr(riscv_internal::unassignedAccess(rewriter));
+      extract.setLeafAttr(riscv_internal::unselectedLeaf(rewriter));
+      for (llvm::StringRef attribute : {"lane_gather_count", "lane_gather_index_parts", "lane_gather_source_parts"})
+        extract->removeAttr(attribute);
       if (grouped || gather) continue; // Local index/gather planning consumes the numeric snapshot.
       rewriter.setInsertionPoint(extract);
       auto memory = riscv_internal::localView(rewriter, storage, extract);
