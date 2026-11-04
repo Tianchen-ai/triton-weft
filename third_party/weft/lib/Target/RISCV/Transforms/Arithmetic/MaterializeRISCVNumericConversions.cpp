@@ -59,10 +59,16 @@ LogicalResult riscv_internal::materializeNumericConversions(ModuleOp module, IRR
       b.replaceOp(op, selected);
       continue;
     }
-    if (integer.getWidth() <= 8 && result.getElementType().isF32()) {
+    if ((integer.getWidth() <= 8 && result.getElementType().isF32()) ||
+        (integer.getWidth() <= 16 && result.getElementType().isF64())) {
       auto element = IntegerType::get(b.getContext(), 32,
           integer.isSigned() ? IntegerType::Signed : IntegerType::Unsigned);
-      auto wideType = riscv::ValueType::get(b.getContext(), element, result.getShape(), result.getAxisIds(), result.getLayout());
+      auto wideType = riscv::ValueType::get(b.getContext(), element,
+          source.getShape(), source.getAxisIds(), source.getLayout());
+      auto layout = projectLayout(b, wideType, source.getLayout(),
+          op->getParentOfType<riscv::KernelOp>().getTarget());
+      if (!layout) return op->emitError("integer-to-float conversion has no legal intermediate layout");
+      wideType = cast<riscv::ValueType>(withLayout(wideType, layout));
       Value wide = riscv::WidenOp::create(b, op->getLoc(), wideType, op->getOperand(0), unselectedLeaf(b));
       Value converted = riscv::CastOp::create(b, op->getLoc(), result, wide, unselectedLeaf(b));
       inherit(op, wide.getDefiningOp()); inherit(op, converted.getDefiningOp());

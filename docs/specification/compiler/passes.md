@@ -289,6 +289,9 @@ shaped store 物化为有界坐标遍历和受谓词控制的真实写入，不�
 实现：后续 Value program 新产生的 RVV 转换也必须显式形成合法 narrowing 链。
 F16→F64 的 RVV 扩宽显式形成 F16→F32→F64 两步，保留相同坐标和有效域；两步均为精确
 扩宽，中间寄存器布局及其活跃区间进入正常指令选择和资源分析。terminal 不合成转换链。
+小整数转浮点同样显式闭合机器宽度：至多 8 位整数转 F32、至多 16 位整数转 F64
+先按源 signedness 精确扩宽到 i32/u32，再执行对应的整数到浮点转换；中间布局
+按原坐标投影，保留 active domain，并计入正常资源分析。
 signless Boolean predicate 转为数值时物化同坐标的 0/1 select。Encoding `ui1` 的普通
 数值表示已是规范的 unsigned byte 0/1，沿用 zero extension，避免 byte→mask→数值的往返。
 已规范符号扩展到 byte carrier 的有限有符号整数扩大到 i8 时保留原 carrier；转成 u8
