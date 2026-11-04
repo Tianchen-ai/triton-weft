@@ -210,6 +210,17 @@ mlir::LogicalResult riscv_internal::materializeFieldStoreView(
       type.getStorageBits(), 1, 0);
   mlir::Value region = riscv::FieldViewOp::create(rewriter, operation.getLoc(), denseType, root, origin);
   copyOrigin(operation, region.getDefiningOp());
+  if (projections.empty() && localSource) {
+    // The complete private Value copy traverses zero-based coordinates. Keep
+    // the field's verified record origin, then explicitly bind that already
+    // selected payload address to the copy's local coordinate system.
+    auto extent = mlir::arith::ConstantIndexOp::create(rewriter, operation.getLoc(), type.getShape()[0]);
+    auto one = mlir::arith::ConstantIndexOp::create(rewriter, operation.getLoc(), 1);
+    auto zero = mlir::arith::ConstantIndexOp::create(rewriter, operation.getLoc(), 0);
+    region = riscv::MemoryViewOp::create(rewriter, operation.getLoc(), denseType, region,
+        mlir::ValueRange{extent}, mlir::ValueRange{one}, mlir::ValueRange{zero});
+    copyOrigin(operation, region.getDefiningOp());
+  }
   for (auto projection : llvm::reverse(projections)) {
     auto prior = mlir::cast<riscv::MemDescType>(projection->getResult(0).getType());
     auto result = riscv::MemDescType::get(rewriter.getContext(), prior.getEncoding(), prior.getShape(),

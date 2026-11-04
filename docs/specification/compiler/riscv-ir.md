@@ -183,6 +183,9 @@ byte packing，以及每次 store 的 byte offset、source part、bit shift 和�
 descriptor，再以普通 slice/subview/store 写入子区域。该节点保存原 field、显式 SSA origin、unit
 stride 及同一 access/alias；origin 按完整 record 的逻辑坐标与字段分组比换算，避免对子 Level
 的绝对 point 重复累加 record offset。它不改变字段 bytes、初始化或 lifetime，不负责 bit packing。
+完整 private Value 写入整个字段时，局部 copy 坐标从零开始，字段地址本身已包含 record 选择；
+FieldView 保留完整 record 坐标，随后显式 memory_view 将已选择的 payload 地址绑定到 copy 的
+零基坐标，不再次减去外层 Level base。字段的显式子域投影保留其绝对坐标。
 record owner 自身的 subview 偏移尚不支持，须在物化时明确拒绝。memory pass 形成该表示，
 final verifier 拒绝仍绕过它的字段投影写回；terminal 仅拼写已确定的地址。
 
