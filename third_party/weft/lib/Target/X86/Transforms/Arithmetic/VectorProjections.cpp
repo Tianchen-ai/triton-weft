@@ -1,4 +1,5 @@
 #include "Weft/Target/X86/X86Compiler.h"
+#include "Transforms/Arithmetic/Lookups.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -107,7 +108,7 @@ public:
     return "Coalesce complete constant-index vector reconstructions without changing value or mask semantics";
   }
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect, LLVM::LLVMDialect, vector::VectorDialect>();
+    registry.insert<arith::ArithDialect, func::FuncDialect, LLVM::LLVMDialect, vector::VectorDialect>();
   }
   void runOnOperation() override {
     SmallVector<LLVM::InsertElementOp> roots;
@@ -160,6 +161,46 @@ public:
         if (bfloat) result = arith::BitcastOp::create(b, root.getLoc(), type, result);
         b.replaceOp(root, result);
         continue;
+      }
+      // A complete dynamic reconstruction is the same local-table lookup as
+      // the Canonical primitive. Reuse its explicit native permutation instead
+      // of asking LLVM to recover a wider BUILD_VECTOR from scalar extracts.
+      auto function = root->getParentOfType<func::FuncOp>();
+      auto vectorBits = function ? function->getAttrOfType<IntegerAttr>("weft.x86.vector_bits") : IntegerAttr{};
+      if (type.getElementType().isInteger(16) && vectorBits) {
+        SmallVector<Value> positions(count);
+        Value table, cursor = root.getRes();
+        int64_t remaining = count;
+        for (int64_t steps = 0; remaining && steps < 2 * count; ++steps) {
+          auto insert = cursor.getDefiningOp<LLVM::InsertElementOp>();
+          APInt position;
+          if (!insert || !matchPattern(insert.getPosition(), m_ConstantInt(&position)) ||
+              position.getActiveBits() > 63 || position.getZExtValue() >= static_cast<uint64_t>(count)) break;
+          int64_t lane = position.getZExtValue();
+          if (!positions[lane]) {
+            auto extract = insert.getValue().getDefiningOp<LLVM::ExtractElementOp>();
+            if (!extract || (table && table != extract.getVector())) break;
+            auto input = extract.getVector().getType();
+            if (input.getRank() != 1 || input.isScalable() ||
+                input.getNumElements() > vectorBits.getInt() / 32) break;
+            table = extract.getVector();
+            positions[lane] = extract.getPosition();
+            --remaining;
+          }
+          cursor = insert.getVector();
+        }
+        if (!remaining && llvm::all_of(positions, [&](Value position) {
+              return position.getType() == positions.front().getType();
+            })) {
+          b.setInsertionPoint(root);
+          Value indices = vector::FromElementsOp::create(b, root.getLoc(),
+              VectorType::get({count}, positions.front().getType()), positions);
+          Value result = weft::x86::registerLookup(getOperation(), b, root.getLoc(),
+              table, indices, vectorBits.getInt());
+          assert(result && "complete bounded halfword lookup must have a native permutation");
+          b.replaceOp(root, result);
+          continue;
+        }
       }
       if (type.getElementType().isInteger(1) && type.getNumElements() > 8) {
         llvm::SmallPtrSet<Operation *, 32> visited;
