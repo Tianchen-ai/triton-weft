@@ -396,7 +396,7 @@ private:
         if (llvm::any_of(sizes, [](int64_t size) { return size < 0; }))
           return MemRefType::get({ShapedType::kDynamic}, IntegerType::get(type.getContext(), 8));
         sizes.back() = sizes.back() / layout->elements() * layout->bytes();
-        if (volume(sizes) > int64_t(target.vectorBits) * target.vectorRegisters() / 8)
+        if (volume(sizes) > 4096)
           return MemRefType::get({ShapedType::kDynamic}, IntegerType::get(type.getContext(), 8));
         return VectorType::get({volume(sizes)}, IntegerType::get(type.getContext(), 8));
       }
@@ -406,11 +406,9 @@ private:
       if (llvm::any_of(dimensions, [](int64_t extent) { return extent < 0; }))
         return MemRefType::get({ShapedType::kDynamic}, scalar(type));
       int64_t count = 1;
-      int64_t registerElements = std::max<int64_t>(1,
-          int64_t(target.vectorBits) * target.vectorRegisters() / scalar(type).getIntOrFloatBitWidth());
       for (int64_t dimension : dimensions) {
         if (dimension <= 0) return {};
-        if (count > registerElements / dimension)
+        if (count > 4096 / dimension)
           return MemRefType::get({ShapedType::kDynamic}, scalar(type));
         count *= dimension;
       }
