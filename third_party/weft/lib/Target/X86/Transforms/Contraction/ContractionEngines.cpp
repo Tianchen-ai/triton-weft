@@ -68,7 +68,7 @@ FailureOr<weft::x86::ContractionEngine> weft::x86::selectContractionEngine(
   if (integer && arrayResult) {
     int64_t outputs = std::accumulate(output.begin(), output.end(), int64_t(1),
                                      std::multiplies<int64_t>());
-    integer = storage.leftArray && element(op.getOperand(0).getType()).isInteger(8) &&
+    integer = (storage.leftArray || storage.leftVector) && element(op.getOperand(0).getType()).isInteger(8) &&
         ((storage.rightArray && cast<IntegerType>(element(op.getOperand(1).getType())).getWidth() >= 8) ||
          (storage.rightVector && outputs <= 4096));
   }

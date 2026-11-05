@@ -746,7 +746,13 @@ private:
         domains += selector == "domain";
         rectangular &= selector == "domain" || selector == "all";
       }
-      if (!rectangular || domains < 2) return;
+      if (!rectangular || domains == 0) return;
+      if (domains == 1) {
+        auto own = riscv_internal::residentRegisterGroups(extract.getInput());
+        auto part = riscv_internal::residentRegisterGroups(extract.getResult());
+        auto target = extract->getParentOfType<riscv::KernelOp>().getTarget();
+        if (own && part && *own + *part <= target.getVectorRegisters()) return;
+      }
       if (!consumers.count(extract.getInput())) sources.push_back(extract.getInput());
       consumers[extract.getInput()].push_back(extract);
     });
@@ -761,6 +767,10 @@ private:
       auto encoding = cast<kernel::EncodingType>(load.getRegion().getType().getEncoding());
       if (encoding.getKind() != "dense" ||
           llvm::any_of(type.getShape().asArrayRef(), [](int64_t n) { return n <= 0; })) continue;
+      int64_t projectionGroups = 0;
+      for (auto extract : consumers.lookup(source))
+        if (auto groups = riscv_internal::residentRegisterGroups(extract.getResult()))
+          projectionGroups = std::max(projectionGroups, *groups);
       SmallVector<riscv::PhysicalPointOp> origins;
       bool closed = true;
       for (int64_t axis : type.getAxisIds().asArrayRef()) {
@@ -796,7 +806,7 @@ private:
         FailureOr<Value> saved = failure();
         auto groups = riscv_internal::residentRegisterGroups(source);
         auto target = producer->getParentOfType<riscv::KernelOp>().getTarget();
-        if ((!groups || *groups > target.getVectorRegisters()) &&
+        if ((!groups || *groups + projectionGroups > target.getVectorRegisters()) &&
             load->getBlock() == producer->getBlock() &&
             !riscv::readCrossesWrite(load, producer)) {
           // Complete an oversized saved Value with bounded memory issues before

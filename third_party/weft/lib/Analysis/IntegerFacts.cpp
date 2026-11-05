@@ -224,6 +224,15 @@ public:
                                   a.maximum.extend(bits) / c.minimum.extend(bits)});
         }
         break;
+      case Kind::Remainder:
+        if (a.minimum >= 0 && c.minimum > 0) {
+          // Signed and unsigned remainder agree in this domain. Keep the
+          // mathematical divisor bound wide enough for u64, and do not infer
+          // anything about a possibly zero divisor or negative dividend.
+          if (Bound::compareValues(a.maximum, c.minimum) < 0) return fit(a);
+          return fit(IntegerRange{Bound::get(0), low(a.maximum, subtract(c.maximum, Bound::get(1)))});
+        }
+        break;
       default: break;
       }
       return full;
@@ -317,6 +326,7 @@ IntegerExpressionKind weft::analysis::integerBinaryKind(llvm::StringRef name) {
   return llvm::StringSwitch<Kind>(name).Case("add", Kind::Add).Case("sub", Kind::Sub)
       .Case("mul", Kind::Mul).Case("and", Kind::And).Case("or", Kind::Or)
       .Case("shl", Kind::ShiftLeft).Case("shr", Kind::ShiftRight).Case("div", Kind::Divide)
+      .Case("mod", Kind::Remainder)
       .Default(Kind::Unknown);
 }
 

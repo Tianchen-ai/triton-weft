@@ -804,6 +804,19 @@ public:
             legalProjection = false;
             break;
           }
+          // Width-changing instructions couple source EMUL to destination
+          // LMUL, even if only part of either register is active. An optional
+          // rematerialization must not replace a legal conversion with a
+          // narrowing/widening whose independently projected widths disagree.
+          if (mlir::isa<riscv::CastOp, riscv::WidenOp, riscv::NarrowOp>(producer) &&
+              required.getCarrier() == "rvv" &&
+              targetValue.getLayout().getCarrier() == "rvv" &&
+              required.getSew() != targetValue.getLayout().getSew() &&
+              required.getLmulEighths() * targetValue.getLayout().getSew() !=
+                  targetValue.getLayout().getLmulEighths() * required.getSew()) {
+            legalProjection = false;
+            break;
+          }
           operandLayouts.push_back(required);
         }
         if (!legalProjection)

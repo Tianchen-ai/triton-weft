@@ -219,7 +219,8 @@ public:
     bool checkedViews = true;
     DenseMap<int64_t, unsigned> aliasCounts;
     for (auto [index, arg] : llvm::enumerate(kernel.getBody().front().getArguments())) {
-      if (isa<LLVM::LLVMPointerType>(parameters[index]) && !memoryType(arg.getType())) checkedViews = false;
+      if (isa<LLVM::LLVMPointerType>(parameters[index]) && !memoryType(arg.getType()) &&
+          cast<StringAttr>(kernel.getArgAccess()[index]).getValue() != "none") checkedViews = false;
       if (memoryType(arg.getType())) ++aliasCounts[kernel.getArgAliasSets()[index]];
     }
     kernel.walk([&](Operation *op) {
@@ -395,7 +396,7 @@ private:
         if (llvm::any_of(sizes, [](int64_t size) { return size < 0; }))
           return MemRefType::get({ShapedType::kDynamic}, IntegerType::get(type.getContext(), 8));
         sizes.back() = sizes.back() / layout->elements() * layout->bytes();
-        if (volume(sizes) > 4096)
+        if (volume(sizes) > int64_t(target.vectorBits) * target.vectorRegisters() / 8)
           return MemRefType::get({ShapedType::kDynamic}, IntegerType::get(type.getContext(), 8));
         return VectorType::get({volume(sizes)}, IntegerType::get(type.getContext(), 8));
       }
@@ -405,9 +406,11 @@ private:
       if (llvm::any_of(dimensions, [](int64_t extent) { return extent < 0; }))
         return MemRefType::get({ShapedType::kDynamic}, scalar(type));
       int64_t count = 1;
+      int64_t registerElements = std::max<int64_t>(1,
+          int64_t(target.vectorBits) * target.vectorRegisters() / scalar(type).getIntOrFloatBitWidth());
       for (int64_t dimension : dimensions) {
         if (dimension <= 0) return {};
-        if (count > 4096 / dimension)
+        if (count > registerElements / dimension)
           return MemRefType::get({ShapedType::kDynamic}, scalar(type));
         count *= dimension;
       }
@@ -1205,7 +1208,9 @@ private:
     Value result;
     if (!contiguous && scalar(offsets.getType()).isInteger(64) &&
         modular == std::optional<int64_t>(1) && run > 1 && sizes.back() % run == 0) {
-      result = pointerWidthArithmetic(op.getOperand(1)) ?
+      result = load && weft::analysis::hasNonWrappingUnitStride(op.getOperand(1), axes(domain).back()) ?
+          lookupRecordRuns(loc, mapped(op.getOperand(0)), offsets, mask, data, domain, run) :
+          pointerWidthArithmetic(op.getOperand(1)) ?
           accessRuns(loc, mapped(op.getOperand(0)), offsets, mask, data, domain, load, run) :
           accessCheckedRuns(loc, mapped(op.getOperand(0)), offsets, mask, data, domain, load, run);
     } else result = access(loc, mapped(op.getOperand(0)), offsets, mask, data, domain, load, contiguous);
@@ -1541,10 +1546,12 @@ private:
                             Value offsets, Value active, Type domain, Value input = {},
                             Value physicalRowOffset = {}) {
     Type resultType = physicalType(domain);
+    auto recordEncoding = packedType(region.getType());
+    bool recordSnapshot = bool(recordEncoding);
     Value descriptor = region;
     int64_t windowOffset = 0, windowElements = 0;
     Value translatedOffset;
-    if (auto window = region.getDefiningOp<wk::SubviewOp>()) {
+    if (auto window = region.getDefiningOp<wk::SubviewOp>(); window && !recordSnapshot) {
       auto baseShape = shape(window.getBase().getType());
       if (window.getOffsets().size() != baseShape.size() || baseShape.empty()) return {};
       unsigned dynamic = llvm::count(window.getOffsets(), -1);
@@ -1568,7 +1575,7 @@ private:
       }
       if (windowOffset < 0 || windowElements <= 0) return {};
       descriptor = window.getBase();
-    } else if (auto slice = region.getDefiningOp<wk::SliceOp>()) {
+    } else if (auto slice = region.getDefiningOp<wk::SliceOp>(); slice && !recordSnapshot) {
       auto selectors = slice.getSelectors().getValue();
       if (selectors.empty() || slice.getIndices().size() != 1 ||
           cast<StringAttr>(selectors.back()).getValue() != "index" ||
@@ -1586,14 +1593,24 @@ private:
     }
     auto field = descriptor.getDefiningOp<wk::FieldOp>();
     auto vectorType = dyn_cast<VectorType>(resultType);
-    if (!field || !vectorType || !memoryType(field.getOwner().getType())) return {};
-    auto layout = weft::analysis::encodingBytes(sourceModule, packedType(field.getOwner().getType()));
+    if (!vectorType || (!recordSnapshot && (!field || !memoryType(field.getOwner().getType())))) return {};
+    Value owner = recordSnapshot ? region : field.getOwner();
+    auto layout = weft::analysis::encodingBytes(sourceModule,
+        recordSnapshot ? recordEncoding : packedType(owner.getType()));
     if (failed(layout)) return {};
-    auto found = llvm::find(layout->base.getFieldNames(), b.getStringAttr(field.getName()));
-    if (found == layout->base.getFieldNames().end()) return {};
-    unsigned fieldIndex = found - layout->base.getFieldNames().begin();
-    if (layout->affineFieldOffset(fieldIndex)) return {};
-    auto fieldShape = cast<DenseI64ArrayAttr>(layout->base.getFieldShapes()[fieldIndex]).asArrayRef();
+    unsigned fieldIndex = 0;
+    SmallVector<int64_t> fieldShape;
+    if (recordSnapshot) {
+      if (!vectorType.getElementType().isInteger(8)) return {};
+      fieldShape.push_back(layout->bytes());
+    } else {
+      auto found = llvm::find(layout->base.getFieldNames(), b.getStringAttr(field.getName()));
+      if (found == layout->base.getFieldNames().end()) return {};
+      fieldIndex = found - layout->base.getFieldNames().begin();
+      if (layout->affineFieldOffset(fieldIndex)) return {};
+      llvm::append_range(fieldShape,
+          cast<DenseI64ArrayAttr>(layout->base.getFieldShapes()[fieldIndex]).asArrayRef());
+    }
     int64_t elements = volume(fieldShape);
     if (windowElements) {
       if (fieldShape.size() != 1 || windowOffset > elements || windowElements > elements - windowOffset) return {};
@@ -1614,7 +1631,10 @@ private:
     SmallVector<int64_t> bytes;
     unsigned parts = 0;
     for (int64_t lane = 0; lane < windowElements; ++lane) {
-      fragments.push_back(layout->fragments(fieldIndex, windowOffset + lane, false));
+      if (recordSnapshot)
+        fragments.push_back({{lane, 0, 255, 0, layout->address(lane).second}});
+      else
+        fragments.push_back(layout->fragments(fieldIndex, windowOffset + lane, false));
       parts = std::max(parts, static_cast<unsigned>(fragments.back().size()));
       for (auto fragment : fragments.back()) bytes.push_back(fragment.byte);
     }
@@ -1663,7 +1683,7 @@ private:
       Value row = arith::DivUIOp::create(b, loc, firstRecord, columns);
       Value column = arith::RemUIOp::create(b, loc, firstRecord, columns);
       bool directCohort = false;
-      Value cohortOwner = field.getOwner();
+      Value cohortOwner = owner;
       int64_t cohortRowOffset = 0;
       int64_t cohortColumnOffset = 0;
       while (auto window = cohortOwner.getDefiningOp<wk::SubviewOp>()) {
@@ -1701,7 +1721,7 @@ private:
         if (rootKernel)
           if (auto strided = rootKernel.getStridedArgs())
             contiguousRoot &= !llvm::is_contained(*strided, rootKernel.getArgNames()[root.getArgNumber()]);
-        auto windowShape = shape(field.getOwner().getType());
+        auto windowShape = shape(owner.getType());
         if (contiguousRoot &&
             shape(root.getType()).size() == 2 && selection.getSelectors().size() == 2 &&
             windowShape.size() == 2 && windowShape.back() == layout->elements() &&
@@ -1836,6 +1856,14 @@ private:
         storageAccess(loc, view, offsets, active, input, domain, false);
       }
       return input;
+    }
+    if (recordSnapshot) {
+      if (!cohortChoice) return raw;
+      scf::YieldOp::create(b, loc, raw);
+      b.setInsertionPointToStart(&cohortChoice.getElseRegion().front());
+      Value general = storageAccess(loc, view, offsets, active, zero(loc, resultType), domain, true);
+      scf::YieldOp::create(b, loc, general);
+      return cohortChoice.getResult(0);
     }
     unsigned width = vectorType.getElementType().getIntOrFloatBitWidth();
     unsigned carrierBits = target.vectorBits == 512 ? 16 : 32;
@@ -2690,24 +2718,28 @@ private:
     }
     return access(loc, base, offsets, active, fill, domain, true, false);
   }
-  // Only a sole lookup in the same read-only interval can consume the memory
-  // snapshot directly. A staged/shared table or an intervening write keeps
-  // the complete saved Value. This is demand-driven storage selection, not
-  // permission to reload a snapshot after a write or in another source region.
+  // All lookup consumers must stay in the same unchanged read interval.
+  // Sharing the numerical read with CSE does not require a full table copy
+  // when every use is still provably before any write or lifetime boundary.
   bool selectIndexedSnapshot(wk::AdmitOp admit) {
     Value result = admit.getResult();
-    if (!result.hasOneUse() || packedType(result.getType())) return false;
-    auto lookup = dyn_cast<wk::LookupOp>(*result.getUsers().begin());
-    if (!lookup || lookup.getTable() != result || lookup->getBlock() != admit->getBlock() ||
-        arrayValue(lookup.getResult().getType())) return false;
+    if (result.use_empty() || packedType(result.getType())) return false;
+    Operation *last = nullptr;
+    for (Operation *user : result.getUsers()) {
+      auto lookup = dyn_cast<wk::LookupOp>(user);
+      if (!lookup || lookup.getTable() != result ||
+          lookup->getBlock() != admit->getBlock() ||
+          arrayValue(lookup.getResult().getType())) return false;
+      if (!last || last->isBeforeInBlock(user)) last = user;
+    }
     auto type = dyn_cast<VectorType>(physicalType(result.getType()));
     if (type && type.getNumElements() * type.getElementTypeBitWidth() <= target.vectorBits)
       return false;
-    for (Operation *next = admit->getNextNode(); next != lookup; next = next->getNextNode()) {
+    for (Operation *next = admit->getNextNode(); next != last; next = next->getNextNode()) {
       if (!next) return false;
       auto effects = getEffectsRecursively(next);
       if (!effects || llvm::any_of(*effects, [](const auto &effect) {
-            return !isa<MemoryEffects::Read>(effect.getEffect());
+            return !isa<MemoryEffects::Read, MemoryEffects::Allocate>(effect.getEffect());
           })) return false;
     }
     indexedSnapshots[result] = memories.at(admit.getRegion());
@@ -2796,7 +2828,8 @@ private:
     weft::x86::ContractionStorage storage{
         isa<MemRefType>(mapped(op.getOperand(0)).getType()),
         isa<MemRefType>(mapped(op.getOperand(1)).getType()),
-        isa<VectorType>(mapped(op.getOperand(1)).getType())};
+        isa<VectorType>(mapped(op.getOperand(1)).getType()),
+        isa<VectorType>(mapped(op.getOperand(0)).getType())};
     auto selected = weft::x86::selectContractionEngine(op, target, storage, arrayResult,
         shape(op.getOperand(0).getType()), shape(op.getOperand(1).getType()), shape(op.getResult(0).getType()));
     if (succeeded(selected)) weft::x86::recordContractionEngine(module, op, *selected);
@@ -4049,30 +4082,11 @@ private:
     };
     Type elem = arrayElement(domain.getType());
     unsigned bits = elem.isIndex() ? 64 : elem.getIntOrFloatBitWidth();
-    // A flat static traversal is suitable for LLVM only when its complete
-    // storage span is contiguous. Row gaps or runtime leading strides otherwise
-    // hide unit-stride inner rows behind division/remainder address expressions.
-    bool dynamic = llvm::any_of(shape(domain.getType()), [](int64_t size) { return size < 0; });
-    bool stridedRows = false;
-    if (!dynamic && extents.size() > 1 && view.strides.size() == extents.size() &&
-        matchPattern(view.strides.back(), m_One())) {
-      auto dimensions = shape(domain.getType());
-      int64_t stride = 1;
-      for (int64_t axis = dimensions.size() - 1; axis >= 0; --axis) {
-        APInt actual;
-        if (!matchPattern(view.strides[axis], m_ConstantInt(&actual)) || actual.getSExtValue() != stride)
-          stridedRows = true;
-        stride *= dimensions[axis];
-      }
-    }
-    // An encoded snapshot already traverses storage bytes here. For a direct
-    // record layout those bytes have the same contiguous inner relation as a
-    // dense array. Packetize at the original read point, preserving snapshot
-    // lifetime, tail validity and all alias ordering. Interleaved records keep
-    // their explicit storage-map path.
-    bool packedPackets = bool(packedType(domain.getType()));
-    bool packets = (dynamic || stridedRows || packedPackets) &&
-        (!packedType(domain.getType()) || packedPackets) && !extents.empty() && ids == memoryAxes &&
+    // Static and dynamic arrays share the same row-packet program. Preserve the
+    // actual memory stride, original read epoch and exact tail. This also lets
+    // the common forwarding passes consume the transfer without a scalar-copy
+    // detour. Interleaved records retain their explicit storage-map path.
+    bool packets = !extents.empty() && ids == memoryAxes &&
         bits >= 8 && bits <= 64 && llvm::isPowerOf2_32(bits) && matchPattern(view.storageMapped, m_Zero()) &&
         (!input || isa<MemRefType>(mapped(input).getType()));
     if (packets) {
@@ -4140,6 +4154,22 @@ private:
   }
   LogicalResult lowerArray(Operation &op) {
     if (isa<wk::ValueFactOp>(op)) return success();
+    if (auto iota = dyn_cast<wk::IotaOp>(op)) {
+      Location loc = op.getLoc();
+      auto extents = arrayExtents(iota.getResult(), loc);
+      Type elementType = scalar(iota.getResult().getType());
+      auto output = weft::x86::allocateArray(b, loc, elementType, extents);
+      if (failed(weft::x86::forArray(b, loc, extents, [&](Value index, ValueRange) {
+        Value value = arith::AddIOp::create(b, loc, index, indexConstant(loc, iota.getStart()));
+        if (!elementType.isIndex())
+          value = arith::IndexCastUIOp::create(b, loc, elementType, value);
+        memref::StoreOp::create(b, loc, value, output.data, index);
+        storeArrayMask(loc, constant(loc, b.getI1Type(), b.getBoolAttr(true)), output.valid, index);
+        return success();
+      }, true, arrayScope(op)))) return failure();
+      bindArray(iota.getResult(), output, loc);
+      return success();
+    }
     if (auto field = dyn_cast<wk::FieldOp>(op)) return arrayField(field);
     if (auto table = dyn_cast<wk::LookupOp>(op)) return arrayLookup(table);
     if (auto reshape = dyn_cast<wk::ReshapeOp>(op)) return arrayReshape(reshape);
@@ -4546,6 +4576,22 @@ private:
     auto over = op.getAttrOfType<DenseI64ArrayAttr>("over").asArrayRef();
     auto leftAxes = axes(op.getOperand(0).getType());
     auto leftShape = arrayExtents(op.getOperand(0), loc);
+    Value matrixLeft = mapped(op.getOperand(0));
+    Value matrixLeftValid = valid(op.getOperand(0), loc);
+    if (*selected == weft::x86::ContractionEngine::MatrixInteger &&
+        isa<VectorType>(matrixLeft.getType())) {
+      // AMX consumes addressable rows even when its saved source tile fits
+      // vector registers. Materialize that exact SSA snapshot locally; do
+      // not require an author buffer just to cross the selected instruction's
+      // operand boundary, or reread the source View after intervening writes.
+      auto storage = weft::x86::allocateArray(b, loc, b.getI8Type(), leftShape);
+      auto predicates = cast<VectorType>(matrixLeftValid.getType());
+      vector::StoreOp::create(b, loc, matrixLeft, storage.data, indexConstant(loc, 0));
+      Value bytes = arith::ExtUIOp::create(b, loc, predicates.clone(b.getI8Type()), matrixLeftValid);
+      vector::StoreOp::create(b, loc, bytes, storage.valid, indexConstant(loc, 0));
+      matrixLeft = storage.data;
+      matrixLeftValid = storage.valid;
+    }
     SmallVector<Value> reductionShape;
     for (int64_t axis : over) reductionShape.push_back(leftShape[llvm::find(leftAxes, axis) - leftAxes.begin()]);
     Type elementType = scalar(result.getType());
@@ -4602,12 +4648,12 @@ private:
     bool amx = *selected == weft::x86::ContractionEngine::MatrixBFloat;
     bool fixedRightMatrix = *selected == weft::x86::ContractionEngine::MatrixInteger &&
         scalar(op.getOperand(0).getType()).isInteger(8) &&
-        isa<MemRefType>(mapped(op.getOperand(0)).getType()) &&
+        isa<MemRefType>(matrixLeft.getType()) &&
         isa<VectorType>(mapped(op.getOperand(1)).getType()) &&
         volume(shape(result.getType())) <= 4096;
     bool integerMatrix = *selected == weft::x86::ContractionEngine::MatrixInteger &&
         scalar(op.getOperand(0).getType()).isInteger(8) &&
-        isa<MemRefType>(mapped(op.getOperand(0)).getType()) && isa<MemRefType>(mapped(op.getOperand(1)).getType());
+        isa<MemRefType>(matrixLeft.getType()) && isa<MemRefType>(mapped(op.getOperand(1)).getType());
     if (integerMatrix || fixedRightMatrix) {
       Value complete = constant(loc, b.getI1Type(), b.getBoolAttr(true));
       for (Value source : op.getOperands()) {
@@ -4631,7 +4677,7 @@ private:
         complete = loop.getResult(0);
       }
       auto emitInteger = [&](bool masked) {
-      weft::x86::ArrayStorage left{mapped(op.getOperand(0)), valid(op.getOperand(0), loc), leftShape};
+      weft::x86::ArrayStorage left{matrixLeft, matrixLeftValid, leftShape};
       if (fixedRightMatrix) {
         Value right = mapped(op.getOperand(1));
         if (masked)

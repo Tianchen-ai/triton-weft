@@ -12,6 +12,7 @@ struct ContractionStorage {
   bool leftArray = false;
   bool rightArray = false;
   bool rightVector = false;
+  bool leftVector = false;
 };
 
 bool matrixReductionFirst(mlir::Operation &op, unsigned operand);

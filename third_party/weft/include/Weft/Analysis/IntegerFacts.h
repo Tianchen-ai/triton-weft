@@ -35,7 +35,7 @@ bool saturatingProductSumIsExact(IntegerRange lhs, IntegerRange rhs,
 // conversion and overflow reasoning. It does not select instructions or layouts.
 enum class IntegerExpressionKind {
   Unknown, Known, Preserve, ZeroOr, NegateOr, Cast, Saturate, Union, Add, Sub, Mul, And, Or,
-  ShiftLeft, ShiftRight, Divide, ProductSum, Sum
+  ShiftLeft, ShiftRight, Divide, Remainder, ProductSum, Sum
 };
 
 struct IntegerExpression {

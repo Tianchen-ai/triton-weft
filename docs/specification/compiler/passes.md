@@ -5,12 +5,21 @@
 module 外的 assignment 表，也不构成新的 IR 层。
 
 整数范围、转换与乘积和溢出的证明由 `Weft/Analysis/IntegerFacts` 与 x86 共用。
+两后端在物理化前共用 Canonical control normalization：普通单出口 inline helper
+展开到调用位置，保留 noinline、提前退出和所有 Level 区域。只重命名轴、没有重排
+坐标的 reshape 可以推入逐元素纯操作和 gather 的索引；字段 owner、读取快照、
+state/stage、归约与控制边界不被重命名或越过。SCF 的 carry/条件化简复用匹配 SDK
+的 region-branch patterns，无使用的纯操作由 MLIR 的区域 DCE 清除，随后重建查询。
+展开和轴关系闭合后复用 MLIR CSE，合并支配范围内相同的索引和纯数值表达式；
+source 的 `new/materialize` birth 在变换期间保持各自身份，不能因为初始值相同合并。
 RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改变数值范围，
 窄化或潜在回绕不能继承未经证明的窄区间。查询只在单次有界遍历内保存 memo，
 不会跨 pass 保留随 SSA 改写失效的事实。边界使用任意精度整数，覆盖完整 signed/unsigned
 机器类型，包括 i64/u64；乘积、累加和 magnitude 查询先扩展分析位宽，避免分析自身回绕。
 普通 MLIR 操作复用 `InferIntRangeInterface` 的 signed/unsigned 与模运算合同，目标适配层
 只解释其局部操作。未知 producer 保留完整类型范围，不提供不存在的窄区间证明。
+非负整数对正除数的余数复用共同范围证明，保留除数可能为零或负数时的完整类型域；
+因此分组索引中的除余坐标可参与 gather 有效域检查，不用名义容量代替真实有效域。
 物理 splat 保留标量范围；masked negate 交由共同分析求原值与取负值的并集。
 分析在扩展位宽内计算取负，若结果可能跨过机器类型边界则退回完整类型域，
 不能用对 signed-min 无效的绝对值证明允许更多窄累加。
@@ -24,6 +33,13 @@ partial source-lane 候选按正式 repack leaf 的临时资源评估输入／�
 操作前计入仍活跃的 source 与 leaf scratch，操作后计入 result。完整寄存器 split
 是原 payload 的视图，不将已消费的 source 与 result 当成两套同时分配的寄存器；
 需要 slice/copy 的 realization 仍计入其真实 scratch，之后重新验证完整程序的峰值。
+
+单轴 domain 投影同样计入原快照与投影同时存活的寄存器。如果两者合计超过目标预算，
+复用已有有界 snapshot 程序；允许延迟读取须证明未穿过相关写入，否则在原读取 epoch
+保存私有副本。不能只因原快照单独能装下，就忽略其消费者的资源。
+
+表示转换的可选反向物化必须保持宽度转换指令的 EMUL/LMUL 比例。活动 lane 数相同
+不证明寄存器容量兼容；未满足机器位宽关系时保留原来合法的显式 conversion。
 
 `Analysis/PhysicalDependence` 与 x86 共用 SCF 的精确静态迭代数，包括空域、非单位步长和
 有符号/无符号比较。RISC-V 的循环不变量读取据此证明循环确实执行；未知边界不获得默认次数。
