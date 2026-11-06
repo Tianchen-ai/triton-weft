@@ -12,6 +12,8 @@ state/stage、归约与控制边界不被重命名或越过。SCF 的 carry/条�
 的 region-branch patterns，无使用的纯操作由 MLIR 的区域 DCE 清除，随后重建查询。
 展开和轴关系闭合后复用 MLIR CSE，合并支配范围内相同的索引和纯数值表达式；
 source 的 `new/materialize` birth 在变换期间保持各自身份，不能因为初始值相同合并。
+每个 kernel 唯一的 root domain 是结构锚点；即使普通 Tensor 程序没有子 Level，
+它也不作为无使用的纯数值删除。目标转换消费该锚点，不产生运行时工作。
 完整、静态有效域上的零坐标标量投影消去纯 broadcast/extract 往返；相同坐标的
 SSA update/extract 直接传递刚写入的标量。只穿过保持坐标顺序的重命名，不穿过
 读取、state/stage birth 或控制区域，也不将越界索引当作零坐标。

@@ -168,7 +168,8 @@ def WeftKernel_HelperReturnOp : WeftKernel_Op<"helper_return", [DeclareOpInterfa
   let hasVerifier = 1;
 }
 
-def WeftKernel_RootDomainOp : WeftKernel_Op<"root_domain", [Pure]> {
+def WeftKernel_RootDomainOp : WeftKernel_Op<"root_domain"> {
+  let summary = "Structural kernel root, retained even without child domains";
   let results = (outs WeftKernel_DomainType:$result);
   let hasVerifier = 1;
 }
