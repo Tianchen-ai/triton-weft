@@ -3396,6 +3396,31 @@ private:
       auto found = llvm::find(sourceAxes, axis);
       outputOrigins.push_back(found == sourceAxes.end() ? indexConstant(loc, 0) : sourceOrigins[found - sourceAxes.begin()]);
     }
+    // A bounded one-dimensional gather from a local numerical Value has the
+    // same physical register permutation as an indexed table read. Keep the
+    // projection's index and payload validity; a source spelling difference
+    // must not force one dynamic extractelement per result lane.
+    if (!update && !packedType(source.getType()) && dimensions.size() == 1 &&
+        indices.size() == 1 && selectors.size() == 1 &&
+        cast<StringAttr>(selectors[0]).getValue() == "gather" &&
+        weft::analysis::hasUnsignedBound(indices.front(), dimensions.front())) {
+      Value active = validAs(indices.front(), projected, loc);
+      Value positions = aligned(indices.front(), projected, loc);
+      positions = arith::SelectOp::create(b, loc, active, positions,
+          zero(loc, positions.getType()));
+      if (Value payload = weft::x86::registerLookup(module, b, loc,
+              mapped(source), positions, target.vectorBits)) {
+        Value selectedValid = weft::x86::registerLookup(module, b, loc,
+            valid(source, loc), positions, target.vectorBits);
+        assert(selectedValid && "register projection also admits predicate lookup");
+        active = arith::AndIOp::create(b, loc, active, selectedValid);
+        values.map(op.getResult(0), arith::SelectOp::create(b, loc, active,
+            payload, zero(loc, outputType)));
+        masks[op.getResult(0)] = active;
+        valueOrigins[op.getResult(0)] = std::move(outputOrigins);
+        return success();
+      }
+    }
     int64_t recordElements = 1, recordBytes = 1;
     if (auto encoding = packedType(source.getType())) {
       auto layout = weft::analysis::encodingBytes(sourceModule, encoding);

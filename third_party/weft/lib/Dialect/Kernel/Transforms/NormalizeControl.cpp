@@ -241,6 +241,20 @@ public:
     if (input.getShape() != output.getShape() ||
         !llvm::equal(reshape.getOrder(), input.getAxisIds().asArrayRef()))
       return failure();
+    // A positional tile copy can rename the same coordinates more than once
+    // (for example, through an ordinary helper's destination). Compose those
+    // identities before pushing the final rename into a numerical producer.
+    // A transpose or change of shape still retains its explicit mapping.
+    if (auto previous = reshape.getInput().getDefiningOp<k::ReshapeOp>()) {
+      auto source = previous.getInput().getType();
+      if (source.getShape() == input.getShape() &&
+          llvm::equal(previous.getOrder(), source.getAxisIds().asArrayRef())) {
+        rewriter.replaceOpWithNewOp<k::ReshapeOp>(reshape, output,
+            previous.getInput(), previous.getOrderAttr());
+        if (previous->use_empty()) rewriter.eraseOp(previous);
+        return success();
+      }
+    }
     Operation *producer = reshape.getInput().getDefiningOp();
     if (!producer) return failure();
     bool elementwise = isa<k::IotaOp, k::UnaryOp, k::BinaryOp, k::CompareOp,
