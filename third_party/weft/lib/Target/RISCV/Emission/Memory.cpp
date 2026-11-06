@@ -357,8 +357,11 @@ std::optional<std::string> Emitter::denseAddress(
       else if (selector == "group_index")
         coordinate = "(" + index.point.base + " / " +
                      std::to_string(index.point.physicalExtent) + ")";
-      else if (selector == "index")
-        coordinate = index.scalar;
+      else if (selector == "index") {
+        const std::string origin = dimension < memory.origins.size()
+                                       ? memory.origins[dimension] : "0";
+        coordinate = "(" + origin + " + " + index.scalar + ")";
+      }
       else
         return std::nullopt;
     }
@@ -1328,7 +1331,7 @@ mlir::FailureOr<Binding> Emitter::recordForSlice(mlir::Value value) {
                                std::to_string(index.point.physicalExtent) + ")";
       points[base.memory.axes[dimension]] = index.point;
     } else if (selector == "index") {
-      coordinates[dimension] = index.scalar;
+      coordinates[dimension] = "(" + coordinates[dimension] + " + " + index.scalar + ")";
     } else {
       return value.getDefiningOp()->emitError(
                  "encoded record has an unknown slice selector"),

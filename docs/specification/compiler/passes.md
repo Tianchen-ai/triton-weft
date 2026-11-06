@@ -53,6 +53,9 @@ partial source-lane 候选按正式 repack leaf 的临时资源评估输入／�
 复用已有有界 snapshot 程序；允许延迟读取须证明未穿过相关写入，否则在原读取 epoch
 保存私有副本。不能只因原快照单独能装下，就忽略其消费者的资源。
 
+流式归约候选在资源复用尚未证明前，同时计入循环入口 carry 与回边 yielded version，
+避免用未实现的寄存器复用选择过宽 issue、随后在每次迭代 spill 同一 carry。
+
 表示转换的可选反向物化必须保持宽度转换指令的 EMUL/LMUL 比例。活动 lane 数相同
 不证明寄存器容量兼容；未满足机器位宽关系时保留原来合法的显式 conversion。
 
@@ -120,6 +123,8 @@ derived layout、跨控制结果或 stage 的 encoded reshape 子图。
 descriptor 的请求 extent 与 backing storage 的有效范围分别验证：`MemoryBounds`
 生成穿过 subview、slice 和轴改名的显式 SSA 条件。嵌套 domain point 替换同轴的
 绝对基坐标，普通 index/subview offset 仍按相对坐标组合，避免重复加上父层 base。
+terminal 的 dense/record descriptor 翻译也保留该区别：普通 index 先加 descriptor origin，
+再转成 backing-relative 地址；不能把 record 内的字段索引误当作绝对 domain 坐标。
 共享 origin 查询先检查最近的 slice/extract 坐标，再回看 backing；内层子窗口不能
 继承成外层 record 的起点。IME 将一个 contraction 分成多个 K atom 时沿该起点
 生成子窗口，并合成已有的 domain projection，保留其它轴的选择和原读取快照。

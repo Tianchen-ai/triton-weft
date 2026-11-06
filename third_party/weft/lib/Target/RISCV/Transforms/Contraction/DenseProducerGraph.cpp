@@ -373,7 +373,11 @@ bool DenseProducerGraph::chooseIssue() {
         };
         auto numeric = pieceOf(domain);
         if (!numeric) continue;
-        int64_t accumulator = numeric.getLayout().getRegisterGroups() * reductions.size();
+        // The structured loop owns both its incoming carry and the yielded
+        // version until resource materialization proves their reuse. Account
+        // for those actual SSA versions rather than selecting a width whose
+        // apparent fit is later paid for by spilling the carries every issue.
+        int64_t accumulator = 2 * numeric.getLayout().getRegisterGroups() * reductions.size();
         bool legal = true;
         for (Value input : inputs) {
           auto supply = pieceOf(cast<riscv::ValueType>(input.getType()));
