@@ -970,7 +970,7 @@ bool supportsBitmaskWindowLayout(riscv::FieldOp field,
       result.getLayout().getCarrier() != "rvv" || windowAxes.empty() ||
       windowAxes.size() != windowExtents.size() || !elements ||
       facts.mapping != "grouped_layered" || facts.group <= 0 ||
-      facts.layer <= 0 || facts.group != facts.layer * 8 ||
+      facts.layer != 1 || facts.group != facts.layer * 8 ||
       facts.order != "lo_first" || facts.bitOffset % 8 ||
       (bitmaskWindowAccessForm(field) == "strided" && facts.chunkBytes != 1) ||
       *elements % facts.group ||
@@ -1002,6 +1002,34 @@ bool supportsBitmaskWindowLayout(riscv::FieldOp field,
   return true;
 }
 
+riscv::ValueType separateBitmaskWindowAxes(
+    mlir::Builder &builder, riscv::ValueType result, int64_t recordAxis,
+    size_t retainedAxes, llvm::SmallVectorImpl<int64_t> &windowAxes,
+    int64_t &nextAxis) {
+  auto axes = llvm::to_vector(result.getAxisIds().asArrayRef());
+  bool renamed = false;
+  for (auto [offset, axis] : llvm::enumerate(windowAxes)) {
+    if (axis != recordAxis)
+      continue;
+    const int64_t privateAxis = nextAxis++;
+    windowAxes[offset] = privateAxis;
+    axes[retainedAxes + offset] = privateAxis;
+    renamed = true;
+  }
+  if (!renamed)
+    return result;
+  auto ids = builder.getDenseI64ArrayAttr(axes);
+  auto layout = result.getLayout();
+  auto renamedLayout = riscv::LayoutAttr::get(
+      builder.getContext(), layout.getCarrier(), ids, layout.getTimeFactors(),
+      layout.getLaneFactors(), layout.getReplicaFactors(),
+      layout.getFragmentFactors(), layout.getLocalFactors(), layout.getSew(),
+      layout.getLmulEighths(), layout.getVl(), layout.getRegisterGroups(),
+      layout.getValidity(), layout.getReplicaGroup());
+  return riscv::ValueType::get(builder.getContext(), result.getElementType(),
+                               result.getShape(), ids, renamedLayout);
+}
+
 std::optional<riscv::ValueType>
 byteAlignedBitmaskLoadType(riscv::ValueType result,
                            llvm::ArrayRef<int64_t> windowAxes,
@@ -1009,7 +1037,8 @@ byteAlignedBitmaskLoadType(riscv::ValueType result,
                            const riscv_internal::FieldFacts &facts,
                            riscv::TargetAttr target, mlir::Builder &builder) {
   if (!target || windowAxes.empty() ||
-      windowAxes.size() != windowExtents.size() || facts.group <= 0)
+      windowAxes.size() != windowExtents.size() || facts.group <= 0 ||
+      facts.layer != 1)
     return std::nullopt;
 
   auto byteAligned = [&](riscv::ValueType candidate) {
@@ -1215,6 +1244,16 @@ materializeAffineWindowBase(mlir::Value index, riscv::ValueType result,
   if (mlir::failed(scalarBase) ||
       !riscv_internal::knownMultipleOf(*scalarBase, baseDivisor))
     return std::nullopt;
+  // Address scaling is not finite-width payload arithmetic. In particular a
+  // 256-element record divisor cannot be represented by a U8 gather index.
+  // Preserve the computed base, then widen before introducing storage strides.
+  if (!(*scalarBase).getType().isIndex()) {
+    auto addressBase = riscv::CastOp::create(
+        rewriter, origin->getLoc(), rewriter.getIndexType(), *scalarBase,
+        riscv_internal::unselectedLeaf(rewriter));
+    riscv_internal::copyOrigin(origin, addressBase);
+    scalarBase = addressBase.getResult();
+  }
   if (baseDivisor != 1) {
     mlir::TypedAttr divisor;
     if (auto integer =
@@ -3353,6 +3392,21 @@ public:
     mlir::Builder builder(&getContext());
     mlir::IRRewriter rewriter(&getContext());
     bool failed = false;
+    int64_t nextAxis = 0;
+    getOperation().walk([&](mlir::Operation *operation) {
+      auto observe = [&](mlir::Type type) {
+        for (int64_t axis : riscv_internal::logicalAxes(type))
+          nextAxis = std::max(nextAxis, axis + 1);
+        if (auto point = mlir::dyn_cast<riscv::PointType>(type))
+          nextAxis = std::max(nextAxis, point.getDomain().getAxisId() + 1);
+        if (auto domain = mlir::dyn_cast<riscv::DomainType>(type))
+          nextAxis = std::max(nextAxis, domain.getAxisId() + 1);
+      };
+      for (mlir::Type type : operation->getOperandTypes())
+        observe(type);
+      for (mlir::Type type : operation->getResultTypes())
+        observe(type);
+    });
     llvm::SmallVector<riscv::ConvertLayoutOp> renamedFieldConversions;
     getOperation().walk([&](riscv::ConvertLayoutOp conversion) {
       renamedFieldConversions.push_back(conversion);
@@ -4279,6 +4333,12 @@ public:
                         domainResult, windowAxes, windowExtents,
                         sourceFacts, kernel.getTarget(), builder)
                   : std::nullopt;
+          const auto originalLoadResult = selectedLoadResult;
+          if (selectedLoadResult)
+            selectedLoadResult = separateBitmaskWindowAxes(
+                rewriter, *selectedLoadResult,
+                source.getAxisIds()[domainDimension], retainedAxes.size(),
+                windowAxes, nextAxis);
           auto partBitOffsets =
               selectedLoadResult
                   ? riscv::bitmaskWindowPartOffsets(
@@ -4316,11 +4376,18 @@ public:
                     "none", tail ? "agnostic" : "exact"));
             riscv_internal::copyOrigin(extract, window);
             mlir::Value replacement = window.getResult();
-            if (loadResult != domainResult) {
+            if (loadResult != *originalLoadResult) {
+              auto restored = riscv::ReshapeOp::create(
+                  rewriter, extract.getLoc(), *originalLoadResult, replacement,
+                  loadResult.getAxisIds(), mlir::DenseI64ArrayAttr());
+              riscv_internal::copyOrigin(extract, restored);
+              replacement = restored.getResult();
+            }
+            if (*originalLoadResult != domainResult) {
               auto bridge = riscv::ConvertLayoutOp::create(rewriter,
                   extract.getLoc(), domainResult, replacement,
                   riscv_internal::layoutConversion(
-                      rewriter, loadResult.getLayout(),
+                      rewriter, originalLoadResult->getLayout(),
                       domainResult.getLayout()),
                   riscv::AccessAttr(),
                   riscv_internal::unselectedLeaf(rewriter));
@@ -4389,6 +4456,12 @@ public:
                       result, bitmaskWindow->axes, bitmaskWindow->extents,
                       sourceFacts, kernel.getTarget(), builder)
                 : std::nullopt;
+        const auto originalLoadResult = selectedLoadResult;
+        if (selectedLoadResult)
+          selectedLoadResult = separateBitmaskWindowAxes(
+              rewriter, *selectedLoadResult,
+              source.getAxisIds()[gatherDimension], retainedAxes.size(),
+              bitmaskWindow->axes, nextAxis);
         if (bitmaskWindow && selectedLoadResult &&
             supportsBitmaskWindowLayout(
                 sourceField, *selectedLoadResult, retainedAxes.size(),
@@ -4420,11 +4493,18 @@ public:
                   "none", tail ? "agnostic" : "exact"));
           riscv_internal::copyOrigin(extract, window);
           mlir::Value replacement = window.getResult();
-          if (loadResult != result) {
+          if (loadResult != *originalLoadResult) {
+            auto restored = riscv::ReshapeOp::create(
+                rewriter, extract.getLoc(), *originalLoadResult, replacement,
+                loadResult.getAxisIds(), mlir::DenseI64ArrayAttr());
+            riscv_internal::copyOrigin(extract, restored);
+            replacement = restored.getResult();
+          }
+          if (*originalLoadResult != result) {
             auto bridge = riscv::ConvertLayoutOp::create(rewriter,
                 extract.getLoc(), result, replacement,
                 riscv_internal::layoutConversion(
-                    rewriter, loadResult.getLayout(), result.getLayout()),
+                    rewriter, originalLoadResult->getLayout(), result.getLayout()),
                 riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
             riscv_internal::copyOrigin(extract, bridge);
             replacement = bridge.getResult();

@@ -287,9 +287,17 @@ private:
                              .getDefiningOp<riscv::PhysicalPointOp>()
                        : riscv::PhysicalPointOp();
       auto destinationSlice = store.getRegion().getDefiningOp<riscv::SliceOp>();
-      auto destinationField = destinationSlice
-                                  ? destinationSlice.getBase().getDefiningOp<
-                                        riscv::FieldOp>()
+      mlir::Value destinationRegion =
+          destinationSlice ? destinationSlice.getBase() : mlir::Value();
+      // FieldView verifies its origin against this complete record's logical
+      // point. The selected leaf below uses a record-local base index, so it
+      // consumes the original field rather than the absolute-coordinate view.
+      if (auto view = destinationRegion
+                          ? destinationRegion.getDefiningOp<riscv::FieldViewOp>()
+                          : riscv::FieldViewOp())
+        destinationRegion = view.getField();
+      auto destinationField = destinationRegion
+                                  ? destinationRegion.getDefiningOp<riscv::FieldOp>()
                                   : riscv::FieldOp();
       auto destinationOwner = destinationField
                                   ? destinationField.getOwner().getDefiningOp<
@@ -351,8 +359,10 @@ private:
         continue;
 
       rewriter.setInsertionPoint(loop);
-      destinationOwner->moveBefore(loop);
-      destinationField->moveBefore(loop);
+      if (loop->isProperAncestor(destinationOwner))
+        destinationOwner->moveBefore(loop);
+      if (loop->isProperAncestor(destinationField))
+        destinationField->moveBefore(loop);
       mlir::Value elements = mlir::arith::ConstantIndexOp::create(rewriter,
           loop.getLoc(), owner.getElements());
       mlir::Value partition = mlir::arith::ConstantIndexOp::create(rewriter,

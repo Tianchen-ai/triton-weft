@@ -6918,7 +6918,7 @@ mlir::LogicalResult RVVBitmaskWindowLoadOp::verify() {
       getAccess().getForm() != (strided ? "strided" : "unit") ||
       (strided && getAccess().getFieldChunkBytes() != 1) ||
       getAccess().getMapping() != "grouped_layered" ||
-      getAccess().getGroupSize() <= 0 || getAccess().getLayerSize() <= 0 ||
+      getAccess().getGroupSize() <= 0 || getAccess().getLayerSize() != 1 ||
       getAccess().getGroupSize() != getAccess().getLayerSize() * 8 ||
       getAccess().getOrder() != "lo_first" || getAccess().getBitOffset() % 8 ||
       sourceAccess.getMapping() != getAccess().getMapping() ||

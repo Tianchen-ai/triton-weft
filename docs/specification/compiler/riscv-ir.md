@@ -174,6 +174,14 @@ joined 的完整 storage geometry。terminal lowering可以据此计算确定地
 追踪 record point；仅为坐标推导穿过 stage wrapper，实际读取仍消费原快照存储。
 numeric window 改为私有存储后，原寄存器 gather 的 access、leaf 和投影缓存失效，
 由同一 memory planning 重新选择，不能把原寄存器指令用于新的 local descriptor。
+record 轴被拆为多维 bitmask 窗口时，窗口使用与字段轴分离的私有物理轴，再通过
+显式 reshape 恢复消费者的数值轴。拆分不改变读取快照、逐 part bit offset 或有效域；
+保留字段轴与窗口轴不能重名。
+直接 mask load 还要求 storage bit 顺序与窗口的逻辑线性顺序一致。`layered`
+把不同逻辑位置放在同一字节的位上时，必须采用已显式选择的分层读取或 indexed
+读取，不能将连续字节上的 `vlm` 冒充该数值窗口。由有限位宽索引计算出的 base
+先保持原表达式的数值语义，再扩大到地址位宽后引入 record divisor 和 byte stride；
+存储跨度不能截断到 payload 的窄整数类型。
 
 字段 View 的 `load` 在 Canonical→Physical 转换中保留其 encoded owner，并形成数值 Field
 投影；静态 field subview 形成相应坐标的 gather。packed i4/i6 字段不能被误作独立、每元素

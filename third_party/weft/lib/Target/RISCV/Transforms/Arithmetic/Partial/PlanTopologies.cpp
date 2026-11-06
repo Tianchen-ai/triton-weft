@@ -888,15 +888,12 @@ public:
                 ? llvm::StringRef("rvv.partial-reduce.widen")
                 : llvm::StringRef("none");
         int64_t plannedResources = resources;
-        if (kind == "scaled" && laneSplit > 1 && sourceSetType &&
-            repackedSetType && fullScaledSetType) {
-          // Repacking selects the lanes of each existing scale group; it does
-          // not require reducing those lanes. Keep the exact i16 products in
-          // registers, widen while applying their exact scalar scale, and
-          // converge once after the complete scale-combine operation.
-          plannedResources = std::max({plannedResources,
-              sourceSetType.getResourceGroups() + repackedSetType.getResourceGroups() + 2,
-              repackedSetType.getResourceGroups() + fullScaledSetType.getResourceGroups() + 2});
+        if (kind == "scaled" && sourcePlan && laneSplit > 1) {
+          // The admitted source plan closes the selected repack leaf's live
+          // set and scratch, then the widen/scale consumer. A split aliases its
+          // source payload; adding both typed sets would count it twice.
+          plannedResources =
+              std::max(plannedResources, sourcePlan->resourceGroups);
         }
         if (kind == "scaled" && laneSplit == 1 && partialSetType &&
             scaledSetType && combineArity > 0 &&
