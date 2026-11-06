@@ -610,6 +610,11 @@ descriptor 的实际 stride 合成为目标宽度的 element offset；动态 str
 SSA 地址程序。`weft.riscv.lookup_storage_offsets` 标记这项已经完成的物理映射，后续窗口
 物化与布局转换必须保留它，不能再次把 offset 当作逻辑 table index。终端 gather 只执行
 这些显式偏移，不能假定所有 dense Encoding 都是连续存储。
+连续与非连续 table 在选定 indexed-memory leaf 前，均根据共同整数范围和 descriptor 的
+元素字节数证明索引载体能容纳完整 byte offset。必要的 unsigned extension 及其 layout
+显式进入 Physical IR；不能在窄索引中缩放后依赖 gather 恢复已溢出的地址位。
+lookup 的无效索引先映射到容量内的零位置，结果仍携带原有效域。部分 numeric table 的
+私有快照在初始化时填充无效槽，并通过同一索引读取伴随有效域，保持原读取时序。
 
 indexed-entry 的地址索引若仅由同形、同轴的 unsigned 8/16-bit value 扩展至 32-bit，
 且完整 byte offset 范围可由 16-bit 表示，可以直接选择 16-bit extension/identity 与

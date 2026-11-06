@@ -106,6 +106,47 @@ mlir::LogicalResult materializeLookupStorageOffsets(riscv::LookupOp op, mlir::IR
   return mlir::success();
 }
 
+mlir::LogicalResult materializeLookupAddressWidth(riscv::LookupOp op,
+                                                mlir::IRRewriter &b) {
+  auto indices = mlir::dyn_cast<riscv::ValueType>(op.getIndices().getType());
+  auto table = mlir::dyn_cast<riscv::MemDescType>(op.getTable().getType());
+  if (!indices || !table || indices.getLayout().getCarrier() != "rvv")
+    return mlir::success();
+  auto integer = mlir::dyn_cast<mlir::IntegerType>(indices.getElementType());
+  if (!integer || !integer.isUnsigned() || !table.getStorageBits() ||
+      table.getStorageBits() % 8)
+    return op.emitError("indexed lookup requires unsigned byte-addressable offsets");
+  uint64_t bytes = table.getStorageBits() / 8;
+  if (bytes == 1) return mlir::success();
+  auto range = riscv_internal::integerRange(op.getIndices());
+  if (!range) range = analysis::integerTypeRange(integer);
+  if (!range || range->minimum < 0 || range->maximum.getActiveBits() > 64)
+    return op.emitError("indexed lookup has no bounded unsigned address domain");
+  // RVV scales element indices in their selected carrier before gathering.
+  // Prove that the byte offset fits, rather than wrapping a narrow source index.
+  llvm::APInt maximum = range->maximum.zextOrTrunc(128) * llvm::APInt(128, bytes);
+  unsigned width = std::max(8u, integer.getWidth());
+  auto target = op->getParentOfType<riscv::KernelOp>().getTarget();
+  while (width < maximum.getActiveBits() && width < 64) width *= 2;
+  if (width < maximum.getActiveBits() ||
+      !llvm::is_contained(target.getSupportedSEW().asArrayRef(), width))
+    return op.emitError("indexed lookup byte offsets exceed the target address carriers");
+  if (width == integer.getWidth()) return mlir::success();
+  auto element = mlir::IntegerType::get(b.getContext(), width,
+                                      mlir::IntegerType::Unsigned);
+  auto type = riscv::ValueType::get(b.getContext(), element, indices.getShape(),
+                                  indices.getAxisIds(), indices.getLayout());
+  auto layout = riscv_internal::projectLayout(b, type, indices.getLayout(), target);
+  if (!layout) return op.emitError("lookup address extension has no legal target layout");
+  b.setInsertionPoint(op);
+  auto extended = riscv::CastOp::create(b, op.getLoc(),
+      riscv_internal::withLayout(type, layout), op.getIndices(),
+      riscv_internal::unselectedLeaf(b));
+  riscv_internal::copyOrigin(op, extended);
+  op.getIndicesMutable().assign(extended.getResult());
+  return mlir::success();
+}
+
 bool preferUnitStrideProbe(mlir::Value memory, mlir::Type value) {
   auto descriptor = mlir::dyn_cast<riscv::MemDescType>(memory.getType());
   auto numeric = mlir::dyn_cast<riscv::ValueType>(value);
@@ -5494,6 +5535,10 @@ public:
                   riscv_internal::leaf(builder, indexed ? "rvv" : "scalar", "lookup",
                       indexed ? "rvv.vluxei" : "scalar.lookup", indexed ? "rvv.vluxei" : "scalar.lookup", 0, 0));
               riscv_internal::copyOrigin(operation, capture);
+              if (mlir::failed(materializeLookupAddressWidth(capture, rewriter))) {
+                failed = true;
+                return;
+              }
               capture->setAttr("weft.riscv.lookup_saved_read", builder.getUnitAttr());
               if (!llvm::is_contained(deadTableLoads, tableLoad)) deadTableLoads.push_back(tableLoad);
               rewriter.replaceOp(operation, capture.getResult());
@@ -5664,6 +5709,7 @@ public:
         operation.getTableMutable().assign(view.getResult());
       }
       if (mlir::failed(materializeLookupStorageOffsets(operation, rewriter))) { failed = true; return; }
+      if (mlir::failed(materializeLookupAddressWidth(operation, rewriter))) { failed = true; return; }
       llvm::StringRef form = indexed ? "indexed" : "unit";
       if (indexed &&
           !operation->getParentOfType<riscv::KernelOp>()

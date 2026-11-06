@@ -815,6 +815,36 @@ public:
         if (failed(reduce(reduction))) return failure();
       } else if (isa<riscv::ContractOp, riscv::DotOp, riscv::OuterContractOp>(op)) {
         if (failed(contract(op))) return failure();
+      } else if (auto lookup = dyn_cast<riscv::LookupOp>(op)) {
+        Value indices = lookup.getIndices();
+        Value indexMask = masks.lookup(indices);
+        // Inactive coordinates need not satisfy the source bounds promise.
+        // Keep their payload lookup inside the nonempty table capacity before
+        // carrying the original index validity to every consumer.
+        if (indexMask) {
+          Type element = logicalElement(indices.getType());
+          Value zero = riscv::ConstantOp::create(b, loc, element, b.getZeroAttr(element));
+          indices = choose(indexMask, indices, zero, indices.getType(), loc);
+          lookup.getIndicesMutable().assign(indices);
+        }
+        Value valid = indexMask ? indexMask : full(lookup.getResult().getType(), loc);
+        if (Value tableMask = masks.lookup(lookup.getTable())) {
+          // A partial saved table cannot be replayed as an unguarded source
+          // descriptor. Define its inactive private slots before indexing;
+          // the companion predicate still records which selected values exist.
+          Value table = lookup.getTable();
+          Type element = logicalElement(table.getType());
+          Value zero = riscv::ConstantOp::create(b, loc, element, b.getZeroAttr(element));
+          Value padded = choose(tableMask, table, zero, table.getType(), loc);
+          lookup.getTableMutable().assign(riscv::RegisterMaterializeOp::create(b, loc,
+              cast<riscv::ValueType>(table.getType()), padded, -1, -1, -1, "physical-share"));
+          Value selected = tableMask;
+          if (isa<riscv::ValueType>(tableMask.getType()))
+            selected = riscv::LookupOp::create(b, loc, predicateType(b, lookup.getResult().getType()),
+                tableMask, indices, lookup.getBoundsAttr(), unassignedAccess(b), unselectedLeaf(b));
+          valid = conjunction(valid, selected, lookup.getResult().getType(), loc);
+        }
+        masks[lookup.getResult()] = valid;
       } else if (auto extract = dyn_cast<riscv::ExtractOp>(op)) {
         Value source = masks.lookup(extract.getInput());
         if (!source) return extract.emitError("numeric validity through an indexed operand requires a complete projection");

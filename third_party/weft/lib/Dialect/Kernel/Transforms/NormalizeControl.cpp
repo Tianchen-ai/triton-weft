@@ -28,6 +28,21 @@ public:
     bool index = result.getType().isIndex();
     if ((!integer && !index) || (integer && integer.getWidth() == 1)) return failure();
     auto interpretation = index ? IntegerType::get(getContext(), 64, IntegerType::Signed) : integer;
+    if (index) {
+      auto outer = dyn_cast<k::CastOp>(operation);
+      auto inner = outer ? outer.getInput().getDefiningOp<k::CastOp>() : k::CastOp();
+      auto carrier = inner ? dyn_cast<IntegerType>(inner.getResult().getType()) : IntegerType();
+      if (inner && carrier && inner.getInput().getType().isIndex()) {
+        auto source = weft::analysis::integerRange(inner.getInput(), interpretation);
+        // Ordinary frontend loops may expose an I32 induction variable while
+        // View addressing uses index. Only remove that round trip when the
+        // source bounds prove that the intermediate cast cannot lose bits.
+        if (source && !source->minimum.isNegative() && source->fits(carrier)) {
+          rewriter.replaceOp(operation, inner.getInput());
+          return success();
+        }
+      }
+    }
     auto range = weft::analysis::integerRange(result, interpretation);
     if (!range || range->minimum != range->maximum) return failure();
     if (index) {

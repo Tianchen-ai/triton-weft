@@ -29,6 +29,12 @@ ordinary loop induction values. Carries retain their own numerical facts.
 aliasing and birth/handoff constraints. These analyses live above target-specific
 instruction selection.
 
+Bounded loop coordinates can discard an index/integer/index round trip only
+when the shared range proof fits the intermediate carrier. RISC-V memory
+selection also proves that scaled lookup offsets fit their selected unsigned
+carrier, inserting an explicit extension when necessary. Saved table lookups
+carry index and table validity without moving their read across an aliasing write.
+
 ## Software pipeline depth
 
 ```python
