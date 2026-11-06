@@ -1558,7 +1558,24 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
   }
 
   mlir::Value cloned;
-  if (auto negate = mlir::dyn_cast<riscv::RVVMaskedNegateOp>(definition)) {
+  if (auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(definition)) {
+    auto inputType = mlir::dyn_cast<riscv::ValueType>(reshape.getInput().getType());
+    if (!inputType || inputType.getShape() != sourceType.getShape() ||
+        reshape.getOrder() != inputType.getAxisIds().asArrayRef())
+      return mlir::failure();
+    // A shape-preserving rename has the same positional coordinates. Project
+    // its source on the corresponding axis before restoring the public names;
+    // forwarding the complete input would keep every issue resident.
+    auto input = cloneIssueWindow(
+        reshape.getInput(), inputType.getAxisIds()[*position], windowExtent,
+        windowIndex, target, rewriter, clones);
+    if (mlir::failed(input))
+      return mlir::failure();
+    auto projectedType = mlir::cast<riscv::ValueType>((*input).getType());
+    cloned = riscv::ReshapeOp::create(
+        rewriter, reshape.getLoc(), resultType, *input,
+        projectedType.getAxisIds(), mlir::DenseI64ArrayAttr());
+  } else if (auto negate = mlir::dyn_cast<riscv::RVVMaskedNegateOp>(definition)) {
     auto data = cloneOperand(negate.getData());
     auto mask = cloneOperand(negate.getMask());
     if (mlir::failed(data) || mlir::failed(mask)) return mlir::failure();
