@@ -108,10 +108,10 @@ bool DenseProducerGraph::collect(Value value) {
     if (!encoding || encoding.getKind() != "dense" || load.getSnapshotStorage() ||
         !riscv::isAddressableDenseDescriptor(load.getRegion()) ||
         memory.getShape() != type.getShape() || memory.getAxisIds() != type.getAxisIds() ||
-        (logicalBitWidth(type) < 8 && !(type.getElementType().isInteger(1) && memory.getStorageBits() == 8))) {
-      // Encoded and sub-byte reads have their own selected transfer. Keep the
-      // completed snapshot as an input; splitting its descriptor here would
-      // reinterpret packed storage as an ordinary dense address.
+        (logicalBitWidth(type) < 8 && memory.getStorageBits() != 8)) {
+      // Packed fields keep their selected transfer. Byte-carried numeric
+      // sub-byte values instead have ordinary dense addresses, as recorded
+      // by the descriptor; their logical width does not change that stride.
       members.erase(op);
       return boundary(value);
     }
@@ -330,9 +330,15 @@ bool DenseProducerGraph::chooseIssue() {
   maximum = std::min(maximum, target.getVlenBits() * 8 / widest);
   auto surrounding = surroundingRegisterGroups(root, excluded);
   if (!surrounding) return false;
-  bool predicates = domain.getElementType().isInteger(1) ||
-      llvm::any_of(inputs, [](Value value) { return logicalElement(value.getType()).isInteger(1); });
-  if (predicates) maximum = 1;
+  // Byte-valued Boolean arrays use the ordinary selected compare/select and
+  // dense byte transfers. Only packed predicate representations require the
+  // scalar issue contract here; an i1 element alone does not imply a mask.
+  auto packedPredicate = [](riscv::ValueType type) {
+    return type.getElementType().isInteger(1) && type.getLayout().getSew() != 8;
+  };
+  if (packedPredicate(domain) || llvm::any_of(inputs, [&](Value value) {
+        return packedPredicate(cast<riscv::ValueType>(value.getType()));
+      })) maximum = 1;
 
   // Only an already declared active domain can provide validity for replicated
   // rows. A runtime ABI dimension without a physical point remains scalar in

@@ -692,6 +692,26 @@ private:
             return failure();
           }
         }
+      } else if (auto splat = dyn_cast<riscv::RVVSplatOp>(op)) {
+        Value scalar = mapping.lookupOrDefault(splat.getScalar());
+        if (type.getLayout().getCarrier() == "scalar") {
+          auto element = b.getIntegerType(32, false);
+          auto shape = type.getShape().asArrayRef(), axes = type.getAxisIds().asArrayRef();
+          auto coordinateType = riscv::ValueType::get(b.getContext(), element,
+              type.getShape(), type.getAxisIds(), riscv_internal::scalarLayout(b, element, shape, axes));
+          Value coordinate = riscv::IotaOp::create(b, op->getLoc(), coordinateType,
+              0, 1, riscv_internal::unselectedLeaf(b));
+          auto predicateType = riscv::ValueType::get(b.getContext(), b.getI1Type(),
+              type.getShape(), type.getAxisIds(), riscv_internal::scalarLayout(b, b.getI1Type(), shape, axes));
+          Value predicate = riscv::CompareOp::create(b, op->getLoc(), predicateType,
+              coordinate, coordinate, "eq", riscv_internal::unselectedLeaf(b));
+          result = riscv::SelectOp::create(b, op->getLoc(), type, predicate,
+              scalar, scalar, riscv_internal::unselectedLeaf(b));
+        } else {
+          result = riscv::RVVSplatOp::create(b, op->getLoc(), type, scalar,
+              riscv_internal::leaf(b, "rvv", "splat", "rvv.splat", "rvv.splat",
+                  0, type.getLayout().getRegisterGroups()));
+        }
       } else if (auto iota = dyn_cast<riscv::IotaOp>(op)) {
         int64_t axis = type.getAxisIds()[0];
         auto position = llvm::find(activeDomain.getAxisIds().asArrayRef(), axis) -

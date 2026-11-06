@@ -103,6 +103,7 @@ public:
   mlir::LogicalResult prepare() {
     mlir::IRRewriter rewriter(&getContext());
     bool failed = false;
+    lowerUniformBroadcasts(rewriter);
     lowerMaterializations(rewriter, failed);
     lowerLocalStates(rewriter, failed);
     lowerLoops(rewriter, failed);
@@ -143,6 +144,33 @@ public:
 
 private:
   mlir::ModuleOp module;
+
+  void lowerUniformBroadcasts(mlir::IRRewriter &rewriter) {
+    llvm::SmallVector<riscv::SelectOp> operations;
+    module.walk<mlir::WalkOrder::PostOrder>([&](riscv::SelectOp op) { operations.push_back(op); });
+    for (auto operation : operations) {
+      auto type = mlir::dyn_cast<riscv::ValueType>(operation.getResult().getType());
+      auto condition = mlir::dyn_cast<riscv::ValueType>(operation.getCondition().getType());
+      bool complete = condition && condition.getLayout().getValidity() == "full" &&
+          llvm::all_of(condition.getShape().asArrayRef(), [](int64_t n) { return n > 0; });
+      if (!type || operation.getTrueValue() != operation.getFalseValue() ||
+          operation.getTrueValue().getType() != type.getElementType() ||
+          !complete) continue;
+      auto layout = type.getLayout();
+      if (layout.getCarrier() != "rvv" && layout.getCarrier() != "local") continue;
+      // The predicate's validity is complete and both scalar payloads are
+      // identical. Preserve the selected result domain with one physical
+      // splat, without introducing a state birth or an addressable mask array.
+      rewriter.setInsertionPoint(operation);
+      auto splat = riscv::RVVSplatOp::create(rewriter, operation.getLoc(), type,
+          operation.getTrueValue(), riscv_internal::leaf(rewriter, "rvv", "splat",
+              layout.getCarrier() == "local" ? "rvv.splat.local" : "rvv.splat",
+              layout.getCarrier() == "local" ? "rvv.splat.local" : "rvv.splat",
+              0, layout.getRegisterGroups(), 0, 0, "none", "exact"));
+      copyIdentity(operation, splat);
+      rewriter.replaceOp(operation, splat.getResult());
+    }
+  }
   mlir::ModuleOp getOperation() { return module; }
   mlir::MLIRContext &getContext() { return *module.getContext(); }
   static int64_t ownerDomain(mlir::Operation *operation) {

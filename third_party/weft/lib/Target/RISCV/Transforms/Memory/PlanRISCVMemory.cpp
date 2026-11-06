@@ -751,6 +751,13 @@ materializeScalarAffineComponent(mlir::Value value, mlir::Operation *origin,
     return makeConstant(iota.getStart());
   if (auto conversion = value.getDefiningOp<riscv::ConvertLayoutOp>())
     return recurse(conversion.getInput());
+  if (auto rename = value.getDefiningOp<riscv::ReshapeOp>()) {
+    auto input = rename.getInput().getType();
+    if (input.getShape() == physical.getShape() &&
+        llvm::equal(rename.getOrder(), input.getAxisIds().asArrayRef()))
+      return recurse(rename.getInput());
+    return mlir::failure();
+  }
   if (auto broadcast = value.getDefiningOp<riscv::RVVAxisBroadcastOp>())
     return recurse(broadcast.getInput());
   if (auto materialize = value.getDefiningOp<riscv::RegisterMaterializeOp>())
@@ -1350,6 +1357,23 @@ analyzeReplicaAffineIndex(mlir::Value value, unsigned depth) {
     return std::nullopt;
   if (auto conversion = value.getDefiningOp<riscv::ConvertLayoutOp>())
     return analyzeReplicaAffineIndex(conversion.getInput(), depth + 1);
+  if (auto rename = value.getDefiningOp<riscv::ReshapeOp>()) {
+    auto input = rename.getInput().getType();
+    auto output = rename.getResult().getType();
+    if (input.getShape() != output.getShape() ||
+        !llvm::equal(rename.getOrder(), input.getAxisIds().asArrayRef()))
+      return std::nullopt;
+    auto relation = analyzeReplicaAffineIndex(rename.getInput(), depth + 1);
+    if (!relation) return std::nullopt;
+    llvm::DenseMap<int64_t, int64_t> renamed;
+    for (auto [sourceAxis, resultAxis] : llvm::zip(
+             input.getAxisIds().asArrayRef(), output.getAxisIds().asArrayRef()))
+      if (auto found = relation->axisCoefficients.find(sourceAxis);
+          found != relation->axisCoefficients.end())
+        renamed[resultAxis] = found->second;
+    relation->axisCoefficients = std::move(renamed);
+    return relation;
+  }
   if (auto cast = value.getDefiningOp<riscv::CastOp>())
     return analyzeReplicaAffineIndex(cast.getInput(), depth + 1);
   if (auto widen = value.getDefiningOp<riscv::WidenOp>())
@@ -2479,14 +2503,10 @@ bool sameWindowCoordinates(riscv::ValueType lhs, riscv::ValueType rhs) {
     return false;
   auto left = lhs.getLayout();
   auto right = rhs.getLayout();
-  return left.getCarrier() == "rvv" && right.getCarrier() == "rvv" &&
-         left.getValidity() == "full" && right.getValidity() == "full" &&
-         left.getVl() == right.getVl() &&
-         left.getTimeFactors() == right.getTimeFactors() &&
-         left.getLaneFactors() == right.getLaneFactors() &&
-         left.getReplicaFactors() == right.getReplicaFactors() &&
-         left.getFragmentFactors() == right.getFragmentFactors() &&
-         left.getLocalFactors() == right.getLocalFactors();
+  // This proves a logical index relation. Different legal issue widths do
+  // not change lane/width or lane%width. The selected result below separately
+  // requires a single executable vector; crossed conversions must be pure.
+  return left.getValidity() == "full" && right.getValidity() == "full";
 }
 
 mlir::Value stripUnsignedWindowCasts(mlir::Value value) {
@@ -2506,8 +2526,15 @@ mlir::Value stripUnsignedWindowCasts(mlir::Value value) {
       if (from != to || conversion.getConversion().getEffect() != "pure")
         return value;
     } else if (mlir::isa<riscv::CastOp, riscv::WidenOp>(producer)) {
-      if (from.getWidth() > to.getWidth())
-        return value;
+      if (from.getWidth() > to.getWidth()) {
+        auto relation = riscv_internal::analyzeRegularIndexRelation(producer->getOperand(0));
+        auto elements = positiveProduct(input.getShape().asArrayRef());
+        if (!relation || !elements || relation->dynamicBase || relation->base < 0 ||
+            relation->stride != 1 || relation->repeat != 1 || to.getWidth() > 64 ||
+            static_cast<__int128>(relation->base) + *elements >
+                (static_cast<__int128>(1) << to.getWidth()))
+          return value;
+      }
     } else {
       return value;
     }
@@ -2519,19 +2546,36 @@ mlir::Value stripUnsignedWindowCasts(mlir::Value value) {
 bool isTwoWindowCoordinate(mlir::Value value, llvm::StringRef kind,
                            int64_t width, riscv::ValueType result) {
   value = stripUnsignedWindowCasts(value);
+  if (auto rename = value ? value.getDefiningOp<riscv::ReshapeOp>() : riscv::ReshapeOp()) {
+    auto input = rename.getInput().getType();
+    if (sameWindowCoordinates(rename.getResult().getType(), result) &&
+        input.getShape() == result.getShape() &&
+        input.getLayout().getValidity() == "full" &&
+        llvm::equal(rename.getOrder(), input.getAxisIds().asArrayRef()))
+      return isTwoWindowCoordinate(rename.getInput(), kind, width, input);
+    return false;
+  }
   auto binary = value ? value.getDefiningOp<riscv::BinaryOp>() : riscv::BinaryOp();
   auto divisor = binary ? directInteger(binary.getRhs()) : mlir::IntegerAttr();
   if (!binary || binary.getKind() != kind || !divisor || divisor.getInt() != width)
     return false;
   auto ramp = stripUnsignedWindowCasts(binary.getLhs());
+  auto rampType = ramp ? mlir::dyn_cast<riscv::ValueType>(ramp.getType()) : riscv::ValueType();
+  if (!sameWindowCoordinates(rampType, result)) return false;
+  while (auto rename = ramp.getDefiningOp<riscv::ReshapeOp>()) {
+    auto input = rename.getInput().getType();
+    if (input.getShape() != rampType.getShape() || input.getLayout().getValidity() != "full" ||
+        !llvm::equal(rename.getOrder(), input.getAxisIds().asArrayRef())) return false;
+    ramp = stripUnsignedWindowCasts(rename.getInput());
+    rampType = mlir::cast<riscv::ValueType>(ramp.getType());
+  }
   auto iota = ramp ? ramp.getDefiningOp<riscv::IotaOp>() : riscv::IotaOp();
   auto type = iota ? iota.getResult().getType() : riscv::ValueType();
   auto element = type ? mlir::dyn_cast<mlir::IntegerType>(type.getElementType())
                       : mlir::IntegerType();
   return iota && element && element.isUnsigned() && element.getWidth() <= 32 &&
          iota.getStart() == 0 && iota.getEnd() == 2 * width &&
-         2 * width <= (int64_t{1} << element.getWidth()) &&
-         sameWindowCoordinates(type, result);
+         2 * width <= (int64_t{1} << element.getWidth());
 }
 
 struct TwoWindowByteRelation {
@@ -2583,7 +2627,7 @@ matchTwoWindowByteIndex(mlir::Value scaled, mlir::Value payload,
     if (firstBase.getType() != element || secondBase.getType() != element ||
         first.getResult().getType() != type || second.getResult().getType() != type ||
         !subtract || subtract.getKind() != "sub" || !one || one.getInt() != 1 ||
-        subtract.getRhs() != half ||
+        !isTwoWindowCoordinate(subtract.getRhs(), "div", width, type) ||
         !isTwoWindowCoordinate(half, "div", width, type))
       continue;
     return TwoWindowByteRelation{firstBase, secondBase, width};
@@ -3696,6 +3740,61 @@ public:
     // Register gathers must see a numeric table, with its storage decode
     // already explicit, before selecting and narrowing their index carriers.
     riscv_internal::materializeWholeLayeredReads(getOperation());
+    // A rank-one field gather can be a static storage window even when a
+    // positional local tile gave its output a different coordinate identity.
+    // Freeze the proven window on the field's own axis, then retain the
+    // author's result identity on an explicit reshape edge. Later value
+    // materialization must not turn its eliminated address expression into a
+    // numerical scratch array.
+    llvm::SmallVector<riscv::ExtractOp> fieldWindows;
+    getOperation().walk([&](riscv::ExtractOp op) { fieldWindows.push_back(op); });
+    for (auto op : fieldWindows) {
+      auto input = op.getInput().getType();
+      auto output = mlir::dyn_cast<riscv::ValueType>(op.getResult().getType());
+      auto field = op.getInput().getDefiningOp<riscv::FieldOp>();
+      if (!field || !output || input.getShape().size() != 1 || output.getShape().size() != 1 ||
+          input.getAxisIds() == output.getAxisIds() ||
+          output.getLayout().getCarrier() != "rvv" || output.getLayout().getValidity() != "full" ||
+          op.getSelectors().size() != 1 || op.getIndices().size() != 1 ||
+          mlir::cast<mlir::StringAttr>(op.getSelectors()[0]).getValue() != "gather") continue;
+      auto relation = riscv_internal::analyzeRegularIndexRelation(op.getIndices()[0]);
+      const int64_t count = output.getShape()[0], extent = input.getShape()[0];
+      auto indexType = mlir::cast<riscv::ValueType>(op.getIndices()[0].getType());
+      auto indexElement = mlir::dyn_cast<mlir::IntegerType>(indexType.getElementType());
+      if (!relation || relation->dynamicBase || relation->base < 0 || count <= 0 ||
+          extent < count || relation->stride != 1 || relation->repeat != 1 || relation->base > extent - count ||
+          !indexElement || !indexElement.isUnsigned() || indexElement.getWidth() > 64 ||
+          static_cast<__int128>(relation->base) + count > (static_cast<__int128>(1) << indexElement.getWidth()))
+        continue;
+      auto layout = output.getLayout();
+      auto renamedLayout = riscv::LayoutAttr::get(builder.getContext(), layout.getCarrier(), input.getAxisIds(),
+          layout.getTimeFactors(), layout.getLaneFactors(), layout.getReplicaFactors(),
+          layout.getFragmentFactors(), layout.getLocalFactors(), layout.getSew(), layout.getLmulEighths(),
+          layout.getVl(), layout.getRegisterGroups(), layout.getValidity());
+      auto renamedType = riscv::ValueType::get(builder.getContext(), output.getElementType(),
+          output.getShape(), input.getAxisIds(), renamedLayout);
+      rewriter.setInsertionPoint(op);
+      auto indexLayout = indexType.getLayout();
+      auto selectedIndexLayout = riscv::LayoutAttr::get(builder.getContext(), indexLayout.getCarrier(), input.getAxisIds(),
+          indexLayout.getTimeFactors(), indexLayout.getLaneFactors(), indexLayout.getReplicaFactors(),
+          indexLayout.getFragmentFactors(), indexLayout.getLocalFactors(), indexLayout.getSew(), indexLayout.getLmulEighths(),
+          indexLayout.getVl(), indexLayout.getRegisterGroups(), indexLayout.getValidity());
+      auto selectedIndexType = riscv::ValueType::get(builder.getContext(), indexType.getElementType(),
+          indexType.getShape(), input.getAxisIds(), selectedIndexLayout);
+      auto selectedIndex = riscv::IotaOp::create(rewriter, op.getLoc(), selectedIndexType,
+          relation->base, relation->base + count, riscv_internal::unselectedLeaf(builder));
+      auto selected = riscv::ExtractOp::create(rewriter, op.getLoc(), renamedType, op.getInput(),
+          mlir::ValueRange{selectedIndex}, builder.getArrayAttr({builder.getStringAttr("gather")}), op.getAccess(),
+          riscv_internal::unselectedLeaf(builder));
+      auto renamed = riscv::ReshapeOp::create(rewriter, op.getLoc(), output, selected,
+          input.getAxisIds(), mlir::DenseI64ArrayAttr());
+      riscv_internal::copyOrigin(op, selected);
+      riscv_internal::copyOrigin(op, renamed);
+      auto index = op.getIndices()[0];
+      rewriter.replaceOp(op, renamed.getResult());
+      llvm::DenseSet<mlir::Operation *> visited;
+      eraseDeadRegularIndexChain(index, visited, rewriter);
+    }
     // A statically contiguous register window is a subgroup projection. Keep
     // the gather's axis rename explicit, but do not build a full-width index
     // vector or keep the entire table live for each narrow consumer.

@@ -20,6 +20,14 @@ The compiler can partition free coordinates into several packets, supply a share
 Value to several consumers, or widen partials before reduction. It retains the
 author's source group and scope while choosing those representations.
 
+An indexed field access can denote a contiguous window of a saved encoded
+record. A positional tile may give that window another axis name. Memory
+planning proves the nonwrapping coordinate interval, reads on the field's
+source axis, and records the result rename as an explicit representation edge.
+The index expression does not require a numeric scratch array. The read keeps
+its original snapshot and active domain. Byte-carried Boolean values use dense
+byte transfers; a packed mask retains its separate bit-storage contract.
+
 ## Resource analysis
 
 The target profile supplies vector width, register facts, supported instructions

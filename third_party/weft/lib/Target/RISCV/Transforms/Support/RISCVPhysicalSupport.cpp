@@ -140,6 +140,29 @@ analyzeRegularIndexRelationImpl(mlir::Value value, unsigned depth) {
     return std::nullopt;
   if (auto conversion = value.getDefiningOp<riscv::ConvertLayoutOp>())
     return analyzeRegularIndexRelationImpl(conversion.getInput(), depth + 1);
+  if (auto rename = value.getDefiningOp<riscv::ReshapeOp>()) {
+    auto input = rename.getInput().getType();
+    auto output = rename.getResult().getType();
+    // A positional tile can name the same coordinates differently after a
+    // helper or a state update. No transpose or changed shape is transparent
+    // to this one-dimensional regular-index proof.
+    if (input.getShape() == output.getShape() &&
+        llvm::equal(rename.getOrder(), input.getAxisIds().asArrayRef()))
+      return analyzeRegularIndexRelationImpl(rename.getInput(), depth + 1);
+    return std::nullopt;
+  }
+  if (auto *operation = value.getDefiningOp();
+      operation && mlir::isa<riscv::CastOp, riscv::WidenOp>(operation)) {
+    auto input = mlir::dyn_cast<riscv::ValueType>(operation->getOperand(0).getType());
+    auto output = mlir::dyn_cast<riscv::ValueType>(value.getType());
+    auto from = input ? mlir::dyn_cast<mlir::IntegerType>(input.getElementType()) : mlir::IntegerType();
+    auto to = output ? mlir::dyn_cast<mlir::IntegerType>(output.getElementType()) : mlir::IntegerType();
+    if (from && to && from.isUnsigned() &&
+        input.getShape() == output.getShape() && input.getAxisIds() == output.getAxisIds() &&
+        (to.isUnsigned() ? to.getWidth() >= from.getWidth() : to.getWidth() > from.getWidth()))
+      return analyzeRegularIndexRelationImpl(operation->getOperand(0), depth + 1);
+    return std::nullopt;
+  }
   if (auto iota = value.getDefiningOp<riscv::IotaOp>()) {
     if (iota.getStart() >
         static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))

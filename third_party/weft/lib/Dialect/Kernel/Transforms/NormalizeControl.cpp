@@ -262,7 +262,25 @@ public:
     auto extract = dyn_cast<k::ExtractOp>(producer);
     auto lookup = dyn_cast<k::LookupOp>(producer);
     if (!elementwise && !extract && !lookup) return failure();
-    if (!reshape.getInput().hasOneUse() && !extract && !isa<k::IotaOp>(producer))
+    auto coordinateExpression = [&](auto &&self, Value value, unsigned depth) -> bool {
+      auto type = dyn_cast<k::ValueType>(value.getType());
+      if (!type || type.getShape().empty()) return true;
+      if (depth > 16 || !isa<IntegerType>(type.getElementType())) return false;
+      Operation *definition = value.getDefiningOp();
+      if (!definition) return false;
+      if (isa<k::IotaOp, k::ConstantOp>(definition)) return true;
+      if (!isa<k::BinaryOp, k::CompareOp, k::SelectOp, k::CastOp,
+               k::WidenOp, k::NarrowOp>(definition)) return false;
+      return llvm::all_of(definition->getOperands(), [&](Value operand) {
+        return self(self, operand, depth + 1);
+      });
+    };
+    // Coordinate arithmetic often supplies several fields of one saved record.
+    // Retain that shared relation across a positional rename rather than
+    // materializing the old coordinate array. Reuse existing operand renames
+    // below; reads and numerical payload graphs still require one use.
+    if (!reshape.getInput().hasOneUse() && !extract &&
+        !coordinateExpression(coordinateExpression, reshape.getInput(), 0))
       return failure();
     // An all/domain selector also carries the owner's coordinate identity.
     // Keep those boundaries explicit; only gather result coordinates commute.
