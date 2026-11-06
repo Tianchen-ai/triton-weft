@@ -10,6 +10,8 @@ module 外的 assignment 表，也不构成新的 IR 层。
 坐标的 reshape 可以推入逐元素纯操作和 gather 的索引；字段 owner、读取快照、
 state/stage、归约与控制边界不被重命名或越过。SCF 的 carry/条件化简复用匹配 SDK
 的 region-branch patterns，无使用的纯操作由 MLIR 的区域 DCE 清除，随后重建查询。
+SCF 化简产生的标量 `arith.select` 归一化为同操作数的 Canonical select，保留布尔条件、
+分支值和结果类型；不能让上游合法化简产生后续 verifier 不接受的 operation。
 展开和轴关系闭合后复用 MLIR CSE，合并支配范围内相同的索引和纯数值表达式；
 source 的 `new/materialize` birth 在变换期间保持各自身份，不能因为初始值相同合并。
 每个 kernel 唯一的 root domain 是结构锚点；即使普通 Tensor 程序没有子 Level，
@@ -1040,6 +1042,9 @@ program 产生后由本 pass 再次消费；已经形成的单 issue 不再扩�
 
 issue 资源包含数学 leaf 的临时数据载体和 mask；数据载体随 LMUL 增长，mask 按实际
 寄存器计数。不能只计算输入和输出，或用固定的 m1 临时开销为更宽的指数 issue 选型。
+候选宽度由目标合法 LMUL 与图中最宽元素推导，不被输入的初始 packet 宽度冻结。
+每个候选重新物化相同 typed producer 窗口，继续核算归约 carry、其它 live values 与最终资源；
+作者的 Level、分组、snapshot 和归约位置不改变。
 
 完整数值状态按其精确 Value shape 物化；私有对象可用完整向量窗口及标量余项遍历。
 Boolean byte storage 与 RVV mask 不混同。分配、descriptor、axis projection 和原 stage 的

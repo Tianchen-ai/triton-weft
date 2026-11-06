@@ -114,6 +114,23 @@ public:
   }
 };
 
+class NormalizeScalarSelect : public OpRewritePattern<arith::SelectOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::SelectOp select,
+                               PatternRewriter &rewriter) const override {
+    if (!select.getCondition().getType().isInteger(1) ||
+        !isa<IntegerType, IndexType, FloatType>(select.getType()))
+      return failure();
+    // SCF's upstream canonicalization can replace a pure scalar if/yield with
+    // arith.select. Keep that simplification inside the Canonical value model.
+    rewriter.replaceOpWithNewOp<weft::kernel::SelectOp>(
+        select, select.getType(), select.getCondition(), select.getTrueValue(),
+        select.getFalseValue());
+    return success();
+  }
+};
+
 class FoldIdentitySlice : public OpRewritePattern<weft::kernel::SliceOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -410,7 +427,7 @@ public:
     scf::WhileOp::getCanonicalizationPatterns(patterns, &getContext());
     patterns.add<PushCoordinateRename, FoldScalarProjection, FoldStaticSubviewOffsets,
                  FoldIdentitySlice, FoldScalarInteger, FoldScalarIntegerCompare,
-                 FoldConstantIf>(&getContext());
+                 FoldConstantIf, NormalizeScalarSelect>(&getContext());
     // Dead control carries can be the only extra consumer of a coordinate
     // rename. Revisit both in the same bounded worklist, so deleting a carry
     // exposes the producer to the existing single-consumer rewrite. Folding

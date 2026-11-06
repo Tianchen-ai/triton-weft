@@ -27,6 +27,10 @@ carry 保留各自的数值事实。
 描述 payload 访问、快照、alias 及 birth/handoff 约束。
 这些分析位于目标指令选择之上。
 
+SCF 化简产生的标量 `arith.select` 由 control normalization 转回同操作数、同类型的
+Canonical select。流式 producer graph 独立于初始 packet 枚举目标合法宽度，
+逐候选核算临时值、其它活跃值与归约 carry。
+
 有界循环坐标只有在共同范围证明能容纳于中间载体时，才能删除 index/integer/index
 往返转换。RISC-V 访存选择还会证明缩放后的 lookup 字节偏移能由所选 unsigned 载体表示，
 必要的扩展显式进入 Physical IR。保存值查表保留索引与表的有效域，不跨 alias 写入移动读取。

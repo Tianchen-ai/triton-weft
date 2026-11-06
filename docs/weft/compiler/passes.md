@@ -29,6 +29,11 @@ ordinary loop induction values. Carries retain their own numerical facts.
 aliasing and birth/handoff constraints. These analyses live above target-specific
 instruction selection.
 
+SCF simplification can create scalar `arith.select`; control normalization maps
+it back to Canonical select with the same operands and type. Streamed producer
+graphs enumerate target-legal widths independently of their initial packet,
+charging each candidate's temporaries, live values and reduction carries.
+
 Bounded loop coordinates can discard an index/integer/index round trip only
 when the shared range proof fits the intermediate carrier. RISC-V memory
 selection also proves that scaled lookup offsets fit their selected unsigned

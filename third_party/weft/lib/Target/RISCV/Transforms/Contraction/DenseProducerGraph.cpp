@@ -325,9 +325,11 @@ bool DenseProducerGraph::chooseIssue() {
   }
   for (Value input : inputs)
     widest = std::max<int64_t>(widest, logicalBitWidth(input.getType()));
-  int64_t maximum = domain.getLayout().getLaneFactors()[lanePosition];
-  if (maximum <= 1) maximum = target.getVlenBits() / widest;
-  maximum = std::min(maximum, target.getVlenBits() * 8 / widest);
+  // The incoming layout is one representation, not a source blocking bound.
+  // A streamed producer graph materializes its own typed windows below; assess
+  // every legal target width rather than freezing its first packet's LMUL.
+  int64_t maximum = target.getVlenBits() *
+      *llvm::max_element(target.getLegalLMULEighths().asArrayRef()) / (8 * widest);
   auto surrounding = surroundingRegisterGroups(root, excluded);
   if (!surrounding) return false;
   // Byte-valued Boolean arrays use the ordinary selected compare/select and
