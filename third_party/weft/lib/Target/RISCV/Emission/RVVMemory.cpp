@@ -616,7 +616,9 @@ mlir::LogicalResult Emitter::compileLookup(riscv::LookupOp operation) {
       encoding && encoding.getKind() == "dense")
     tableElement = riscv_internal::logicalElement(operation.getResult().getType());
   auto tableCType = scalarCType(tableElement);
-  const unsigned tableBits = riscv_internal::logicalBitWidth(tableElement);
+  // Dense local finite-width integers occupy one selected addressable storage
+  // element. Its byte stride comes from the descriptor, not the logical bits.
+  const unsigned tableBits = mlir::cast<riscv::MemDescType>(operation.getTable().getType()).getStorageBits();
   if (!tableCType || !tableBits || tableBits % 8)
     return fail(operation,
                 "selected lookup requires a byte-addressable numeric table");

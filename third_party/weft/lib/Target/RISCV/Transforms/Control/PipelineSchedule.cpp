@@ -565,6 +565,35 @@ FailureOr<std::optional<PipelineSchedule>> riscv_internal::schedulePipeline(
     for (Operation *before : result.orderedAfter.lookup(operation))
       if (consumerSet.contains(before)) consumerSet.insert(operation);
   }
+  // Deferred record/field projections have no transportable numeric payload.
+  // Keep their original read epoch in one stage, including every other user,
+  // rather than cloning the read as an address recipe. A materialized numeric
+  // window can still cross the resulting frontier through the ordinary carry.
+  bool changed;
+  do {
+    changed = false;
+    for (Operation *operation : llvm::reverse(operations)) {
+      if (!consumerSet.contains(operation)) continue;
+      for (Value value : analysis::externalOperands(operation)) {
+        auto definition = value.getDefiningOp();
+        if (!definition || definition->getBlock() != loop.getBody() ||
+            carryType(value.getType()) || result.isBufferDescriptor(definition) ||
+            !isa<riscv::LoadOp, riscv::FieldOp>(definition))
+          continue;
+        changed |= consumerSet.insert(definition).second;
+      }
+    }
+    for (Operation *operation : operations) {
+      auto dependencies = stageDependencies(operation);
+      if (failed(dependencies)) return failure();
+      for (Value value : *dependencies)
+        if (consumerSet.contains(ancestorInBlock(value.getDefiningOp(), loop.getBody())))
+          changed |= consumerSet.insert(operation).second;
+      for (Operation *before : result.orderedAfter.lookup(operation))
+        if (consumerSet.contains(before))
+          changed |= consumerSet.insert(operation).second;
+    }
+  } while (changed);
   for (Operation *operation : llvm::reverse(operations)) {
     if (consumerSet.contains(operation) || result.isBufferDescriptor(operation) || !replayableDescriptor(operation)) continue;
     bool seen = false, onlyConsumers = true;

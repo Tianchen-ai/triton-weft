@@ -1504,6 +1504,10 @@ mlir::LogicalResult Emitter::compileNarrow(riscv::NarrowOp operation) {
 }
 
 mlir::LogicalResult Emitter::compileWiden(riscv::WidenOp operation) {
+  auto selected = operation.getLeaf().getInstruction();
+  if (selected == "scalar.cast.subbyte-signed" ||
+      selected == "scalar.cast.subbyte-unsigned")
+    return compileCastImpl(operation);
   return compileWidenOperation(operation);
 }
 

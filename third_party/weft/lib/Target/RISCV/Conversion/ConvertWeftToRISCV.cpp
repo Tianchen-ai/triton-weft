@@ -1139,10 +1139,17 @@ private:
           ? riscv::PointerLoadOp::getOperationName() : riscv::PointerStoreOp::getOperationName();
     } else if (auto admit = mlir::dyn_cast<kernel::AdmitOp>(source)) {
       mlir::Value projected = operands.front();
-      llvm::SmallVector<riscv::SubviewOp> windows;
-      while (auto window = projected.getDefiningOp<riscv::SubviewOp>()) {
-        windows.push_back(window);
-        projected = window.getBase();
+      llvm::SmallVector<mlir::Operation *> projections;
+      while (auto definition = projected.getDefiningOp()) {
+        if (auto window = mlir::dyn_cast<riscv::SubviewOp>(definition)) {
+          projections.push_back(definition);
+          projected = window.getBase();
+        } else if (auto slice = mlir::dyn_cast<riscv::SliceOp>(definition)) {
+          projections.push_back(definition);
+          projected = slice.getBase();
+        } else {
+          break;
+        }
       }
       auto field = projected.getDefiningOp<riscv::FieldOp>();
       auto owner = field ? mlir::dyn_cast<riscv::MemDescType>(field.getOwner().getType())
@@ -1151,7 +1158,7 @@ private:
       auto facts = field ? riscv_internal::fieldFacts(field) : riscv_internal::FieldFacts{};
       auto recordEncoding = owner ? mlir::dyn_cast<kernel::EncodingType>(owner.getEncoding()) : kernel::EncodingType();
       auto declaration = recordEncoding ? riscv_internal::findEncoding(field, recordEncoding.getFamily()) : riscv::EncodingDeclOp();
-      const bool completeNaturalStorage = owner && fieldViewType && windows.empty() &&
+      const bool completeNaturalStorage = owner && fieldViewType && projections.empty() &&
           recordEncoding && recordEncoding.getKind() == "base" && declaration &&
           declaration.getByteOrder() == "little" && declaration.getBitOrder() == "lsb_first" &&
           (mlir::isa<mlir::BlockArgument>(field.getOwner()) ||
@@ -1177,8 +1184,9 @@ private:
               riscv_internal::unassignedLayout(builder, axes.asArrayRef()));
         };
         if (!element) return admit.emitError("field admission requires its declared numeric element type");
-        for (auto window : windows)
-          if (!window.getDynamicBounds().empty())
+        for (auto projection : projections)
+          if (auto window = mlir::dyn_cast<riscv::SubviewOp>(projection);
+              window && !window.getDynamicBounds().empty())
             return admit.emitError("dynamic field subview admission is not implemented for RISC-V");
         auto record = riscv::LoadOp::create(builder, source->getLoc(),
             valueType(owner.getEncoding(), owner.getShape(), owner.getAxisIds()),
@@ -1194,13 +1202,14 @@ private:
         riscv_internal::copyOrigin(source, numeric);
         mlir::Value value = numeric.getResult();
         auto integer = mlir::dyn_cast<mlir::IntegerType>(element);
-        if (windows.empty() && owner.getInterleaveRows() > 1 && integer &&
+        if (projections.empty() && owner.getInterleaveRows() > 1 && integer &&
             integer.getWidth() < 8 && fieldView.getShape().size() == 2) {
           const int64_t extent = fieldView.getShape()[1];
           if (extent <= 0) return admit.emitError("packed field admission requires a bounded field extent");
           auto axis = builder.getDenseI64ArrayAttr({fieldView.getAxisIds()[1]});
           auto index = riscv::IotaOp::create(builder, source->getLoc(),
-              valueType(builder.getIntegerType(64, false), builder.getDenseI64ArrayAttr({extent}), axis),
+              valueType(builder.getIntegerType(extent <= (int64_t(1) << 32) ? 32 : 64, false),
+                        builder.getDenseI64ArrayAttr({extent}), axis),
               0, extent, riscv_internal::unselectedLeaf(builder));
           auto extract = riscv::ExtractOp::create(builder, source->getLoc(), numericType,
               value, mlir::ValueRange{index.getResult()}, riscv_internal::strings(builder, {"all", "gather"}),
@@ -1209,7 +1218,19 @@ private:
           riscv_internal::copyOrigin(source, extract);
           value = extract.getResult();
         }
-        for (auto window : llvm::reverse(windows)) {
+        for (auto projection : llvm::reverse(projections)) {
+          if (auto slice = mlir::dyn_cast<riscv::SliceOp>(projection)) {
+            auto region = mlir::cast<riscv::MemDescType>(slice.getResult().getType());
+            mlir::Type result = region.getShape().empty() ? element :
+                mlir::Type(valueType(element, region.getShape(), region.getAxisIds()));
+            auto extract = riscv::ExtractOp::create(builder, source->getLoc(), result,
+                value, slice.getIndices(), slice.getSelectors(),
+                riscv_internal::unassignedAccess(builder), riscv_internal::unselectedLeaf(builder));
+            riscv_internal::copyOrigin(source, extract);
+            value = extract.getResult();
+            continue;
+          }
+          auto window = mlir::cast<riscv::SubviewOp>(projection);
           auto type = mlir::cast<riscv::ValueType>(value.getType());
           for (size_t axis = 0; axis < type.getShape().size(); ++axis) {
             const int64_t offset = window.getOffsets()[axis], extent = window.getExtents()[axis];
@@ -1219,7 +1240,8 @@ private:
               return admit.emitError("field subview must be a bounded static projection");
             auto axes = builder.getDenseI64ArrayAttr({type.getAxisIds()[axis]});
             auto index = riscv::IotaOp::create(builder, source->getLoc(),
-                valueType(builder.getIntegerType(64, false), builder.getDenseI64ArrayAttr({extent}), axes),
+                valueType(builder.getIntegerType(offset + extent <= (int64_t(1) << 32) ? 32 : 64, false),
+                          builder.getDenseI64ArrayAttr({extent}), axes),
                 offset, offset + extent, riscv_internal::unselectedLeaf(builder));
             llvm::SmallVector<int64_t> shape(type.getShape().asArrayRef());
             shape[axis] = extent;

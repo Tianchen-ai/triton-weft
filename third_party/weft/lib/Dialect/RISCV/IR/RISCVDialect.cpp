@@ -4780,9 +4780,9 @@ mlir::LogicalResult LookupOp::verify() {
     auto encoding =
         mlir::cast<weft::kernel::EncodingType>(table.getEncoding());
     if (encoding.getKind() != "dense" ||
-        table.getStorageBits() != elementBitWidth(elementOf(getResult().getType())))
+        table.getStorageBits() != std::max(8u, elementBitWidth(elementOf(getResult().getType()))))
       return emitOpError(
-          "physical lookup descriptor must match the result element width");
+          "physical lookup descriptor must match the result element storage width");
   }
   llvm::StringRef carrier = "scalar";
   if (auto indices = mlir::dyn_cast<ValueType>(getIndices().getType()))

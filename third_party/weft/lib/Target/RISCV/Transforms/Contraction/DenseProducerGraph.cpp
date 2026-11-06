@@ -80,7 +80,8 @@ bool DenseProducerGraph::collect(Value value) {
   // those issues can use it directly. A completed local numerical value keeps
   // its existing addressable snapshot boundary.
   if (type.getLayout().getCarrier() == "local" &&
-      !value.getDefiningOp<riscv::LoadOp>()) return boundary(value);
+      !value.getDefiningOp<riscv::LoadOp>() &&
+      riscv_internal::hasOwnedLocalStorage(value)) return boundary(value);
   Operation *op = value.getDefiningOp();
   if (!op || op->getBlock() != root->getBlock() || op->getNumResults() != 1 ||
       op->getNumRegions()) return boundary(value);

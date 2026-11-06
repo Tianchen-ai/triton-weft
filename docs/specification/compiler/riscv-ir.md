@@ -184,7 +184,8 @@ record 轴被拆为多维 bitmask 窗口时，窗口使用与字段轴分离的�
 存储跨度不能截断到 payload 的窄整数类型。
 
 字段 View 的 `load` 在 Canonical→Physical 转换中保留其 encoded owner，并形成数值 Field
-投影；静态 field subview 形成相应坐标的 gather。packed i4/i6 字段不能被误作独立、每元素
+投影；静态 field subview 形成相应坐标的 gather，scalar slice 保留相同 owner 后再提取字段
+坐标。窗口索引使用可完整表示其静态范围的 32/64 位类型。packed i4/i6 字段不能被误作独立、每元素
 一字节的 dense allocation。动态 field subview 尚未闭合时明确拒绝，普通 owner subview
 仍保留其 descriptor、offset 与调用前置条件。
 
@@ -280,7 +281,11 @@ pipeline window；它不能替代 caller-visible workspace。动态对象必须�
 `local_view` 把已有 numeric local state 暴露为 dense descriptor，显式消费每轴 extent 与
 row-major stride SSA；它不分配、复制或延长原 state 的 lifetime。动态 extent 按 shape
 symbol identity 绑定，不把 logical axis 编号当作 shape symbol 编号；i1 state 使用一字节
-元素存储。连续、静态有界的 local extract/update 可形成普通 `subview/slice + load/store`，
+元素存储。其余不足八位的整数同样使用一字节元素；indexed lookup 依据 descriptor 的
+storage width 计算地址，同时保留 logical element 的有限位宽及 signedness。
+尚未物化的 local pointwise 结果不是现成的私有存储边界；有界 producer graph 必须生成它的
+数值计算，只有已经闭合的 owned storage 才作为 snapshot 供给。
+连续、静态有界的 local extract/update 可形成普通 `subview/slice + load/store`，
 未缩小的轴可保留由 SSA 绑定的完整动态 extent。窗口保留动态 origin、原索引次序与未写
 区域，继续经过共同 memory/resource passes。原地更新
 要求旧 state version 的其它读取先于该更新或处于互斥分支；旧版本仍需存活时不能直接复用
@@ -467,6 +472,9 @@ lifetime。mask 不通过普通 yield 或未标识的 block argument 逃逸，�
 
 pipeline参数只有在改写成真实 guard、prologue、steady-state、epilogue与buffer-version carry后
 才算实现。未消费 `ScheduleAttr` 或只有一个 depth 字段的module不能进入emission。
+尚未物化的 record/field 投影不能作为 numeric carry 或可重放地址；调度将其原读 epoch 及
+相关消费者保持在同一阶段，只有显式数值窗口跨阶段传递。原始存储的读取不得通过重建
+descriptor 重复执行，作用域、依赖和私有 buffer 的版本约束仍由共同验证器核对。
 
 ## 7. Final IR 不变量
 
