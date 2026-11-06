@@ -1,8 +1,10 @@
 #include "Weft/Analysis/IntegerFacts.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Interfaces/InferIntRangeInterface.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/MathExtras.h"
@@ -85,6 +87,21 @@ IntegerExpression describe(Value value, IntegerType type) {
     expression.kind = Kind::Known; expression.known = constantRange(attr, type);
   };
   if (auto argument = dyn_cast<BlockArgument>(value)) {
+    if (auto loop = dyn_cast_or_null<scf::ForOp>(argument.getOwner()->getParentOp());
+        loop && argument == loop.getInductionVar()) {
+      auto lower = getConstantIntValue(loop.getLowerBound());
+      auto upper = getConstantIntValue(loop.getUpperBound());
+      auto step = getConstantIntValue(loop.getStep());
+      // The half-open bounds are facts about every executed iteration, not
+      // guesses about a carry. Preserve signed bounds and reject an unsigned
+      // interval whose high-bit interpretation is not representable here.
+      if (lower && upper && step && *step > 0 && *lower < *upper &&
+          (!loop.getUnsignedCmp() || (*lower >= 0 && *upper >= 0))) {
+        expression.kind = Kind::Known;
+        expression.known = IntegerRange{Bound::get(*lower), Bound::get(*upper - 1)};
+      }
+      return expression;
+    }
     // Staged births are immutable numerical snapshots, unlike loop carries
     // and mutable state births. Transfer their source facts into the level
     // body instead of replacing them with the entire integer type domain.

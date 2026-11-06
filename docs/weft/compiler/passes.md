@@ -21,7 +21,9 @@ preparation and other consumers.
 
 ## Shared analyses
 
-`IntegerFacts` supplies range and signedness proofs. `LogicalAxes` and
+`IntegerFacts` supplies range and signedness proofs, including statically bounded
+ordinary loop induction values. Carries retain their own numerical facts.
+`LogicalAxes` and
 `IndexRelations` retain coordinate identity. `StorageBytes`,
 `StorageLifetime` and `PhysicalDependence` describe payload accesses, snapshots,
 aliasing and birth/handoff constraints. These analyses live above target-specific

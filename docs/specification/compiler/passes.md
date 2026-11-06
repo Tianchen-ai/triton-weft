@@ -27,6 +27,10 @@ RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改�
 机器类型，包括 i64/u64；乘积、累加和 magnitude 查询先扩展分析位宽，避免分析自身回绕。
 普通 MLIR 操作复用 `InferIntRangeInterface` 的 signed/unsigned 与模运算合同，目标适配层
 只解释其局部操作。未知 producer 保留完整类型范围，不提供不存在的窄区间证明。
+静态上下界且步长为正的普通 `scf.for` induction value 保留半开区间
+`[lower, upper)` 的整数事实；分析不把这些事实套到可变 carry。窄化仍须通过
+类型范围检查，无法表示的 unsigned 边界保留未知范围。这让循环内的 gather
+可以证明自己的真实有效域，不需要展开整个源循环才能获得坐标边界。
 非负整数对正除数的余数复用共同范围证明，保留除数可能为零或负数时的完整类型域；
 因此分组索引中的除余坐标可参与 gather 有效域检查，不用名义容量代替真实有效域。
 物理 splat 保留标量范围；masked negate 交由共同分析求原值与取负值的并集。

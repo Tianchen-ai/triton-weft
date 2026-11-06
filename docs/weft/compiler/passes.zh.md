@@ -20,7 +20,8 @@ Pass 改写显式程序，消费已经建立的事实，把物理决定写入 IR
 
 ## 共享分析
 
-`IntegerFacts` 提供范围与 signedness 证明；
+`IntegerFacts` 提供范围与 signedness 证明，包括静态有界普通循环的 induction value；
+carry 保留各自的数值事实。
 `LogicalAxes`、`IndexRelations` 保留坐标身份；
 `StorageBytes`、`StorageLifetime` 和 `PhysicalDependence`
 描述 payload 访问、快照、alias 及 birth/handoff 约束。
