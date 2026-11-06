@@ -17,6 +17,41 @@
 
 using namespace mlir;
 namespace {
+class FuseLocalFloatingArithmetic
+    : public PassWrapper<FuseLocalFloatingArithmetic, OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FuseLocalFloatingArithmetic)
+  StringRef getArgument() const override { return "weft-x86-fuse-local-floating-arithmetic"; }
+  StringRef getDescription() const override {
+    return "Fuse single-consumer float multiply-adds after physical control and layout simplification";
+  }
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<arith::ArithDialect, math::MathDialect>();
+  }
+  void runOnOperation() override {
+    SmallVector<arith::AddFOp> additions;
+    getOperation().walk([&](arith::AddFOp operation) { additions.push_back(operation); });
+    IRRewriter rewriter(&getContext());
+    for (auto addition : additions) {
+      for (auto pair : {std::make_pair(addition.getLhs(), addition.getRhs()),
+                        std::make_pair(addition.getRhs(), addition.getLhs())}) {
+        auto product = pair.first.getDefiningOp<arith::MulFOp>();
+        if (!product || !product->hasOneUse() ||
+            product->getBlock() != addition->getBlock() ||
+            product.getType() != addition.getType()) continue;
+        // Direct use-def edges preserve all explicit casts and rounding
+        // barriers. No reassociation or cross-region motion is introduced.
+        rewriter.setInsertionPoint(addition);
+        auto fused = math::FmaOp::create(rewriter, addition.getLoc(),
+            product.getLhs(), product.getRhs(), pair.second);
+        rewriter.replaceOp(addition, fused.getResult());
+        rewriter.eraseOp(product);
+        break;
+      }
+    }
+  }
+};
+
 Operation *singleReadOrigin(Value value) {
   SmallVector<Value> pending{value};
   llvm::SmallPtrSet<Operation *, 32> visited;
@@ -226,6 +261,10 @@ public:
 } // namespace
 
 std::unique_ptr<Pass> weft::createX86MathPass() { return std::make_unique<ExpandX86Math>(); }
+
+std::unique_ptr<Pass> weft::createX86LocalFloatingFusionPass() {
+  return std::make_unique<FuseLocalFloatingArithmetic>();
+}
 std::unique_ptr<Pass> weft::createX86HalfCarrierPass() { return std::make_unique<LegalizeHalfCarriers>(); }
 
 Value weft::widenX86ScalarHalf(ModuleOp module, OpBuilder &b, Location loc,

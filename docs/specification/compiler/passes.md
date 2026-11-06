@@ -12,6 +12,13 @@ state/stage、归约与控制边界不被重命名或越过。SCF 的 carry/条�
 的 region-branch patterns，无使用的纯操作由 MLIR 的区域 DCE 清除，随后重建查询。
 展开和轴关系闭合后复用 MLIR CSE，合并支配范围内相同的索引和纯数值表达式；
 source 的 `new/materialize` birth 在变换期间保持各自身份，不能因为初始值相同合并。
+完整、静态有效域上的零坐标标量投影消去纯 broadcast/extract 往返；相同坐标的
+SSA update/extract 直接传递刚写入的标量。只穿过保持坐标顺序的重命名，不穿过
+读取、state/stage birth 或控制区域，也不将越界索引当作零坐标。
+全范围、同类型的 View slice 消去为原 View；source unroll 后的窗口偏移消费共同整数
+范围证明，只有精确的非负单点范围才转为静态 offset，动态 extent 与其它边界不变。
+展开后具有精确整数操作数的标量比较复用同一范围证明，形成标准布尔常量；其条件区域
+只内联被选择的分支。动态条件、浮点比较和作者 state/stage 的归属保持原合同。
 RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改变数值范围，
 窄化或潜在回绕不能继承未经证明的窄区间。查询只在单次有界遍历内保存 memo，
 不会跨 pass 保留随 SSA 改写失效的事实。边界使用任意精度整数，覆盖完整 signed/unsigned
@@ -69,6 +76,9 @@ natural、grouped/layered、joined 几何事实；byte/bit order 和 persistent 
 消费者读取。投影只穿过保持 shape/axis 的表示转换，并证明原 load 到消费者之间没有
 可能别名的写入；不能跨过作者 stage。失去消费者的字段和表示转换在展开前删除，避免
 为一个已经选择的单记录字段额外初始化、解码整份多记录数组。
+joined 字段若全部消费者已经是显式 field read、规则窗口读取或可直接供给的标量投影，
+保留 Encoding 存储边，不先复制成完整数值数组。原 encoded load 的快照仍由同一
+read-snapshot 分析闭合；没有局部读取实现的数值消费者继续物化完整字段。
 
 已加载记录的 whole-byte natural 字段在 local storage projection 状态下保留 storage edge；
 record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry pass 根据实际消费者窗口和共享 alignment
@@ -292,6 +302,9 @@ free-axis 对齐和完整分组范围，再展开为闭合 primitive 内的 type
 后续 numerical-value pass 不再从旧矩形 shape 重建另一份谓词。重建不同数值投影时不复制
 这一完成标记。私有 scalar store 同样消费有效谓词，全真谓词不额外生成分支；由显式
 identity seed 初始化的 stream reduction 保留其 surviving free axes 的已定义坐标。
+显式 signed/unsigned 的 8/16/32/64-bit 整数流式归约支持 add、min、max。
+min/max 的逐 issue 更新与最终归约均保留 signedness，分别使用对应整数 identity；
+无效 lane 不参与数值归约。仅供 F32 add 的 split-m1 收尾不扩用于整数或 min/max。
 
 分组结果的自由轴也在完整私有谓词域内计算，不能依赖后来恰好选到哪条 SIMD 轴。
 归约先按相同数值合同给无效项补 identity，再对原谓词做 OR；完全无效的输出仍无效。

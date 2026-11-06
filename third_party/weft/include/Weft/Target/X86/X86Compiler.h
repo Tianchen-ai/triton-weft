@@ -10,6 +10,7 @@ void loadX86Dialects(mlir::MLIRContext &context);
 void registerX86Dialects(mlir::DialectRegistry &registry);
 void registerX86Passes();
 std::unique_ptr<mlir::Pass> createX86MathPass();
+std::unique_ptr<mlir::Pass> createX86LocalFloatingFusionPass();
 std::unique_ptr<mlir::Pass> createX86HalfCarrierPass();
 std::unique_ptr<mlir::Pass> createX86VectorProjectionPass();
 std::unique_ptr<mlir::Pass> createX86ProjectionLoopPass();

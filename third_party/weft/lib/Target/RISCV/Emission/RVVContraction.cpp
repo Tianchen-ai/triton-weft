@@ -1383,10 +1383,12 @@ mlir::LogicalResult Emitter::compileRVVStreamReduceStep(
       input.parts.size() != accumulator.parts.size())
     return fail(operation,
                 "RVV stream reduce step requires matching vector parts and active lanes");
-  llvm::StringRef stem = mlir::isa<mlir::IntegerType>(operation.getResult().getType().getElementType()) ? "vadd"
-                         : operation.getKind() == "max" ? "vfmax"
-                         : operation.getKind() == "min" ? "vfmin"
-                                                        : "vfadd";
+  auto integer = mlir::dyn_cast<mlir::IntegerType>(operation.getResult().getType().getElementType());
+  llvm::StringRef stem = integer
+      ? operation.getKind() == "max" ? (integer.isUnsigned() ? "vmaxu" : "vmax")
+        : operation.getKind() == "min" ? (integer.isUnsigned() ? "vminu" : "vmin") : "vadd"
+      : operation.getKind() == "max" ? "vfmax"
+        : operation.getKind() == "min" ? "vfmin" : "vfadd";
   Binding result;
   result.kind = Binding::Kind::Vector;
   for (size_t part = 0; part < input.parts.size(); ++part) {
@@ -1455,10 +1457,11 @@ Emitter::compileRVVStreamFinalize(riscv::RVVStreamFinalizeOp operation) {
   auto element = operation.getInput().getType().getElementType();
   auto integer = mlir::dyn_cast<mlir::IntegerType>(element);
   const bool floating = !integer;
-  llvm::StringRef stem = integer ? "vredsum"
-                         : operation.getKind() == "max" ? "vfredmax"
-                         : operation.getKind() == "min" ? "vfredmin"
-                                                        : "vfredusum";
+  llvm::StringRef stem = integer
+      ? operation.getKind() == "max" ? (integer.isUnsigned() ? "vredmaxu" : "vredmax")
+        : operation.getKind() == "min" ? (integer.isUnsigned() ? "vredminu" : "vredmin") : "vredsum"
+      : operation.getKind() == "max" ? "vfredmax"
+        : operation.getKind() == "min" ? "vfredmin" : "vfredusum";
   auto neutral = reductionIdentityLiteral(element, operation.getKind());
   if (!neutral) return fail(operation, "stream finalize has no numerical identity");
   const std::string initial = *neutral;

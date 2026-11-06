@@ -5,6 +5,7 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/bit.h"
 #include <numeric>
 
 using namespace mlir;
@@ -144,22 +145,40 @@ public:
       }
       if (ranges.size() > 16 || (ranges.size() == 1 && ranges.front().begin == 0 &&
                                 ranges.front().end == type.getNumElements())) continue;
-      // When consumers cover every byte contiguously, field boundaries do not
-      // remove traffic. Keep the snapshot intact so native-width legalization
-      // can share loads across adjacent fields instead of creating short loads
-      // and independent masks at every field boundary.
       bool dense = !ranges.empty() && ranges.front().begin == 0 &&
                    ranges.back().end == type.getNumElements();
       for (size_t i = 1; dense && i < ranges.size(); ++i)
         dense = ranges[i - 1].end == ranges[i].begin;
-      int64_t largest = 0;
-      for (auto range : ranges) largest = std::max(largest, range.end - range.begin);
-      // A dominant byte field and its small metadata have different demands:
-      // retain the large contiguous field while isolating the metadata. Keeping
-      // that whole record together can replicate its masks in every consumer.
-      bool dominantByteField = type.getElementTypeBitWidth() == 8 &&
-          largest >= 4 * (type.getNumElements() - largest);
-      if (dense && !dominantByteField) continue;
+      if (dense) {
+        auto function = load->getParentOfType<func::FuncOp>();
+        auto bits = function ? function->getAttrOfType<IntegerAttr>("weft.x86.vector_bits") : IntegerAttr();
+        if (!bits || type.getElementTypeBitWidth() != 8) continue;
+        int64_t lanes = bits.getInt() / 8;
+        if (lanes <= 0) continue;
+        auto packets = [&](int64_t size, SmallVectorImpl<int64_t> *ends = nullptr) {
+          int64_t count = 0, offset = 0;
+          while (size) {
+            int64_t width = llvm::bit_floor(uint64_t(std::min(size, lanes)));
+            offset += width;
+            size -= width;
+            ++count;
+            if (ends) ends->push_back(offset);
+          }
+          return count;
+        };
+        SmallVector<int64_t> boundaries;
+        int64_t wholePackets = packets(type.getNumElements(), &boundaries);
+        int64_t fieldPackets = 0, crossings = 0;
+        for (auto range : ranges) {
+          fieldPackets += packets(range.end - range.begin);
+          for (int64_t boundary : boundaries)
+            crossings += range.begin < boundary && boundary < range.end;
+        }
+        // Reconstructing a field across native source packets needs a join.
+        // Split at the original epoch when independent field packets cost no
+        // more than the complete read plus those joins. Traffic is unchanged.
+        if (!crossings || fieldPackets > wholePackets + crossings) continue;
+      }
       for (auto range : ranges) {
         b.setInsertionPoint(load);
         Location loc = load.getLoc();

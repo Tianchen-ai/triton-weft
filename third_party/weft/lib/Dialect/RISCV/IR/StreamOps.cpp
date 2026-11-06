@@ -215,7 +215,8 @@ bool weft::riscv::supportsStreamReduction(mlir::Type element, llvm::StringRef ki
   if (element.isF32() || element.isF64())
     return kind == "add" || kind == "max" || kind == "min";
   auto integer = mlir::dyn_cast<mlir::IntegerType>(element);
-  return kind == "add" && integer && !integer.isSignless() &&
+  return (kind == "add" || kind == "min" || kind == "max") &&
+      integer && !integer.isSignless() &&
       (integer.getWidth() == 8 || integer.getWidth() == 16 ||
        integer.getWidth() == 32 || integer.getWidth() == 64);
 }
@@ -236,7 +237,7 @@ mlir::LogicalResult RVVStreamReduceStepOp::verify() {
       getLeaf().getOperandGroups() != input.getLayout().getRegisterGroups() + accumulator.getLayout().getRegisterGroups() ||
       getLeaf().getResultGroups() != result.getLayout().getRegisterGroups() ||
       getLeaf().getTemporaryGroups() != 0)
-    return emitOpError("RVV stream reduce step requires a fully defined floating or modular-integer-add accumulator and matching lane geometry");
+    return emitOpError("RVV stream reduce step requires defined floating or integer reduction semantics and matching lane geometry");
   return verifyLeafOperation(*this);
 }
 
@@ -297,6 +298,6 @@ mlir::LogicalResult RVVStreamFinalizeOp::verify() {
       !exactLeaf(getLeaf(), "rvv", "stream-finalize", split ? "rvv.stream-finalize.m1" : "rvv.stream-finalize", "none", "exact") ||
       getLeaf().getOperandGroups() != input.getLayout().getRegisterGroups() ||
       getLeaf().getResultGroups() != 0 || getLeaf().getTemporaryGroups() != (split ? parts / 2 + 1 : 1))
-    return emitOpError("RVV stream finalize requires fully defined floating or modular-integer-add reduction lanes and an exact scalar free-axis projection");
+    return emitOpError("RVV stream finalize requires defined floating or integer reduction lanes and an exact scalar free-axis projection");
   return verifyLeafOperation(*this);
 }

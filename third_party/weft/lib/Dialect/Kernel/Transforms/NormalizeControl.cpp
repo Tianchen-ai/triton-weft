@@ -1,5 +1,6 @@
 #include "Weft/Dialect/Kernel/Transforms/SourceSpecialization.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
+#include "Weft/Analysis/IntegerFacts.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"
@@ -13,6 +14,218 @@
 using namespace mlir;
 
 namespace {
+class FoldScalarInteger : public RewritePattern {
+public:
+  explicit FoldScalarInteger(MLIRContext *context)
+      : RewritePattern(MatchAnyOpTypeTag(), 1, context) {}
+  LogicalResult matchAndRewrite(Operation *operation,
+                               PatternRewriter &rewriter) const override {
+    namespace k = weft::kernel;
+    if (!isa<k::CastOp, k::WidenOp, k::BinaryOp>(operation) ||
+        operation->getNumResults() != 1) return failure();
+    auto result = operation->getResult(0);
+    auto integer = dyn_cast<IntegerType>(result.getType());
+    bool index = result.getType().isIndex();
+    if ((!integer && !index) || (integer && integer.getWidth() == 1)) return failure();
+    auto interpretation = index ? IntegerType::get(getContext(), 64, IntegerType::Signed) : integer;
+    auto range = weft::analysis::integerRange(result, interpretation);
+    if (!range || range->minimum != range->maximum) return failure();
+    if (index) {
+      if (range->minimum.getSignificantBits() > 64) return failure();
+      rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(operation,
+          range->minimum.extOrTrunc(64).getSExtValue());
+    } else {
+      auto literal = IntegerAttr::get(integer, range->minimum.extOrTrunc(integer.getWidth()));
+      rewriter.replaceOpWithNewOp<k::ConstantOp>(operation, integer, literal);
+    }
+    return success();
+  }
+};
+
+class FoldScalarIntegerCompare : public OpRewritePattern<weft::kernel::CompareOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::CompareOp compare,
+                               PatternRewriter &rewriter) const override {
+    auto type = compare.getLhs().getType();
+    auto integer = dyn_cast<IntegerType>(type);
+    if ((!integer && !type.isIndex()) ||
+        compare.getRhs().getType() != type ||
+        !compare.getResult().getType().isInteger(1)) return failure();
+    auto interpretation = type.isIndex()
+        ? IntegerType::get(getContext(), 64, IntegerType::Signed) : integer;
+    auto left = weft::analysis::integerRange(compare.getLhs(), interpretation);
+    auto right = weft::analysis::integerRange(compare.getRhs(), interpretation);
+    if (!left || !right || left->minimum != left->maximum ||
+        right->minimum != right->maximum) return failure();
+    int order = llvm::APSInt::compareValues(left->minimum, right->minimum);
+    auto predicate = compare.getPredicate();
+    bool result;
+    if (predicate == "eq") result = order == 0;
+    else if (predicate == "ne") result = order != 0;
+    else if (predicate == "lt") result = order < 0;
+    else if (predicate == "le") result = order <= 0;
+    else if (predicate == "gt") result = order > 0;
+    else if (predicate == "ge") result = order >= 0;
+    else return failure();
+    rewriter.replaceOpWithNewOp<arith::ConstantIntOp>(compare, result, 1);
+    return success();
+  }
+};
+
+class FoldConstantIf : public OpRewritePattern<scf::IfOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(scf::IfOp operation,
+                               PatternRewriter &rewriter) const override {
+    auto constant = operation.getCondition().getDefiningOp<arith::ConstantOp>();
+    auto condition = constant ? dyn_cast<IntegerAttr>(constant.getValue()) : IntegerAttr();
+    if (!condition) return failure();
+    Region &selected = condition.getValue().isZero()
+        ? operation.getElseRegion() : operation.getThenRegion();
+    if (selected.empty()) {
+      if (operation.getNumResults()) return failure();
+      rewriter.eraseOp(operation);
+      return success();
+    }
+    if (!llvm::hasSingleElement(selected)) return failure();
+    auto yield = dyn_cast<scf::YieldOp>(selected.front().getTerminator());
+    if (!yield) return failure();
+    SmallVector<Value> results(yield.getOperands());
+    rewriter.eraseOp(yield);
+    rewriter.inlineBlockBefore(&selected.front(), operation);
+    rewriter.replaceOp(operation, results);
+    return success();
+  }
+};
+
+class FoldIdentitySlice : public OpRewritePattern<weft::kernel::SliceOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::SliceOp slice,
+                               PatternRewriter &rewriter) const override {
+    if (slice.getBase().getType() != slice.getResult().getType() ||
+        !slice.getIndices().empty() ||
+        !llvm::all_of(slice.getSelectors(), [](Attribute selector) {
+          return cast<StringAttr>(selector).getValue() == "all";
+        })) return failure();
+    rewriter.replaceOp(slice, slice.getBase());
+    return success();
+  }
+};
+
+class FoldStaticSubviewOffsets : public OpRewritePattern<weft::kernel::SubviewOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::SubviewOp subview,
+                               PatternRewriter &rewriter) const override {
+    SmallVector<int64_t> offsets(subview.getOffsets());
+    SmallVector<Value> dynamic;
+    unsigned cursor = 0;
+    bool changed = false;
+    for (int64_t &offset : offsets) {
+      if (offset != -1) continue;
+      Value bound = subview.getDynamicBounds()[cursor++];
+      auto range = weft::analysis::integerRange(bound,
+          IntegerType::get(getContext(), 64, IntegerType::Signed));
+      if (range && range->minimum == range->maximum && range->minimum >= 0 &&
+          range->minimum.getSignificantBits() <= 64) {
+        offset = range->minimum.extOrTrunc(64).getSExtValue();
+        changed = true;
+      } else dynamic.push_back(bound);
+    }
+    if (!changed) return failure();
+    llvm::append_range(dynamic, subview.getDynamicBounds().drop_front(cursor));
+    rewriter.modifyOpInPlace(subview, [&] {
+      subview.setOffsetsAttr(rewriter.getDenseI64ArrayAttr(offsets));
+      subview.getDynamicBoundsMutable().assign(dynamic);
+    });
+    return success();
+  }
+};
+
+bool isZeroIndex(Value value) {
+  if (auto literal = value.getDefiningOp<arith::ConstantOp>()) {
+    auto integer = dyn_cast<IntegerAttr>(literal.getValue());
+    return integer && integer.getValue().isZero();
+  }
+  if (auto literal = value.getDefiningOp<weft::kernel::ConstantOp>()) {
+    auto integer = dyn_cast<IntegerAttr>(literal.getValue());
+    return integer && integer.getValue().isZero();
+  }
+  if (auto cast = value.getDefiningOp<weft::kernel::CastOp>())
+    return isZeroIndex(cast.getInput());
+  return false;
+}
+
+bool isFullBroadcastCondition(Value value) {
+  namespace k = weft::kernel;
+  Attribute literal;
+  if (auto constant = value.getDefiningOp<arith::ConstantOp>())
+    literal = constant.getValue();
+  else if (auto constant = value.getDefiningOp<k::ConstantOp>())
+    literal = constant.getValue();
+  if (literal) {
+    auto integer = dyn_cast<IntegerAttr>(literal);
+    return integer && integer.getType().isInteger(1) && integer.getValue().isOne();
+  }
+  if (auto compare = value.getDefiningOp<k::CompareOp>()) {
+    Value coordinate = compare.getLhs();
+    while (true) {
+      if (auto cast = coordinate.getDefiningOp<k::CastOp>())
+        coordinate = cast.getInput();
+      else if (auto widen = coordinate.getDefiningOp<k::WidenOp>())
+        coordinate = widen.getInput();
+      else break;
+    }
+    return compare.getPredicate() == "eq" && compare.getLhs() == compare.getRhs() &&
+        coordinate.getDefiningOp<k::IotaOp>();
+  }
+  if (auto binary = value.getDefiningOp<k::BinaryOp>())
+    return binary.getKind() == "and" && isFullBroadcastCondition(binary.getLhs()) &&
+        isFullBroadcastCondition(binary.getRhs());
+  return false;
+}
+
+class FoldScalarProjection : public OpRewritePattern<weft::kernel::ExtractOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::ExtractOp extract,
+                               PatternRewriter &rewriter) const override {
+    namespace k = weft::kernel;
+    auto type = dyn_cast<k::ValueType>(extract.getInput().getType());
+    if (!type || isa<k::ValueType>(extract.getResult().getType()) ||
+        extract.getSelectors().size() != type.getShape().size() ||
+        extract.getIndices().size() != type.getShape().size() ||
+        llvm::any_of(type.getShape().asArrayRef(), [](int64_t extent) { return extent <= 0; }) ||
+        llvm::any_of(extract.getSelectors(), [](Attribute selector) {
+          return cast<StringAttr>(selector).getValue() != "index";
+        }) || !llvm::all_of(extract.getIndices(), isZeroIndex))
+      return failure();
+    Value input = extract.getInput();
+    while (auto reshape = input.getDefiningOp<k::ReshapeOp>()) {
+      if (reshape.getInput().getType().getShape() != reshape.getResult().getType().getShape() ||
+          !llvm::equal(reshape.getOrder(), reshape.getInput().getType().getAxisIds().asArrayRef()))
+        break;
+      input = reshape.getInput();
+    }
+    Value scalar;
+    if (auto select = input.getDefiningOp<k::SelectOp>();
+        select && select.getTrueValue() == select.getFalseValue() &&
+        isFullBroadcastCondition(select.getCondition()))
+      scalar = select.getTrueValue();
+    else if (auto update = input.getDefiningOp<k::UpdateOp>();
+             update && update.getSelectors() == extract.getSelectors() &&
+             update.getIndices().size() == extract.getIndices().size() &&
+             llvm::all_of(update.getIndices(), isZeroIndex))
+      scalar = update.getValue();
+    if (!scalar || scalar.getType() != extract.getResult().getType())
+      return failure();
+    rewriter.replaceOp(extract, scalar);
+    return success();
+  }
+};
+
 class PushCoordinateRename : public OpRewritePattern<weft::kernel::ReshapeOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -148,7 +361,9 @@ public:
     scf::ForOp::getCanonicalizationPatterns(patterns, &getContext());
     scf::IfOp::getCanonicalizationPatterns(patterns, &getContext());
     scf::WhileOp::getCanonicalizationPatterns(patterns, &getContext());
-    patterns.add<PushCoordinateRename>(&getContext());
+    patterns.add<PushCoordinateRename, FoldScalarProjection, FoldStaticSubviewOffsets,
+                 FoldIdentitySlice, FoldScalarInteger, FoldScalarIntegerCompare,
+                 FoldConstantIf>(&getContext());
     // Dead control carries can be the only extra consumer of a coordinate
     // rename. Revisit both in the same bounded worklist, so deleting a carry
     // exposes the producer to the existing single-consumer rewrite. Folding

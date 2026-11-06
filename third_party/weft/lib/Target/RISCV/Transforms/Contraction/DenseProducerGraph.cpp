@@ -74,7 +74,13 @@ bool DenseProducerGraph::collect(Value value) {
       llvm::all_of(type.getShape().asArrayRef(), [](int64_t n) { return n == 1; }) &&
       (type.getShape() != domain.getShape() || type.getAxisIds() != domain.getAxisIds()))
     return boundary(value);
-  if (type.getLayout().getCarrier() == "local") return boundary(value);
+  // A dense load may receive a local capacity because the whole logical
+  // Value exceeds the register file. Its descriptor is still a producer for
+  // bounded issues; the read/snapshot and ordering checks below decide whether
+  // those issues can use it directly. A completed local numerical value keeps
+  // its existing addressable snapshot boundary.
+  if (type.getLayout().getCarrier() == "local" &&
+      !value.getDefiningOp<riscv::LoadOp>()) return boundary(value);
   Operation *op = value.getDefiningOp();
   if (!op || op->getBlock() != root->getBlock() || op->getNumResults() != 1 ||
       op->getNumRegions()) return boundary(value);
@@ -137,6 +143,17 @@ bool DenseProducerGraph::collect(Value value) {
         !collect(lookup.getIndices())) return false;
   } else if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(op)) {
     if (isCompleteLocalRead(conversion)) localReads.push_back(conversion);
+    else if (conversion.getConversion().getKind() == "local_load" &&
+             conversion.getInput().getDefiningOp<riscv::LoadOp>() &&
+             !riscv::storageOrigins(conversion.getInput()).isOwnedLocal() &&
+             conversion.getInput().getType().getShape() == type.getShape() &&
+             conversion.getInput().getType().getAxisIds() == type.getAxisIds() &&
+             conversion.getInput().getType().getElementType() == type.getElementType()) {
+      // A local capacity on an as-yet unmaterialized descriptor load is not
+      // a completed private-array read. Traverse its original producer; the
+      // same read-epoch and alias checks select bounded supply or a snapshot.
+      if (!collect(conversion.getInput())) return false;
+    }
     else if (conversion.getConversion().getEffect() != "pure") {
       // A completed read is an observed value at this boundary. It may supply
       // a bounded consumer without moving the read into that consumer's issue.

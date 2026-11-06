@@ -15,7 +15,7 @@
 using namespace mlir;
 
 void weft::registerX86Passes() {
-  for (auto factory : {createX86MathPass, createX86HalfCarrierPass,
+  for (auto factory : {createX86MathPass, createX86LocalFloatingFusionPass, createX86HalfCarrierPass,
        createX86VectorProjectionPass, createX86ProjectionLoopPass,
        createX86IntegerReductionPass, createX86IntegerReductionGroupPass, createX86IntegerProductPass,
        createX86SnapshotLoadPass, createX86LookupProjectionPass,
@@ -76,6 +76,7 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   pm.addPass(createX86ArrayForwardingPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  pm.addPass(createX86LocalFloatingFusionPass());
   pm.addPass(createX86ContractionSchedulePass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
@@ -183,6 +184,7 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   }
   pm.addPass(createX86LocalStoragePass());
   pm.addPass(createCanonicalizerPass());
+  pm.addPass(createX86LocalFloatingFusionPass());
   recordPipeline(pm);
   if (failed(pm.run(*module))) return failure();
   bool arrays = false;

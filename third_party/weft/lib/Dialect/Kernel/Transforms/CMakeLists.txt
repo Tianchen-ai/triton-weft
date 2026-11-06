@@ -1,2 +1,2 @@
 add_library(WeftSourceSpecialization STATIC BindSourceParameters.cpp NormalizeControl.cpp)
-target_link_libraries(WeftSourceSpecialization PUBLIC WeftKernelDialect MLIRIR MLIRPass MLIRSCFDialect MLIRTransforms)
+target_link_libraries(WeftSourceSpecialization PUBLIC WeftKernelDialect WeftAnalysis MLIRIR MLIRPass MLIRSCFDialect MLIRTransforms)

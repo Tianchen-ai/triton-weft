@@ -55,6 +55,32 @@ bool hasOnlyFragmentSupplyUses(Value field) {
   return observed;
 }
 
+bool hasOnlyProjectedJoinedReads(Value value) {
+  if (value.use_empty()) return false;
+  for (Operation *user : value.getUsers()) {
+    if (auto extract = dyn_cast<riscv::ExtractOp>(user)) {
+      // A scalar coordinate (including scalar replicas) is implemented by
+      // the existing encoded field read, without a complete numeric backing.
+      auto result = dyn_cast<riscv::ValueType>(extract.getResult().getType());
+      if (!result || result.getLayout().getCarrier() != "scalar") return false;
+      continue;
+    }
+    if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(user)) {
+      auto layout = conversion.getResult().getType().getLayout();
+      if (conversion.getConversion().getKind() != "local_load" ||
+          (layout.getCarrier() != "rvv" && layout.getCarrier() != "scalar"))
+        return false;
+      continue;
+    }
+    // These selected operations already own their exact numerical reads.
+    // Replacing their Field operand with numeric backing would lose both the
+    // Encoding geometry and the selected operation's storage contract.
+    if (!isa<riscv::FieldReadOp, riscv::RVVRegularRepeatScalarLoadOp,
+             riscv::RVVRegularRepeatGatherOp>(user)) return false;
+  }
+  return true;
+}
+
 FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
                            Operation *epoch, Type result, int64_t &identity) {
   auto owner = dyn_cast<riscv::MemDescType>(region.getType());
@@ -292,7 +318,8 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
       // projection here, without replacing those existing transfer programs.
       bool general = value && value.getLayout().getCarrier() != "scalar" &&
           ((facts.mapping == "natural" && bits % 8) ||
-           (facts.mapping == "joined" && value.getLayout().getCarrier() == "local") || indexedLocal);
+           (facts.mapping == "joined" && value.getLayout().getCarrier() == "local" &&
+            !hasOnlyProjectedJoinedReads(field.getResult())) || indexedLocal);
       if (!encoding || encoding.getKind() != "base" || !general) continue;
       auto declaration = findEncoding(field, baseEncodingFamily(field, encoding));
       if (!declaration || owner.getShape().empty() || owner.getShape().asArrayRef().back() != declaration.getElements())
@@ -350,7 +377,9 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     // A local joined field needs an assembled numeric backing, not a deferred
     // projection into disjoint encoded fragments. Existing RVV transfers keep
     // their selected representation and cost.
-    bool localJoined = facts.mapping == "joined" && value && value.getLayout().getCarrier() == "local";
+    bool localJoined = facts.mapping == "joined" && value &&
+        value.getLayout().getCarrier() == "local" &&
+        !hasOnlyProjectedJoinedReads(field.getResult());
     auto target = field->getParentOfType<riscv::KernelOp>().getTarget();
     bool oversizedProjection = llvm::any_of(field.getResult().getUsers(), [&](Operation *user) {
       if (!isa<riscv::ExtractOp>(user)) return false;
