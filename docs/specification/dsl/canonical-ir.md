@@ -44,7 +44,13 @@ base 的读写 effect。只有 mask 为真的元素可解引用；非活动 load
 保留 Encoding、shape 和 axis identity。它不分配、不复制、不转换数据，也不加强输入
 pointer 的实际对齐；显式 extent/stride 是 index SSA。packed Encoding 使用自身的连续
 record 映射，不能叠加 dense element stride。可访问容量与布局是作者的存储前置合同，
-同一个 storage 的 raw pointer 和多个 View 保留同一 alias 来源。
+同一个 storage 的 raw pointer 和多个 View 保留同一 alias 来源。参数的显式 alias group
+同样约束 pointer 与 View；未声明的参数仍属于共同 may-alias 组。目标 lowering 保留
+这些调用前置条件，不因作者从 pointer 绑定局部 View 而丢弃已声明的互不重叠关系。
+
+没有消费者的 `empty` 只表示未初始化数值容器，可以消除。它没有逃逸地址或
+state/stage 声明身份；完整 SSA 赋值不能留下影响物理调度的无用 allocation。
+实际被读取的未初始化部分、真实 local storage、state/stage 和生命周期约束保持原义。
 前端的逐循环物理调度请求保存在 `scf.for` 的 `weft.pipeline.depth` 属性中；范围为
 0/1/2/3/4，0/1 禁用该循环的跨迭代重叠，2/3/4 由既有目标 scheduler 与共同 expander
 实现。该请求覆盖此循环的全局默认，不改变源级 state/stage 或 Level 树。无法调度的

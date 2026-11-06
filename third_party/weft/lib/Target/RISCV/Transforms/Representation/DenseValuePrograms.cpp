@@ -102,6 +102,7 @@ private:
   SmallVector<int64_t> tileShape;
   llvm::DenseSet<Value> registerInputs;
   DenseMap<Value, SmallVector<Value>> registerOutputs;
+  DenseMap<Value, riscv::ValueType> registerOutputTypes;
   unsigned aliasSpecializations = 0;
 
   FailureOr<bool> specializeAliasing(DenseProducerGraph &graph) {
@@ -249,6 +250,7 @@ private:
   bool selectRegisterPieces(DenseProducerGraph &graph, Value upper) {
     registerInputs.clear();
     registerOutputs.clear();
+    registerOutputTypes.clear();
     if (graph.issueCopies != 1) return false;
     auto extent = getConstantIntValue(upper);
     if (!extent || *extent <= 0 || *extent != graph.domain.getShape()[graph.lanePosition] ||
@@ -267,20 +269,39 @@ private:
         retainedInputs += *resident - type.getLayout().getRegisterGroups();
       }
     }
-    if (registerInputs.empty()) return false;
     int64_t retained = 0;
+    auto target = graph.root->getParentOfType<riscv::KernelOp>().getTarget();
     for (Value value : graph.exports) {
       auto type = cast<riscv::ValueType>(value.getType());
-      if (!registerCarrier(type, graph, *extent)) continue;
+      if (type.getShape() != graph.domain.getShape() ||
+          type.getAxisIds() != graph.domain.getAxisIds() ||
+          type.getLayout().getValidity() != "full") continue;
+      auto tile = piece(type, graph.width, target, false);
+      if (!tile || tile.getLayout().getCarrier() != "rvv" ||
+          tile.getLayout().getReplicaGroup() != 1) continue;
+      auto before = tile.getLayout();
+      auto time = llvm::to_vector(before.getTimeFactors().asArrayRef());
+      time[graph.lanePosition] = *extent / graph.width;
+      auto layout = riscv::LayoutAttr::get(b.getContext(), "rvv", type.getAxisIds(),
+          b.getDenseI64ArrayAttr(time), before.getLaneFactors(), before.getReplicaFactors(),
+          before.getFragmentFactors(), before.getLocalFactors(), before.getSew(),
+          before.getLmulEighths(), before.getVl(), before.getRegisterGroups(), "full");
+      auto assembled = cast<riscv::ValueType>(riscv_internal::withLayout(type, layout));
+      if (!registerCarrier(assembled, graph, *extent)) continue;
       registerOutputs.try_emplace(value);
-      retained += type.getLayout().getRegisterGroups() * (*extent / graph.width);
+      registerOutputTypes[value] = assembled;
+      retained += layout.getRegisterGroups() * (*extent / graph.width);
     }
+    if (registerInputs.empty() && registerOutputs.empty()) return false;
     // Completed pieces remain live while a later issue is evaluated. Account
     // for that extra residency before removing their private representation.
-    auto target = graph.root->getParentOfType<riscv::KernelOp>().getTarget();
-    if (graph.issueCost.vectorGroups + retained + retainedInputs > target.getVectorRegisters()) {
+    SmallVector<Value> owned(graph.inputs);
+    for (Operation *operation : graph.order) llvm::append_range(owned, operation->getResults());
+    auto surrounding = riscv_internal::surroundingRegisterGroups(graph.root, owned);
+    if (!surrounding || graph.issueCost.vectorGroups + retained + retainedInputs + *surrounding > target.getVectorRegisters()) {
       registerInputs.clear();
       registerOutputs.clear();
+      registerOutputTypes.clear();
       return false;
     }
     if (enclosing) enclosing->setAttr("weft.riscv.system_unroll", b.getStringAttr("disable"));
@@ -939,12 +960,21 @@ private:
     for (Value value : saved) {
       auto expected = cast<riscv::ValueType>(value.getType());
       if (auto pieces = registerOutputs.find(value); pieces != registerOutputs.end()) {
-        auto assembled = riscv::RVVAssembleValueOp::create(b, loc, expected, pieces->second, laneAxis(),
+        auto selected = registerOutputTypes.lookup(value);
+        auto assembled = riscv::RVVAssembleValueOp::create(b, loc, selected, pieces->second, laneAxis(),
             riscv_internal::leaf(b, "transfer", "assemble-value", "rvv.assemble-value", "rvv.assemble-value",
-                expected.getLayout().getRegisterGroups() * pieces->second.size(),
-                expected.getLayout().getRegisterGroups(), 0, 0, "none", "exact"));
+                selected.getLayout().getRegisterGroups() * pieces->second.size(),
+                selected.getLayout().getRegisterGroups(), 0, 0, "none", "exact"));
         riscv_internal::copyOrigin(value.getDefiningOp(), assembled);
-        sharedBridges[value] = assembled;
+        Value supplied = assembled;
+        if (selected != expected) {
+          auto conversion = riscv::ConvertLayoutOp::create(b, loc, expected, supplied,
+              riscv_internal::layoutConversion(b, selected.getLayout(), expected.getLayout()),
+              riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
+          riscv_internal::copyOrigin(value.getDefiningOp(), conversion);
+          supplied = conversion;
+        }
+        sharedBridges[value] = supplied;
         continue;
       }
       Value storage = frozen.lookup(value);

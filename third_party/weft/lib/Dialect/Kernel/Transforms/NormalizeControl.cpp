@@ -146,6 +146,20 @@ public:
   }
 };
 
+class EraseUnusedEmpty : public OpRewritePattern<weft::kernel::EmptyOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::EmptyOp empty,
+                               PatternRewriter &rewriter) const override {
+    // This uninitialized numerical container has no address, returned storage,
+    // or state/stage identity. A complete SSA assignment can remove its only
+    // user; retaining the unused allocation would introduce a false effect.
+    if (!empty.getResult().use_empty()) return failure();
+    rewriter.eraseOp(empty);
+    return success();
+  }
+};
+
 class FoldStaticSubviewOffsets : public OpRewritePattern<weft::kernel::SubviewOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -427,7 +441,7 @@ public:
     scf::WhileOp::getCanonicalizationPatterns(patterns, &getContext());
     patterns.add<PushCoordinateRename, FoldScalarProjection, FoldStaticSubviewOffsets,
                  FoldIdentitySlice, FoldScalarInteger, FoldScalarIntegerCompare,
-                 FoldConstantIf, NormalizeScalarSelect>(&getContext());
+                 FoldConstantIf, NormalizeScalarSelect, EraseUnusedEmpty>(&getContext());
     // Dead control carries can be the only extra consumer of a coordinate
     // rename. Revisit both in the same bounded worklist, so deleting a carry
     // exposes the producer to the existing single-consumer rewrite. Folding

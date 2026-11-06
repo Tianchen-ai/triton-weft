@@ -47,6 +47,10 @@ numeric RVV SSA 的完整驻留量为 `registerGroups × product(time)`；真实
 与 local descriptor 不占 numeric vector 寄存器，显式 `field_read` 的结果才占用。零拷贝
 share、reshape 和保序 fragment handoff 按同一 storage identity 延长到所有 alias 的最后 use，
 不重复分配；loop init 与 carry 复用还要求整条 alias 链及底层值只有这次 use。
+有界 producer 的完整输出可以由至多四个实际 issue 结果组成寄存器 tuple，即使输入
+直接来自内存。每个输出按其机器位宽保留所选 issue 布局，并显式转换到后续消费者
+要求的布局；同时计入完成部分、当前 issue、输入驻留及外围活跃值，不因缺少寄存器
+输入就强制分配私有数组。不能闭合完整域或资源预算时继续使用显式私有存储。
 
 canonical `reshape` lower为真实的 `weft_riscv.reshape`。op保留作者给出的input-axis
 order和不同的result shape/axis identities；layout pass必须为两端形成线性序号相同的carrier

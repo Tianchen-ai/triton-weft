@@ -213,22 +213,19 @@ public:
     function->setAttr("weft.x86.cpu", b.getStringAttr(target.cpu));
     function->setAttr("weft.x86.vector_bits", b.getI32IntegerAttr(target.vectorBits));
     function->setAttr("weft.x86.vector_registers", b.getI32IntegerAttr(target.vectorRegisters()));
-    // The native View contract checks disjoint alias groups before entry. Carry
-    // singleton groups into LLVM rather than discarding that author contract.
-    // Raw pointers have no checked View range, so a mixed ABI grants no noalias.
-    bool checkedViews = true;
+    // Explicit alias groups are source call preconditions for both Views and
+    // pointers. A pointer does not erase an author's disjoint-storage promise;
+    // unspecified pointers retain the common may-alias group.
+    auto storageArgument = [](Type type) {
+      return memoryType(type) || isa<wk::PointerType>(type);
+    };
     DenseMap<int64_t, unsigned> aliasCounts;
     for (auto [index, arg] : llvm::enumerate(kernel.getBody().front().getArguments())) {
-      if (isa<LLVM::LLVMPointerType>(parameters[index]) && !memoryType(arg.getType()) &&
-          cast<StringAttr>(kernel.getArgAccess()[index]).getValue() != "none") checkedViews = false;
-      if (memoryType(arg.getType())) ++aliasCounts[kernel.getArgAliasSets()[index]];
+      if (storageArgument(arg.getType())) ++aliasCounts[kernel.getArgAliasSets()[index]];
     }
-    kernel.walk([&](Operation *op) {
-      if (isa<wk::PointerLoadOp, wk::PointerStoreOp, wk::PointerAtomicOp>(op)) checkedViews = false;
-    });
     for (auto [index, arg] : llvm::enumerate(kernel.getBody().front().getArguments())) {
-      if (!memoryType(arg.getType())) continue;
-      if (checkedViews && aliasCounts[kernel.getArgAliasSets()[index]] == 1)
+      if (!storageArgument(arg.getType())) continue;
+      if (aliasCounts[kernel.getArgAliasSets()[index]] == 1)
         function.setArgAttr(index, LLVM::LLVMDialect::getNoAliasAttrName(), b.getUnitAttr());
       if (cast<StringAttr>(kernel.getArgAccess()[index]).getValue() == "read")
         function.setArgAttr(index, LLVM::LLVMDialect::getReadonlyAttrName(), b.getUnitAttr());
