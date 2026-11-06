@@ -105,6 +105,7 @@ struct SliceInfo {
   llvm::SmallVector<std::string> selectors;
   llvm::SmallVector<std::pair<int64_t, mlir::Value>> localOffsets;
   llvm::SmallVector<std::pair<int64_t, int64_t>> staticOffsets;
+  llvm::SmallVector<int64_t> relativeAxes;
   llvm::SmallVector<std::pair<int64_t, std::string>> extents;
 };
 

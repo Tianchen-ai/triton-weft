@@ -346,6 +346,9 @@ std::optional<std::string> Emitter::denseAddress(
   size_t domainCursor = 0;
   for (size_t dimension = 0; dimension < memory.axes.size(); ++dimension) {
     std::string coordinate = "0";
+    if (llvm::is_contained(slice.relativeAxes, memory.axes[dimension]) &&
+        dimension < memory.origins.size())
+      coordinate = memory.origins[dimension];
     if (dimension < slice.selectors.size() &&
         slice.selectors[dimension] != "all") {
       const std::string &selector = slice.selectors[dimension];
@@ -971,6 +974,11 @@ mlir::LogicalResult Emitter::compileSlice(riscv::SliceOp slice) {
       if (selector == "index") {
         // Plain scalar indices are offsets relative to the selected block.
         binding.slice.localOffsets.emplace_back(axis, index);
+        auto rootAxis = llvm::find(root.memory.axes, axis);
+        if (rootAxis != root.memory.axes.end() &&
+            binding.slice.selectors[rootAxis - root.memory.axes.begin()] == "all" &&
+            !llvm::is_contained(binding.slice.relativeAxes, axis))
+          binding.slice.relativeAxes.push_back(axis);
         continue;
       }
       if (selector != "domain" && selector != "group_index")
@@ -1015,6 +1023,9 @@ mlir::LogicalResult Emitter::compileSubview(riscv::SubviewOp subview) {
   result.kind = Binding::Kind::Slice;
   if (base.kind == Binding::Kind::Memory) {
     result.slice.base = subview.getBase();
+    // Subview offsets are descriptor-relative. The payload pointer already
+    // selects the record, while its logical origin can still be nonzero.
+    result.slice.relativeAxes = base.memory.axes;
   } else if (base.kind == Binding::Kind::Slice) {
     result.slice = base.slice;
   } else {

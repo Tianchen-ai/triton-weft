@@ -143,6 +143,8 @@ canonical `subview` lower为 `weft_riscv.subview`：base descriptor、每轴静�
 缩小后的result descriptor同时存在于IR，动态 operand 顺序与 canonical marker 一致。它保留
 Encoding、axis、stride、access与alias，向当前 base address加入逐轴相对offset，保存所选动态
 extent；读写或再次投影都消费这份描述符，不能把动态长度重新解释为完整 ABI axis。
+相对 subview 或普通 scalar index 从 base descriptor 的当前 origin 开始；Level point
+仍是所属 domain 的绝对坐标。二者叠加时不能把相对 offset 再减去外层 record 的 origin。
 `weft_riscv.extent` 只读取该描述符中显式的有效范围。Subview 不是 indexed memory edge，
 terminal translator不为它选择gather/scatter、补齐尾部或创造遍历；不支持的 consumer 表示由
 physical legality 拒绝。
