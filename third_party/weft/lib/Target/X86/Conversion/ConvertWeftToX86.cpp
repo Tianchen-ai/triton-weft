@@ -1818,9 +1818,15 @@ private:
     } else for (int64_t record = 0; record < records; ++record) {
       Value linear = vector::ExtractOp::create(b, loc, offsets, ArrayRef<int64_t>{record * windowElements});
       Value live = vector::ExtractOp::create(b, loc, active, ArrayRef<int64_t>{record * windowElements});
-      Value base = arith::MulIOp::create(b, loc,
-          arith::DivUIOp::create(b, loc, linear, constant(loc, b.getI64Type(), b.getI64IntegerAttr(elements))),
-          constant(loc, b.getI64Type(), b.getI64IntegerAttr(layout->bytes())));
+      // Encoded snapshots already use record-aligned byte coordinates from
+      // readMemory. Field windows instead carry logical field coordinates.
+      // Reconstructing a record index from a snapshot's byte address adds a
+      // divide/multiply by its byte size and loses the existing address fact.
+      Value base = linear;
+      if (!recordSnapshot)
+        base = arith::MulIOp::create(b, loc,
+            arith::DivUIOp::create(b, loc, linear, constant(loc, b.getI64Type(), b.getI64IntegerAttr(elements))),
+            constant(loc, b.getI64Type(), b.getI64IntegerAttr(layout->bytes())));
       if (translation) base = translatedBase(base, translation->first);
       for (int64_t begin = 0; begin < byteCount;) {
         int64_t end = begin + 1;
