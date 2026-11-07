@@ -23,6 +23,10 @@ source 的 `new/materialize` birth 在变换期间保持各自身份，不能因
 整数运算都可证明无回绕，也闭合为原 Value 的显式 reshape。证明复用同一索引分析，
 不把相同 shape 当作连续性，也不删除非恒等字段重排。原读取快照和 state/stage birth
 不变；非零子区间、重复／乱序坐标以及无法证明的窄整数回绕保留真实 lookup。
+查表供给追踪下游归约时，完整的静态等长前缀沿 row-major reshape 保留原坐标对应，
+即使普通位置轴获得了新名字。分析将当前轴映射回原 lookup 轴，使相同 contraction
+可以共同处理表项坐标和 payload；改变大小的后缀不凭轴名推定对应，动态前缀仍要求
+原身份。选择后的真实 gather、conversion 与资源继续由同一物理管线验证。
 每个 kernel 唯一的 root domain 是结构锚点；即使普通 Tensor 程序没有子 Level，
 它也不作为无使用的纯数值删除。目标转换消费该锚点，不产生运行时工作。
 完整、静态有效域上的零坐标标量投影消去纯 broadcast/extract 往返；相同坐标的

@@ -446,15 +446,27 @@ downstreamReducedFreeAxes(mlir::Operation *contraction,
 
 llvm::SmallVector<int64_t> downstreamReductionAxes(mlir::Value root) {
   llvm::SmallVector<int64_t> axes;
-  using WorkItem = std::pair<mlir::Value, llvm::SmallVector<int64_t>>;
+  // A positional rename preserves coordinates without preserving axis names.
+  // Keep the original lookup axis beside its current spelling while following
+  // consumers, including the unchanged prefix of a mixed-radix reshape.
+  using AxisMapping = llvm::SmallVector<std::pair<int64_t, int64_t>>;
+  using WorkItem = std::pair<mlir::Value, AxisMapping>;
   llvm::SmallVector<WorkItem> worklist;
-  worklist.emplace_back(root, riscv_internal::logicalAxes(root.getType()));
+  AxisMapping initial;
+  for (int64_t axis : riscv_internal::logicalAxes(root.getType()))
+    initial.emplace_back(axis, axis);
+  worklist.emplace_back(root, std::move(initial));
   llvm::SmallPtrSet<mlir::Operation *, 32> visited;
   while (!worklist.empty()) {
     auto [value, preservedAxes] = worklist.pop_back_val();
     auto source = mlir::dyn_cast<riscv::ValueType>(value.getType());
     if (!source)
       continue;
+    auto record = [&](int64_t current) {
+      for (auto [axis, original] : preservedAxes)
+        if (axis == current && !llvm::is_contained(axes, original))
+          axes.push_back(original);
+    };
     for (mlir::Operation *user : value.getUsers()) {
       if (!visited.insert(user).second)
         continue;
@@ -480,8 +492,7 @@ llvm::SmallVector<int64_t> downstreamReductionAxes(mlir::Value root) {
         int64_t position = reduce.getAxis();
         if (position < 0 || position >= static_cast<int64_t>(source.getAxisIds().size())) continue;
         int64_t axis = source.getAxisIds()[position];
-        if (llvm::is_contained(preservedAxes, axis) && !llvm::is_contained(axes, axis))
-          axes.push_back(axis);
+        record(axis);
         worklist.emplace_back(reduce.getResult(), preservedAxes);
         continue;
       }
@@ -492,14 +503,10 @@ llvm::SmallVector<int64_t> downstreamReductionAxes(mlir::Value root) {
             (contract.getLhs() != value && contract.getRhs() != value))
           continue;
         for (int64_t axis : contract.getOver())
-          if (llvm::is_contained(preservedAxes, axis) &&
-              !llvm::is_contained(axes, axis))
-            axes.push_back(axis);
+          record(axis);
         for (int64_t axis : downstreamReducedFreeAxes(
                  contract.getOperation(), contract.getOver()))
-          if (llvm::is_contained(preservedAxes, axis) &&
-              !llvm::is_contained(axes, axis))
-            axes.push_back(axis);
+          record(axis);
         continue;
       }
       if (auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(user)) {
@@ -521,8 +528,8 @@ llvm::SmallVector<int64_t> downstreamReductionAxes(mlir::Value root) {
               if (!linearVisited.insert(consumer).second) continue;
               if (auto reduce = mlir::dyn_cast<riscv::ReduceOp>(consumer);
                   reduce && reduce.getAxis() == 0) {
-                for (int64_t axis : preservedAxes)
-                  if (!llvm::is_contained(axes, axis)) axes.push_back(axis);
+                for (auto [current, original] : preservedAxes)
+                  if (!llvm::is_contained(axes, original)) axes.push_back(original);
                 continue;
               }
               if (!layoutPreservingPointwise(consumer) || consumer->getNumResults() != 1)
@@ -533,19 +540,21 @@ llvm::SmallVector<int64_t> downstreamReductionAxes(mlir::Value root) {
             }
           }
         }
-        // A suffix reshape changes only its mixed-radix coordinates.  The
-        // identical prefix still names the same entries supplied to a later
-        // contraction; new/reused suffix axis names are not evidence of that.
-        llvm::SmallVector<int64_t> prefix;
+        // Only complete, equal-sized prefix axes survive this reshape proof.
+        // A split/merged suffix needs its own coordinate relation; its names
+        // alone cannot establish which original axes a consumer reduces.
+        AxisMapping prefix;
         for (size_t position = 0;
              position < source.getShape().size() &&
              position < result.getShape().size(); ++position) {
           const int64_t axis = source.getAxisIds()[position];
-          if (axis != result.getAxisIds()[position] ||
-              source.getShape()[position] != result.getShape()[position])
+          if (source.getShape()[position] != result.getShape()[position] ||
+              (source.getShape()[position] <= 0 &&
+               axis != result.getAxisIds()[position]))
             break;
-          if (llvm::is_contained(preservedAxes, axis))
-            prefix.push_back(axis);
+          for (auto [current, original] : preservedAxes)
+            if (current == axis)
+              prefix.emplace_back(result.getAxisIds()[position], original);
         }
         if (!prefix.empty())
           worklist.emplace_back(reshape.getResult(), std::move(prefix));
