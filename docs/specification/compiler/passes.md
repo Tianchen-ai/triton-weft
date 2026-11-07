@@ -574,6 +574,11 @@ coalesce。storage order 只决定 operand 怎样供应这个 carrier，不能�
 LMUL，composite pass 显式把较小 operand 扩展到两者中较大的合法 carrier（至多 m1）。
 转换保留原逻辑坐标、active lanes 与驻留；不能只接受 fractional 到 m1，而拒绝 mf4 到 mf2。
 
+多轴 widening contraction 保留标量自由轴结果时，两侧可先转换到相同的 reduction
+lane/time 分解，自由轴继续占用独立 replica，不计入被归约域。跨 replica/time 的 tuple
+转换若同时改变 lane 窗口或寄存器类型，布局 pass 必须选择完整坐标映射的 `lane_repack`；
+terminal 不能仅重用原向量变量来表示另一种 LMUL。
+
 pointwise、state 与 control handoff 的要求不一致时，pass 插入真实 `convert_layout`；
 `for/if/while` 的 carried/result types 同时被改写。无法保持 logical axes 或无合法 LMUL 时
 失败，不通过静默 scalarization 继续。

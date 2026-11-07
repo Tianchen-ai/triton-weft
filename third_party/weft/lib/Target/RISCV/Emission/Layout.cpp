@@ -1194,6 +1194,11 @@ Emitter::compileConvertLayout(riscv::ConvertLayoutOp conversion) {
       bindings[conversion.getResult()] = std::move(repartitioned);
       return mlir::success();
     }
+    if (input.kind == Binding::Kind::Vector &&
+        vectorType(conversion.getInput()) != vectorType(conversion.getResult()))
+      return fail(conversion,
+                  "tuple projection cannot alias different RVV register types; "
+                  "the physical program requires a selected lane repack");
     mlir::FailureOr<Binding> projected =
         projectBinding(conversion.getInput(), conversion.getResult(), input);
     if (mlir::failed(projected))

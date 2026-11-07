@@ -1789,26 +1789,30 @@ private:
         // numeric operands at the use edge, preserving storage/index producer
         // layouts. Moving reduced replicas to time must cover every coordinate;
         // treating them as independent output replicas would drop contributions.
-        if (!laneResultType && physicalReductionAxes.size() > 1 && lhsType && rhsType &&
+        // Surviving scalar free axes instead retain their own replica factors.
+        if ((!laneResultType || laneResultType.getLayout().getCarrier() == "scalar") &&
+            physicalReductionAxes.size() > 1 && lhsType && rhsType &&
             lhsType.getShape() == rhsType.getShape() && lhsType.getAxisIds() == rhsType.getAxisIds() &&
-            lhsType.getAxisIds().size() == physicalReductionAxes.size() &&
             lhsType.getLayout().getCarrier() == "rvv" && rhsType.getLayout().getCarrier() == "rvv" &&
             lhsType.getLayout().getValidity() == "full" && rhsType.getLayout().getValidity() == "full" &&
             lhsType.getLayout().getSew() == rhsType.getLayout().getSew() &&
             llvm::all_of(lhsType.getAxisIds().asArrayRef(), [&](int64_t axis) {
-              return llvm::is_contained(physicalReductionAxes, axis);
+              return llvm::is_contained(physicalReductionAxes, axis) ||
+                  (laneResultType && llvm::is_contained(laneResultType.getAxisIds().asArrayRef(), axis));
             })) {
-          llvm::SmallVector<int64_t> lanes, time, ones(lhsType.getShape().size(), 1);
+          llvm::SmallVector<int64_t> lanes, time, replicas, ones(lhsType.getShape().size(), 1);
           bool complete = lhsType.getLayout().getReplicaGroup() == 1 && rhsType.getLayout().getReplicaGroup() == 1;
           for (size_t i = 0; i < lhsType.getShape().size(); ++i) {
-            const int64_t lane = std::gcd(lhsType.getLayout().getLaneFactors()[i],
-                                          rhsType.getLayout().getLaneFactors()[i]);
+            const bool reduced = llvm::is_contained(physicalReductionAxes, lhsType.getAxisIds()[i]);
+            const int64_t lane = reduced ? std::gcd(lhsType.getLayout().getLaneFactors()[i],
+                                                   rhsType.getLayout().getLaneFactors()[i]) : 1;
             const int64_t extent = lhsType.getShape()[i];
             complete &= lane > 0 && extent > 0 && extent % lane == 0 &&
                 lhsType.getLayout().getFragmentFactors()[i] == 1 && rhsType.getLayout().getFragmentFactors()[i] == 1 &&
                 lhsType.getLayout().getLocalFactors()[i] == 1 && rhsType.getLayout().getLocalFactors()[i] == 1;
             lanes.push_back(lane);
-            time.push_back(lane > 0 ? extent / lane : 0);
+            time.push_back(reduced && lane > 0 ? extent / lane : 1);
+            replicas.push_back(reduced ? 1 : extent);
           }
           const int64_t vl = riscv_internal::staticProduct(lanes).value_or(-1);
           riscv::LayoutAttr common;
@@ -1817,9 +1821,10 @@ private:
                 !llvm::is_contained(target.getLegalLMULEighths().asArrayRef(), 2 * lmul)) continue;
             auto candidate = riscv::LayoutAttr::get(rewriter.getContext(), "rvv", lhsType.getAxisIds(),
                 riscv_internal::integers(rewriter, time), riscv_internal::integers(rewriter, lanes),
-                riscv_internal::integers(rewriter, ones), riscv_internal::integers(rewriter, ones),
+                riscv_internal::integers(rewriter, replicas), riscv_internal::integers(rewriter, ones),
                 riscv_internal::integers(rewriter, ones), lhsType.getLayout().getSew(), lmul, vl,
-                std::max<int64_t>(1, (lmul + 7) / 8), "full");
+                product(riscv_internal::integers(rewriter, replicas)) *
+                    std::max<int64_t>(1, (lmul + 7) / 8), "full");
             if (riscv::supportsRVVLayout(target, candidate)) { common = candidate; break; }
           }
           if (common) {
