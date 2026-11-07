@@ -1219,6 +1219,9 @@ contraction 的 unroll 只能属于它真实的多 issue reduction loop。单 is
 `extract` 共用同一关系；直接 extract 限于每 byte 八个连续 logical bit 的 layer=1 表示。
 选择前核对 byte alignment、lo-first 位序、完整 group、point partition 与唯一 streamed axis，
 不以 conversion 节点是否恰好仍存在作为能力边界。
+完整 logical-u1 字段的只读 `local_load` 和已形成的直接 `field_read` 同样消费
+这份 window 合同。以显式位窗口替代原读取，保留其 snapshot、byte mapping、有效域
+和临时资源；不把局部存储到数值载体的读取误当成必须为 pure 的转换。
 
 点式 signed integer `data * (1 - 2 * widen(bit))` 可以在同一 block 的单 use 链上选择
 `rvv_masked_negate`：bit 必须来自已物化的 logical-u1 window，sign 与 data 的完整 type

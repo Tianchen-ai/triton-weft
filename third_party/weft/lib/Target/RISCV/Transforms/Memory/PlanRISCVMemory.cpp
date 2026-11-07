@@ -4291,18 +4291,23 @@ public:
     // defines one exact byte-mask window.  Materialize that physical access
     // before the generic layout conversion so emission never has to recover
     // packed storage geometry from a vector value.
-    llvm::SmallVector<riscv::ConvertLayoutOp> directBitmaskConversions;
-    getOperation().walk([&](riscv::ConvertLayoutOp conversion) {
-      directBitmaskConversions.push_back(conversion);
+    llvm::SmallVector<mlir::Operation *> directBitmaskTransfers;
+    getOperation().walk([&](mlir::Operation *operation) {
+      if (mlir::isa<riscv::ConvertLayoutOp, riscv::FieldReadOp>(operation))
+        directBitmaskTransfers.push_back(operation);
     });
-    for (riscv::ConvertLayoutOp conversion : directBitmaskConversions) {
-      if (!conversion || !conversion->getBlock() ||
-          conversion.getConversion().getEffect() != "pure")
+    for (mlir::Operation *conversion : directBitmaskTransfers) {
+      auto layout = mlir::dyn_cast<riscv::ConvertLayoutOp>(conversion);
+      auto read = mlir::dyn_cast<riscv::FieldReadOp>(conversion);
+      if ((layout && layout.getConversion().getEffect() != "pure" &&
+           (layout.getConversion().getKind() != "local_load" ||
+            layout.getConversion().getEffect() != "read")) ||
+          (read && !read.getIndices().empty()))
         continue;
-      auto field = conversion.getInput().getDefiningOp<riscv::FieldOp>();
+      auto field = conversion->getOperand(0).getDefiningOp<riscv::FieldOp>();
       auto source = field ? mlir::dyn_cast<riscv::ValueType>(field.getResult().getType())
                           : riscv::ValueType();
-      auto result = mlir::dyn_cast<riscv::ValueType>(conversion.getResult().getType());
+      auto result = mlir::dyn_cast<riscv::ValueType>(conversion->getResult(0).getType());
       auto sourceElement = source
                                ? mlir::dyn_cast<mlir::IntegerType>(
                                      source.getElementType())
@@ -4379,7 +4384,7 @@ public:
 
       rewriter.setInsertionPoint(conversion);
       auto zero = mlir::arith::ConstantIndexOp::create(rewriter,
-          conversion.getLoc(), 0);
+          conversion->getLoc(), 0);
       const bool tail = result.getLayout().getValidity() == "tail";
       const int64_t temporaryGroups = std::max<int64_t>(
           1, (loadResult.getLayout().getLmulEighths() + 7) / 8);
@@ -4388,7 +4393,7 @@ public:
       if (!partBitOffsets)
         continue;
       auto window = riscv::RVVBitmaskWindowLoadOp::create(rewriter,
-          conversion.getLoc(), loadResult, field.getResult(), zero,
+          conversion->getLoc(), loadResult, field.getResult(), zero,
           source.getAxisIds()[*windowPosition],
           rewriter.getDenseI64ArrayAttr(
               {source.getAxisIds()[*windowPosition]}),
@@ -4408,7 +4413,7 @@ public:
       mlir::Value replacement = window.getResult();
       if (loadResult != result) {
         auto bridge = riscv::ConvertLayoutOp::create(rewriter,
-            conversion.getLoc(), result, replacement,
+            conversion->getLoc(), result, replacement,
             riscv_internal::layoutConversion(rewriter,
                                              loadResult.getLayout(),
                                              result.getLayout()),
@@ -4416,7 +4421,7 @@ public:
         riscv_internal::copyOrigin(conversion, bridge);
         replacement = bridge.getResult();
       }
-      conversion.getResult().replaceAllUsesWith(replacement);
+      conversion->getResult(0).replaceAllUsesWith(replacement);
       rewriter.eraseOp(conversion);
     }
     }
