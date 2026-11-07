@@ -185,6 +185,10 @@ joined 的完整 storage geometry。terminal lowering可以据此计算确定地
 追踪 record point；仅为坐标推导穿过 stage wrapper，实际读取仍消费原快照存储。
 numeric window 改为私有存储后，原寄存器 gather 的 access、leaf 和投影缓存失效，
 由同一 memory planning 重新选择，不能把原寄存器指令用于新的 local descriptor。
+一维完整数值快照的 `group_index` 可返回 primitive scalar；先在原定义点保存
+快照，再按 `PhysicalPoint` 的相对 group 坐标生成 `local.load.element`。
+该读取与 shaped 分组投影复用同一私有 descriptor，不重新读取 encoded 输入，
+也不改变快照的 birth、有效域或子 Level 生命周期。
 record 轴被拆为多维 bitmask 窗口时，窗口使用与字段轴分离的私有物理轴，再通过
 显式 reshape 恢复消费者的数值轴。拆分不改变读取快照、逐 part bit offset 或有效域；
 保留字段轴与窗口轴不能重名。

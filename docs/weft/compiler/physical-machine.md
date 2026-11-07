@@ -28,6 +28,12 @@ The index expression does not require a numeric scratch array. The read keeps
 its original snapshot and active domain. Byte-carried Boolean values use dense
 byte transfers; a packed mask retains its separate bit-storage contract.
 
+A grouped read from a one-dimensional numeric snapshot can also produce a scalar.
+The representation pass saves the original Value once and selects the scalar from
+that private storage using the sub-Level's relative group coordinate. Scalar and
+shaped consumers therefore retain the same read point and lifetime; selecting a
+group does not reread the encoded source.
+
 ## Resource analysis
 
 The target profile supplies vector width, register facts, supported instructions

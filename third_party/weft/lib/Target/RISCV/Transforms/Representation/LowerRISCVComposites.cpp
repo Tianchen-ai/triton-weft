@@ -833,7 +833,11 @@ private:
       auto input = extract.getInput().getType();
       auto output = mlir::dyn_cast<riscv::ValueType>(extract.getResult().getType());
       auto *definition = extract.getInput().getDefiningOp();
-      if (!output || !definition || input.getLayout().getCarrier() == "local" ||
+      const bool scalarOutput =
+          mlir::isa<mlir::IntegerType, mlir::FloatType, mlir::IndexType>(
+              extract.getResult().getType());
+      if ((!output && !scalarOutput) || !definition ||
+          input.getLayout().getCarrier() == "local" ||
           !mlir::isa<mlir::IntegerType, mlir::FloatType>(input.getElementType()) ||
           mlir::isa<riscv::FieldOp>(definition)) continue;
       bool grouped = false, domain = false, gather = false, supported = true;
@@ -849,6 +853,7 @@ private:
       bool needsWindow = domain && elements &&
           input.getLayout().getCarrier() == "scalar" && *elements > 1;
       if (!supported || (!grouped && !nestedGather && !needsWindow)) continue;
+      if (!output && !grouped) continue;
       if (llvm::any_of(input.getShape().asArrayRef(), [](int64_t n) { return n <= 0; })) continue;
       mlir::Value storage = saved.lookup(extract.getInput());
       if (!storage) {
@@ -917,9 +922,14 @@ private:
       auto input = mlir::cast<riscv::ValueType>(extract.getInput().getType());
       auto result =
           mlir::dyn_cast<riscv::ValueType>(extract.getResult().getType());
+      const bool scalarResult =
+          mlir::isa<mlir::IntegerType, mlir::FloatType, mlir::IndexType>(
+              extract.getResult().getType());
       auto binding = extract.getInput().getDefiningOp<riscv::LocalBindOp>();
-      if (!result || (result.getLayout().getCarrier() != "scalar" &&
-                      result.getLayout().getCarrier() != "rvv") || !binding ||
+      if ((!result && !scalarResult) ||
+          (result && result.getLayout().getCarrier() != "scalar" &&
+                     result.getLayout().getCarrier() != "rvv") || !binding ||
+          (scalarResult && input.getShape().size() != 1) ||
           extract.getSelectors().size() != input.getShape().size())
         continue;
 
@@ -942,13 +952,16 @@ private:
                          .getDefiningOp<riscv::PhysicalPointOp>();
         groupDimension = static_cast<int64_t>(dimension);
       }
-      auto resultParts = riscv_internal::staticProduct(
-          result.getLayout().getReplicaFactors().asArrayRef());
+      auto resultParts = scalarResult
+          ? std::optional<int64_t>(1)
+          : riscv_internal::staticProduct(
+                result.getLayout().getReplicaFactors().asArrayRef());
       if (!supported || cursor != extract.getIndices().size() || !groupPoint ||
           groupDimension < 0 || !resultParts || *resultParts <= 0)
         continue;
-      const bool vectorResult = result.getLayout().getCarrier() == "rvv";
-      if (!vectorResult &&
+      const bool vectorResult =
+          result && result.getLayout().getCarrier() == "rvv";
+      if (!vectorResult && result &&
           (llvm::any_of(result.getLayout().getTimeFactors().asArrayRef(),
                         [](int64_t factor) { return factor != 1; }) ||
            llvm::any_of(result.getLayout().getLaneFactors().asArrayRef(),
@@ -1005,8 +1018,8 @@ private:
       for (int64_t part = 0; part < *resultParts; ++part) {
         llvm::DenseMap<int64_t, int64_t> coordinates;
         int64_t remaining = part;
-        for (int64_t dimension =
-                 static_cast<int64_t>(result.getAxisIds().size()) - 1;
+        const int64_t resultRank = result ? result.getAxisIds().size() : 0;
+        for (int64_t dimension = resultRank - 1;
              dimension >= 0; --dimension) {
           const int64_t factor =
               result.getLayout().getReplicaFactors()[dimension];
@@ -1039,7 +1052,9 @@ private:
         if (!supported)
           break;
         auto load = riscv::LocalLoadOp::create(rewriter,
-            extract.getLoc(), result.getElementType(), binding.getResult(), linear,
+            extract.getLoc(),
+            result ? result.getElementType() : extract.getResult().getType(),
+            binding.getResult(), linear,
             riscv_internal::leaf(rewriter, "transfer", "local-load",
                                  "local.load.element", "local.load.element", 0,
                                  0, 0, 0));
@@ -1050,6 +1065,10 @@ private:
         extract.emitError(
             "local grouped projection has no complete scalar replica mapping");
         failed = true;
+        continue;
+      }
+      if (scalarResult) {
+        rewriter.replaceOp(extract, loaded.front());
         continue;
       }
       auto assembled = riscv::RVVAssembleReplicasOp::create(rewriter,
