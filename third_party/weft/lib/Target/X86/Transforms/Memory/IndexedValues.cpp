@@ -312,7 +312,12 @@ std::optional<IndexedLane> indexedLane(Value index, unsigned depth = 0) {
     if (offset.isNegative() || offset.getActiveBits() > 62) return {};
     auto result = indexedLane(source, depth + 1);
     if (!result || result->bias > INT64_MAX - offset.getSExtValue()) return {};
-    result->bias += offset.getSExtValue();
+    if (isa<VectorType>(result->coordinates.getType()))
+      result->bias += offset.getSExtValue();
+    else {
+      if (result->lane > INT64_MAX - offset.getSExtValue()) return {};
+      result->lane += offset.getSExtValue();
+    }
     if (indexWidth(index.getType()) < 64) result->unsignedSequence = false;
     return result;
   }
@@ -324,6 +329,11 @@ std::optional<IndexedLane> indexedLane(Value index, unsigned depth = 0) {
       return result;
     }
   }
+  // A scalar base plus constant offsets describes the same private snapshot
+  // traversal as extracted coordinate lanes. The actual extended addresses
+  // below still prove contiguity, including safe-index selections and wrap.
+  if (index.getType().isIndex() || isa<IntegerType>(index.getType()))
+    return IndexedLane{index, 0, 0, false};
   return {};
 }
 
@@ -398,9 +408,13 @@ public:
       int64_t width = group.size();
       Value limit = arith::ConstantIndexOp::create(b, loc, storageType.getDimSize(0) - width);
       Value contiguous = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ule, indices.front(), limit);
-      auto coordinateType = cast<VectorType>(relation->coordinates.getType()).getElementType();
-      unsigned coordinateBits = indexWidth(coordinateType);
-      unitSequence &= coordinateBits >= 63 || uint64_t(width) <= (uint64_t(1) << coordinateBits);
+      Type coordinateType;
+      unsigned coordinateBits = 0;
+      if (auto vector = dyn_cast<VectorType>(relation->coordinates.getType())) {
+        coordinateType = vector.getElementType();
+        coordinateBits = indexWidth(coordinateType);
+        unitSequence &= coordinateBits >= 63 || uint64_t(width) <= (uint64_t(1) << coordinateBits);
+      } else unitSequence = false;
       if (unitSequence) {
         // A modular unit sequence is contiguous after unsigned extension when
         // its first coordinate leaves room for the entire packet before wrap.
