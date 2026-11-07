@@ -25,7 +25,7 @@ riscv::LoadOp encodedReadEpoch(Value owner) {
   }
 }
 
-bool hasOnlyFragmentSupplyUses(Value field) {
+bool hasOnlySelectedContractSupplyUses(Value field) {
   SmallVector<Value> pending{field};
   llvm::DenseSet<Value> visited;
   bool observed = false;
@@ -45,7 +45,9 @@ bool hasOnlyFragmentSupplyUses(Value field) {
         observed = true;
       } else if (auto implementation = user->getAttrOfType<riscv::ImplementationAttr>("implementation");
                  isa<riscv::ContractOp, riscv::OuterContractOp>(user) && implementation &&
-                 implementation.getEngine() == "ime") {
+                 (implementation.getEngine() == "ime" ||
+                  (implementation.getEngine() == "rvv" &&
+                   implementation.getFamily() == "contract"))) {
         observed = true;
       } else {
         return false;
@@ -286,11 +288,11 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     b.replaceOp(field, value);
   };
   for (auto field : fields) {
-    // Preserve Encoding geometry until the selected fragment materializer has
+    // Preserve Encoding geometry until the selected contraction materializer has
     // had the opportunity to form its exact field transfer. If it needs a
     // numerical pack instead, that pack remains a numeric consumer and the
     // subsequent memory pass completes the ordinary byte snapshot here.
-    if (hasOnlyFragmentSupplyUses(field.getResult())) continue;
+    if (hasOnlySelectedContractSupplyUses(field.getResult())) continue;
     auto value = dyn_cast<riscv::ValueType>(field.getResult().getType());
     bool indexedLocal = value && value.getLayout().getCarrier() == "local" &&
         llvm::any_of(field.getResult().getUsers(), [](Operation *user) {

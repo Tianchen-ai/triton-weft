@@ -3799,6 +3799,30 @@ public:
           operation.getLeaf().getInstruction() != "rvv.tile-store.segment.full")
         selectTileTransfer(operation, operation.getDestination(), operation.getInput().getType(), true);
     });
+    getOperation().walk([&](riscv::LookupOp operation) {
+      auto field = operation.getTable().getDefiningOp<riscv::FieldOp>();
+      if (!field) return;
+      auto type = mlir::dyn_cast<riscv::ValueType>(field.getResult().getType());
+      auto facts = riscv_internal::fieldFacts(field);
+      if (operation.getBounds() != "in_bounds" || !type || type.getShape().size() != 1 ||
+          facts.mapping != "natural" || facts.logicalRank != 1 ||
+          riscv_internal::logicalBitWidth(type) != 8 || facts.bitOffset % 8 != 0)
+        return;
+      // A bounded numerical lookup still names the admitted field. Keep
+      // that Encoding relation for the normal projected transfer selector,
+      // rather than snapshotting every byte to serve one small window.
+      // The original encoded read remains the snapshot/alias authority.
+      rewriter.setInsertionPoint(operation);
+      auto projection = riscv::ExtractOp::create(rewriter, operation.getLoc(),
+          operation.getResult().getType(), field.getResult(),
+          mlir::ValueRange{operation.getIndices()},
+          rewriter.getArrayAttr({rewriter.getStringAttr("gather")}),
+          riscv_internal::unassignedAccess(rewriter),
+          riscv_internal::unselectedLeaf(rewriter));
+      riscv_internal::copyOrigin(operation, projection);
+      rewriter.replaceOp(operation, projection.getResult());
+    });
+
     // Register gathers must see a numeric table, with its storage decode
     // already explicit, before selecting and narrowing their index carriers.
     riscv_internal::materializeWholeLayeredReads(getOperation());

@@ -154,12 +154,7 @@ bool DenseProducerGraph::collect(Value value) {
     if (!collect(lookup.getIndices())) return false;
   } else if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(op)) {
     if (isCompleteLocalRead(conversion)) localReads.push_back(conversion);
-    else if (conversion.getConversion().getKind() == "local_load" &&
-             conversion.getInput().getDefiningOp<riscv::LoadOp>() &&
-             !riscv::storageOrigins(conversion.getInput()).isOwnedLocal() &&
-             conversion.getInput().getType().getShape() == type.getShape() &&
-             conversion.getInput().getType().getAxisIds() == type.getAxisIds() &&
-             conversion.getInput().getType().getElementType() == type.getElementType()) {
+    else if (deferredLocalCapacityRead(conversion)) {
       // A local capacity on an as-yet unmaterialized descriptor load is not
       // a completed private-array read. Traverse its original producer; the
       // same read-epoch and alias checks select bounded supply or a snapshot.

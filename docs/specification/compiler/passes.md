@@ -111,6 +111,9 @@ record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry
 验证并建立精确字段传输。若该消费者需要普通数值 packing，后续 memory pass 再完成字段的
 字节快照；不能在消费者决定前把已可用的 packed 字段展开成完整 RVV 数组。字段写入枚举
 LMUL 时同时验证 SEW、LMUL 和完整 layout，不能只按 VLEN 能容纳的 bit 数判断合法性。
+已经选择普通 RVV contraction、且全部消费者均由其逐坐标字段读取闭合的字段也保留供给边，
+由同一 contraction materializer 生成每次实际读取，不先完整解码为私有数值数组。
+其它数值消费者与读取快照仍由字段和 read-snapshot passes 闭合。
 自然整字字段的 scalar/replica 传输沿用已有 alignment-safe byte copy，不因 alignment
 小于字段位宽而提前建立逐字节临时数组。原 encoded read 的快照仍由共同存储分析闭合。
 未对齐的单个 base-record F16 字段在目标具有 Zfhmin 时选择整数 byte load 与精确位重解释，
@@ -985,6 +988,11 @@ descriptor 各轴范围和目标 VLMAX，不能只凭 tuple 的字段数省略�
 普通整数和浮点 contraction 共同使用显式数值 operand supply。K 坐标先由 dense slice/load、
 encoded `field_read` 或 numeric projection 消费，widen 是独立 operation，之后才进入纯
 scalar/vector FMA leaf。不能把解码、读取或数据类型转换藏在 FMA 的 terminal binding 中。
+外部 descriptor load 只有 local 容量、尚未分配或保存快照时，供给查询与有界 producer graph
+共用同一个判定，穿过同 element/shape/axis 的 `local_load` conversion。实际私有存储、
+显式 stage 和已完成 snapshot 仍是数值边界；消费者分别证明读取 epoch 与 alias 写入关系。
+从完整 natural byte 字段读取的 in-bounds lookup 保留 encoded projection，复用已有字段窗口
+传输选择，不为一个小窗口预先复制整份字段。原 encoded load 继续约束快照和别名时序。
 
 浮点 `rsqrt` 在该 pass 内展开为同 type/layout 的 `sqrt`、同 element type 的常量 1
 和 `div`；RVV 的常量通过显式 `rvv_splat` 形成，临时 SSA 均进入原有资源与存活区间分析。

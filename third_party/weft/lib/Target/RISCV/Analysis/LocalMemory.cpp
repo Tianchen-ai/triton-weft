@@ -389,6 +389,18 @@ Value riscv_internal::completeLocalSlice(IRRewriter &b, Value view) {
   return riscv::SliceOp::create(b, view.getLoc(), region, view, ValueRange{}, b.getArrayAttr(selectors));
 }
 
+riscv::LoadOp riscv_internal::deferredLocalCapacityRead(riscv::ConvertLayoutOp conversion) {
+  auto input = conversion.getInput().getType();
+  auto output = conversion.getResult().getType();
+  auto load = conversion.getInput().getDefiningOp<riscv::LoadOp>();
+  if (conversion.getConversion().getKind() != "local_load" || !load ||
+      load.getSnapshotStorage() || riscv::storageOrigins(load.getResult()).isOwnedLocal() ||
+      input.getShape() != output.getShape() || input.getAxisIds() != output.getAxisIds() ||
+      input.getElementType() != output.getElementType())
+    return {};
+  return load;
+}
+
 bool riscv_internal::isCompleteLocalRead(riscv::ConvertLayoutOp conversion) {
   auto input = conversion.getInput().getType(), result = conversion.getResult().getType();
   if (conversion.getConversion().getKind() != "local_load" ||

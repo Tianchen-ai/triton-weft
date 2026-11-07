@@ -1,4 +1,5 @@
 #include "Transforms/Contraction/ContractionSupply.h"
+#include "Analysis/LocalMemory.h"
 #include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -199,7 +200,13 @@ riscv_internal::queryContractionSupply(mlir::Value value) {
       break;
     }
     if (auto conversion = current.getDefiningOp<riscv::ConvertLayoutOp>()) {
-      if (conversion.getConversion().getEffect() != "pure") break;
+      if (conversion.getConversion().getEffect() != "pure") {
+        if (!deferredLocalCapacityRead(conversion))
+          break;
+        // A selected local capacity is not a completed private snapshot.
+        // Preserve the original read edge until its consumer checks aliasing
+        // and the read epoch; allocated local reads remain numerical inputs.
+      }
       current = conversion.getInput();
       continue;
     }

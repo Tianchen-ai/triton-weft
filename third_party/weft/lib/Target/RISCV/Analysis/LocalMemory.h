@@ -74,6 +74,10 @@ mlir::FailureOr<mlir::Value> memoryContains(mlir::IRRewriter &builder,
 // Time may occur on any axis, independently of the lane axis.
 bool isCompleteLocalRead(riscv::ConvertLayoutOp conversion);
 
+// A layout's local capacity on an external descriptor load has not allocated
+// or populated private storage. Consumers still prove read-epoch/alias motion.
+riscv::LoadOp deferredLocalCapacityRead(riscv::ConvertLayoutOp conversion);
+
 // Transfer an identical, fully initialized private object to a new numerical
 // snapshot when the previous identity is dead. Author stage metadata remains
 // on the destination binding; the removed copy does not erase that boundary.
