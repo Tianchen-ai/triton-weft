@@ -97,6 +97,11 @@ read-snapshot 分析闭合；没有局部读取实现的数值消费者继续物
 `encoded.field-read` 标记当作已闭合的向量实现。已选择的 interleaved 与规则窗口传输
 保留自己的读取合同与表示。
 
+具有保留轴的局部字段 gather 同样先闭合数值 backing。替换后沿 extract 与纯表示转换
+移除已经由数值投影完成的 encoded `field_read`，避免再次套用原 Encoding 地址。
+没有合法单条 local-gather leaf 的数值投影通过已有有界 load/store 程序展开，保留
+原坐标、读取快照、有效域与资源检查；terminal 不为未选指令补写 gather。
+
 已加载记录的 whole-byte natural 字段在 local storage projection 状态下保留 storage edge；
 record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry pass 根据实际消费者窗口和共享 alignment
 证明选择 byte-load/reinterpret，完整记录的别名快照仍由统一 read-snapshot pass

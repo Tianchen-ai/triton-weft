@@ -164,7 +164,12 @@ public:
                                constantProjection) &&
             !riscv_internal::sourceField(extract.getInput()) &&
             isa<IntegerType, FloatType>(extract.getInput().getType().getElementType());
-        if ((source && needsProgram(op)) || indexedNumeric)
+        bool unselectedLocal = source &&
+            extract.getLeaf().getEngine() == "unselected" &&
+            llvm::any_of(extract.getSelectors(), [](Attribute selector) {
+              return cast<StringAttr>(selector).getValue() == "gather";
+            });
+        if ((source && needsProgram(op)) || indexedNumeric || unselectedLocal)
           if (failed(extraction(extract, source ? source : extract.getInput()))) return failure();
         continue;
       }

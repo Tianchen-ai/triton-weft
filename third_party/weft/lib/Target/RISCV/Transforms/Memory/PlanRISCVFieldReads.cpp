@@ -256,13 +256,26 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
   int64_t identity = lastLocalIdentity(module);
   auto replaceNumericField = [&](riscv::FieldOp field, Value value) {
     SmallVector<riscv::FieldReadOp> readers;
-    for (Operation *user : field.getResult().getUsers())
-      if (auto read = dyn_cast<riscv::FieldReadOp>(user);
-          read && read.getIndices().empty())
-        readers.push_back(read);
+    SmallVector<Value> pending{field.getResult()};
+    llvm::DenseSet<Value> visited;
+    while (!pending.empty()) {
+      Value projected = pending.pop_back_val();
+      if (!visited.insert(projected).second) continue;
+      for (Operation *user : projected.getUsers()) {
+        if (auto read = dyn_cast<riscv::FieldReadOp>(user)) {
+          if (projected != field.getResult() || read.getIndices().empty())
+            readers.push_back(read);
+        }
+        else if (auto extract = dyn_cast<riscv::ExtractOp>(user))
+          pending.push_back(extract.getResult());
+        else if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(user);
+                 conversion && conversion.getConversion().getEffect() == "pure")
+          pending.push_back(conversion.getResult());
+      }
+    }
     for (auto read : readers) {
       b.setInsertionPoint(read);
-      Value result = value;
+      Value result = read.getInput() == field.getResult() ? value : read.getInput();
       auto actual = cast<riscv::ValueType>(result.getType());
       auto expected = read.getResult().getType();
       if (actual != expected)
@@ -282,9 +295,12 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     bool indexedLocal = value && value.getLayout().getCarrier() == "local" &&
         llvm::any_of(field.getResult().getUsers(), [](Operation *user) {
           auto extract = dyn_cast<riscv::ExtractOp>(user);
-          return extract && llvm::count_if(extract.getSelectors(), [](Attribute selector) {
+          if (!extract) return false;
+          auto gathers = llvm::count_if(extract.getSelectors(), [](Attribute selector) {
             return cast<StringAttr>(selector).getValue() == "gather";
-          }) > 1;
+          });
+          auto source = dyn_cast<riscv::ValueType>(extract.getInput().getType());
+          return gathers > 1 || (gathers && source && source.getShape().size() > 1);
         });
     if (isa<riscv::MemDescType>(field.getResult().getType())) {
       auto owner = dyn_cast<riscv::MemDescType>(field.getOwner().getType());
