@@ -624,7 +624,7 @@ setup(
     long_description="",
     license="MIT AND Apache-2.0",
     install_requires=[
-        "weft-core==0.1.0",
+        "weft-core==0.1.1",
         "importlib-metadata; python_version < '3.10'",
     ],
     packages=list(get_packages()),
