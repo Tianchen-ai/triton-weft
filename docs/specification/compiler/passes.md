@@ -90,9 +90,12 @@ natural、grouped/layered、joined 几何事实；byte/bit order 和 persistent 
 消费者读取。投影只穿过保持 shape/axis 的表示转换，并证明原 load 到消费者之间没有
 可能别名的写入；不能跨过作者 stage。失去消费者的字段和表示转换在展开前删除，避免
 为一个已经选择的单记录字段额外初始化、解码整份多记录数组。
-joined 字段若全部消费者已经是显式 field read、规则窗口读取或可直接供给的标量投影，
+joined 字段若全部消费者已经是具备标量坐标的 field read、规则窗口读取或可直接供给的标量投影，
 保留 Encoding 存储边，不先复制成完整数值数组。原 encoded load 的快照仍由同一
 read-snapshot 分析闭合；没有局部读取实现的数值消费者继续物化完整字段。
+完整 joined 数值字段的 local 与 RVV 消费者共用显式字节拼装程序，不能只把普通
+`encoded.field-read` 标记当作已闭合的向量实现。已选择的 interleaved 与规则窗口传输
+保留自己的读取合同与表示。
 
 已加载记录的 whole-byte natural 字段在 local storage projection 状态下保留 storage edge；
 record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry pass 根据实际消费者窗口和共享 alignment
