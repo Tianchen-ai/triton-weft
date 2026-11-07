@@ -1,6 +1,7 @@
 #include "Weft/Dialect/Kernel/Transforms/SourceSpecialization.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Analysis/IntegerFacts.h"
+#include "Weft/Analysis/IndexRelations.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"
@@ -142,6 +143,29 @@ public:
           return cast<StringAttr>(selector).getValue() == "all";
         })) return failure();
     rewriter.replaceOp(slice, slice.getBase());
+    return success();
+  }
+};
+
+class NormalizeBoundedGather : public OpRewritePattern<weft::kernel::ExtractOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::ExtractOp extract,
+                               PatternRewriter &rewriter) const override {
+    auto table = dyn_cast<weft::kernel::ValueType>(extract.getInput().getType());
+    if (!table || table.getShape().size() != 1 || table.getShape()[0] <= 0 ||
+        extract.getIndices().size() != 1 || extract.getSelectors().size() != 1 ||
+        cast<StringAttr>(extract.getSelectors()[0]).getValue() != "gather")
+      return failure();
+    Value indices = extract.getIndices()[0];
+    if (!weft::analysis::hasUnsignedBound(indices, table.getShape()[0]))
+      return failure();
+    // A fully bounded one-axis numerical gather is the same table operation
+    // as an explicit lookup. Preserve both SSA snapshots and the index domain;
+    // no load, alias boundary or author traversal is introduced here.
+    rewriter.replaceOpWithNewOp<weft::kernel::LookupOp>(extract,
+        extract.getResult().getType(), extract.getInput(), indices,
+        rewriter.getStringAttr("in_bounds"));
     return success();
   }
 };
@@ -441,7 +465,8 @@ public:
     scf::WhileOp::getCanonicalizationPatterns(patterns, &getContext());
     patterns.add<PushCoordinateRename, FoldScalarProjection, FoldStaticSubviewOffsets,
                  FoldIdentitySlice, FoldScalarInteger, FoldScalarIntegerCompare,
-                 FoldConstantIf, NormalizeScalarSelect, EraseUnusedEmpty>(&getContext());
+                 FoldConstantIf, NormalizeScalarSelect, NormalizeBoundedGather,
+                 EraseUnusedEmpty>(&getContext());
     // Dead control carries can be the only extra consumer of a coordinate
     // rename. Revisit both in the same bounded worklist, so deleting a carry
     // exposes the producer to the existing single-consumer rewrite. Folding

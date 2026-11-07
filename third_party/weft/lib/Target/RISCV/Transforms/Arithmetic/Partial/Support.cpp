@@ -1534,6 +1534,75 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
   }
 
   if (auto extract = mlir::dyn_cast<riscv::ExtractOp>(definition)) {
+    auto pattern = extract->getAttrOfType<mlir::DenseI64ArrayAttr>("index_pattern");
+    if (pattern && extract.getIndices().empty() && pattern.size() == 3 &&
+        extract.getSelectors().size() == 1 &&
+        mlir::cast<mlir::StringAttr>(extract.getSelectors()[0]).getValue() == "regular") {
+      if (sourceType.getShape().size() != 1 || pattern[0] < 0 ||
+          pattern[1] <= 0 || pattern[2] <= 0 ||
+          sourceType.getShape()[0] > std::numeric_limits<uint32_t>::max())
+        return mlir::failure();
+      int64_t maximumOffset = 0;
+      if (!checkedScale((sourceType.getShape()[0] - 1) / pattern[2],
+                        pattern[1], maximumOffset) ||
+          pattern[0] > std::numeric_limits<uint32_t>::max() ||
+          maximumOffset > std::numeric_limits<uint32_t>::max() - pattern[0])
+        return mlir::failure();
+      // A regular relation is relative to the complete result domain. Shrinking
+      // only its result type would read the first window for every issue. Make
+      // the issue's global coordinates explicit before re-planning the access.
+      auto element = mlir::IntegerType::get(rewriter.getContext(), 32,
+                                            mlir::IntegerType::Unsigned);
+      int64_t lmul = 0;
+      for (int64_t legal : target.getLegalLMULEighths().asArrayRef())
+        if (legal * target.getVlenBits() >= windowExtent * 32 * 8 &&
+            (lmul == 0 || legal < lmul))
+          lmul = legal;
+      if (!lmul)
+        return mlir::failure();
+      auto layout = riscv::LayoutAttr::get(
+          rewriter.getContext(), "rvv", sourceType.getAxisIds(),
+          rewriter.getDenseI64ArrayAttr({1}),
+          rewriter.getDenseI64ArrayAttr({windowExtent}),
+          rewriter.getDenseI64ArrayAttr({1}),
+          rewriter.getDenseI64ArrayAttr({1}),
+          rewriter.getDenseI64ArrayAttr({1}), 32, lmul, windowExtent,
+          std::max<int64_t>(1, (lmul + 7) / 8), "full");
+      if (!riscv::supportsRVVLayout(target, layout))
+        return mlir::failure();
+      auto indexType = riscv::ValueType::get(
+          rewriter.getContext(), element, resultType.getShape(),
+          resultType.getAxisIds(), layout);
+      mlir::Value coordinates = riscv::IotaOp::create(
+          rewriter, extract.getLoc(), indexType, 0, windowExtent,
+          riscv_internal::unselectedLeaf(rewriter));
+      auto number = [&](int64_t value) -> mlir::Value {
+        return riscv::ConstantOp::create(rewriter, extract.getLoc(), element,
+                                         rewriter.getIntegerAttr(element, value));
+      };
+      auto binary = [&](llvm::StringRef kind, mlir::Value a, mlir::Value b,
+                        mlir::Type type) -> mlir::Value {
+        return riscv::BinaryOp::create(rewriter, extract.getLoc(), type, a, b,
+                                       kind, riscv_internal::unselectedLeaf(rewriter));
+      };
+      mlir::Value issue = riscv::CastOp::create(
+          rewriter, extract.getLoc(), element, windowIndex,
+          riscv_internal::unselectedLeaf(rewriter));
+      auto offset = binary("mul", issue, number(windowExtent), element);
+      coordinates = binary("add", coordinates, offset, indexType);
+      if (pattern[2] != 1)
+        coordinates = binary("div", coordinates, number(pattern[2]), indexType);
+      if (pattern[1] != 1)
+        coordinates = binary("mul", coordinates, number(pattern[1]), indexType);
+      if (pattern[0])
+        coordinates = binary("add", coordinates, number(pattern[0]), indexType);
+      auto cloned = riscv::ExtractOp::create(
+          rewriter, extract.getLoc(), resultType, extract.getInput(),
+          mlir::ValueRange{coordinates},
+          rewriter.getArrayAttr({rewriter.getStringAttr("gather")}),
+          extract.getAccess(), riscv_internal::unselectedLeaf(rewriter));
+      return remember(cloned.getResult());
+    }
     llvm::SmallVector<mlir::Value> indices;
     for (mlir::Value index : extract.getIndices()) {
       auto cloned = cloneOperand(index);

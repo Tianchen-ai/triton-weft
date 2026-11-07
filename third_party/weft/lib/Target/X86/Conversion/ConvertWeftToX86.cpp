@@ -3499,6 +3499,10 @@ private:
       linear = arith::SelectOp::create(b, loc, selectedActive, linear, indexConstant(loc, 0));
       Value address = arith::IndexCastOp::create(b, loc, b.getI64Type(), linear);
       Type selectedType = packedType(source.getType()) ? Type(b.getI8Type()) : scalar(source.getType());
+      auto extract = [&](Value value, Type element) -> Value {
+        if (!isa<VectorType>(value.getType())) return value;
+        return operation(loc, "llvm.extractelement", element, {value, address});
+      };
       if (update) {
         Value selected = mapped(update);
         Value selectedMask = valid(update, loc);
@@ -3507,15 +3511,20 @@ private:
         if (isa<VectorType>(selectedMask.getType()))
           selectedMask = vector::ExtractOp::create(b, loc, selectedMask, ArrayRef<int64_t>{lane});
         selected = arith::SelectOp::create(b, loc, selectedActive, selected,
-            operation(loc, "llvm.extractelement", selectedType, {output, address}));
+            extract(output, selectedType));
         selectedMask = arith::SelectOp::create(b, loc, selectedActive, selectedMask,
-            operation(loc, "llvm.extractelement", b.getI1Type(), {outputMask, address}));
-        output = operation(loc, "llvm.insertelement", outputType, {output, selected, address});
-        outputMask = operation(loc, "llvm.insertelement", outputMaskType, {outputMask, selectedMask, address});
+            extract(outputMask, b.getI1Type()));
+        if (isa<VectorType>(outputType)) {
+          output = operation(loc, "llvm.insertelement", outputType, {output, selected, address});
+          outputMask = operation(loc, "llvm.insertelement", outputMaskType, {outputMask, selectedMask, address});
+        } else {
+          output = selected;
+          outputMask = selectedMask;
+        }
       } else {
-        Value selected = operation(loc, "llvm.extractelement", selectedType, {mapped(source), address});
+        Value selected = extract(mapped(source), selectedType);
         Value selectedMask = arith::AndIOp::create(b, loc, selectedActive,
-            operation(loc, "llvm.extractelement", b.getI1Type(), {valid(source, loc), address}));
+            extract(valid(source, loc), b.getI1Type()));
         if (isa<VectorType>(outputType)) {
           Value position = arith::ConstantIntOp::create(b, loc, lane, 64);
           output = operation(loc, "llvm.insertelement", outputType, {output, selected, position});

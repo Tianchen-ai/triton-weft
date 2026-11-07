@@ -276,6 +276,14 @@ private:
       if (type.getShape() != graph.domain.getShape() ||
           type.getAxisIds() != graph.domain.getAxisIds() ||
           type.getLayout().getValidity() != "full") continue;
+      // Register tuples retain successive issues of one axis. Other axes are
+      // traversed by the surrounding physical loop, rather than retained in
+      // this tuple; their full extent cannot use a single issue's factors.
+      if (llvm::any_of(llvm::enumerate(type.getShape().asArrayRef()),
+                       [&](const auto &item) {
+                         return int64_t(item.index()) != graph.lanePosition &&
+                                item.value() != 1;
+                       })) continue;
       auto tile = piece(type, graph.width, target, false);
       if (!tile || tile.getLayout().getCarrier() != "rvv" ||
           tile.getLayout().getReplicaGroup() != 1) continue;
@@ -717,17 +725,31 @@ private:
         Value scalar = mapping.lookupOrDefault(splat.getScalar());
         if (type.getLayout().getCarrier() == "scalar") {
           auto element = b.getIntegerType(32, false);
-          auto shape = type.getShape().asArrayRef(), axes = type.getAxisIds().asArrayRef();
+          int64_t count = 1;
+          for (int64_t extent : type.getShape().asArrayRef()) count *= extent;
+          SmallVector<int64_t> shape{count}, axes{type.getAxisIds()[0]};
           auto coordinateType = riscv::ValueType::get(b.getContext(), element,
-              type.getShape(), type.getAxisIds(), riscv_internal::scalarLayout(b, element, shape, axes));
+              b.getDenseI64ArrayAttr(shape), b.getDenseI64ArrayAttr(axes),
+              riscv_internal::scalarLayout(b, element, shape, axes));
           Value coordinate = riscv::IotaOp::create(b, op->getLoc(), coordinateType,
-              0, 1, riscv_internal::unselectedLeaf(b));
+              0, count, riscv_internal::unselectedLeaf(b));
           auto predicateType = riscv::ValueType::get(b.getContext(), b.getI1Type(),
-              type.getShape(), type.getAxisIds(), riscv_internal::scalarLayout(b, b.getI1Type(), shape, axes));
+              b.getDenseI64ArrayAttr(shape), b.getDenseI64ArrayAttr(axes),
+              riscv_internal::scalarLayout(b, b.getI1Type(), shape, axes));
           Value predicate = riscv::CompareOp::create(b, op->getLoc(), predicateType,
               coordinate, coordinate, "eq", riscv_internal::unselectedLeaf(b));
-          result = riscv::SelectOp::create(b, op->getLoc(), type, predicate,
+          auto unit = b.getDenseI64ArrayAttr({1});
+          auto flatLayout = riscv::LayoutAttr::get(b.getContext(), "scalar",
+              b.getDenseI64ArrayAttr(axes), unit, unit,
+              b.getDenseI64ArrayAttr(shape), unit, unit,
+              type.getLayout().getSew(), 0, 1, 0, "full");
+          auto flat = riscv::ValueType::get(b.getContext(), type.getElementType(),
+              b.getDenseI64ArrayAttr(shape), b.getDenseI64ArrayAttr(axes), flatLayout);
+          result = riscv::SelectOp::create(b, op->getLoc(), flat, predicate,
               scalar, scalar, riscv_internal::unselectedLeaf(b));
+          if (flat != type)
+            result = riscv::ReshapeOp::create(b, op->getLoc(), type, result,
+                flat.getAxisIds(), DenseI64ArrayAttr());
         } else {
           result = riscv::RVVSplatOp::create(b, op->getLoc(), type, scalar,
               riscv_internal::leaf(b, "rvv", "splat", "rvv.splat", "rvv.splat",
@@ -751,6 +773,34 @@ private:
             type.getShape()[0], riscv_internal::unselectedLeaf(b));
         result = riscv::BinaryOp::create(b, op->getLoc(), type, offsets, base,
             "add", riscv_internal::unselectedLeaf(b));
+      } else if (isa<riscv::RVVWidenMultiplyOp, riscv::RVVWidenAddOp>(op)) {
+        Value left = mapping.lookupOrDefault(op->getOperand(0));
+        Value right = mapping.lookupOrDefault(op->getOperand(1));
+        if (type.getLayout().getCarrier() == "scalar") {
+          auto widen = [&](Value input) -> Value {
+            auto cast = riscv::CastOp::create(b, op->getLoc(), type, input,
+                riscv_internal::unselectedLeaf(b));
+            riscv_internal::copyOrigin(op, cast);
+            return cast;
+          };
+          result = riscv::BinaryOp::create(b, op->getLoc(), type,
+              widen(left), widen(right), isa<riscv::RVVWidenMultiplyOp>(op) ? "mul" : "add",
+              riscv_internal::unselectedLeaf(b));
+        } else {
+          auto leaf = op->getAttrOfType<riscv::LeafAttr>("leaf");
+          auto leftType = cast<riscv::ValueType>(left.getType());
+          auto rightType = cast<riscv::ValueType>(right.getType());
+          auto selected = riscv_internal::leaf(b, leaf.getEngine(), leaf.getFamily(),
+              leaf.getInstruction(), leaf.getSpelling(),
+              leftType.getLayout().getRegisterGroups() + rightType.getLayout().getRegisterGroups(),
+              type.getLayout().getRegisterGroups(), leaf.getTemporaryGroups(),
+              leaf.getFragmentGroups(), leaf.getMask(), leaf.getTail(),
+              leaf.getParameters(), leaf.getLocalBytes());
+          if (isa<riscv::RVVWidenMultiplyOp>(op))
+            result = riscv::RVVWidenMultiplyOp::create(b, op->getLoc(), type, left, right, selected);
+          else
+            result = riscv::RVVWidenAddOp::create(b, op->getLoc(), type, left, right, selected);
+        }
       } else {
         Operation *computed = b.clone(*op, mapping);
         computed->getResult(0).setType(type);

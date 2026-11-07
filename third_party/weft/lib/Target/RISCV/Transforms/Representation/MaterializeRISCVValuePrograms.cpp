@@ -6,6 +6,7 @@
 #include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "Weft/Dialect/RISCV/IR/Stream.h"
 #include "Transforms/Representation/DenseValuePrograms.h"
+#include "Transforms/Contraction/DenseProducerGraph.h"
 #include "Transforms/Contraction/DenseIssue.h"
 #include "Analysis/LocalLifetime.h"
 #include "Analysis/ValueLiveness.h"
@@ -29,9 +30,7 @@ using namespace weft;
 namespace {
 
 bool pointwise(Operation *op) {
-  return isa<riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp,
-             riscv::SelectOp, riscv::CastOp, riscv::BitcastOp,
-             riscv::NarrowOp, riscv::WidenOp>(op);
+  return riscv_internal::isDensePointwise(op);
 }
 
 class ValuePrograms {

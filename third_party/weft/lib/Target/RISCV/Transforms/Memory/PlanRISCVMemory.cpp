@@ -5290,6 +5290,14 @@ public:
       auto scalarType = repeatedScalarSupplyType(rewriter, targetType);
       if (!usePlan || !scalarType)
         continue;
+      auto recordPositions = riscv::regularRepeatRecordPositions(
+          gather.getField().getType(), scalarType, gather.getSourceAxis(),
+          gather.getReductionAxis());
+      // A record supply represents every logical coordinate explicitly. The
+      // scalar-window broadcast below is legal only without a record prefix;
+      // keep the selected vector supply until that prefix has been projected.
+      if (recordPositions && !recordPositions->empty())
+        continue;
       llvm::SmallVector<int64_t> partBases;
       partBases.reserve(*replicas * *timeParts);
       bool inBounds = true;

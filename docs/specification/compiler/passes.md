@@ -14,6 +14,9 @@ SCF 化简产生的标量 `arith.select` 归一化为同操作数的 Canonical s
 分支值和结果类型；不能让上游合法化简产生后续 verifier 不接受的 operation。
 展开和轴关系闭合后复用 MLIR CSE，合并支配范围内相同的索引和纯数值表达式；
 source 的 `new/materialize` birth 在变换期间保持各自身份，不能因为初始值相同合并。
+一维数值快照的单轴 gather 在共同整数分析证明所有索引均处于表内时，
+归一化为同一 SSA 表与索引的 `lookup`。未知边界仍保持原投影及其有效性，
+不重读原存储，不改变作者的查表或遍历协议。
 每个 kernel 唯一的 root domain 是结构锚点；即使普通 Tensor 程序没有子 Level，
 它也不作为无使用的纯数值删除。目标转换消费该锚点，不产生运行时工作。
 完整、静态有效域上的零坐标标量投影消去纯 broadcast/extract 往返；相同坐标的
@@ -1019,6 +1022,9 @@ I16/I32/I64 向 2～7 位整数的普通截断先按合法 RVV 宽度缩到 byte
 typed dense read、保持坐标的 conversion 和逐元素 use-def；跨越 region 时必须递归证明
 只有读 effect，未知 effect 或无法闭合的投影停止选择。查询有界，不从算子名称恢复算法。普通 store 的便宜图若已能
 留在目标寄存器预算内，保留该表示；跨标量数学调用的长驻留及超预算图可采用有界 issue。
+已选 widening multiply/add 仍属于同一逐元素图；有界向量窗口重建其完整类型与资源，
+标量尾部保留显式扩宽后运算。寄存器 tuple 只保留实际支持的单轴完整输出，
+其它维度的完整范围不能套用一轮 issue 的布局因子。
 归约前的逐元素链在同一窗口内求值，完整初始化 lane accumulator，在原归约边界收敛一次。
 独占的 f32 multiply/add-reduce 沿既有 stream-dot 合同保持允许的 FMA contraction；product
 还有其它观察者时必须保留其数值结果。

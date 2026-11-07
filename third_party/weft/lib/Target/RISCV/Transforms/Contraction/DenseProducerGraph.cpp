@@ -17,7 +17,8 @@ using namespace weft::riscv_internal;
 bool riscv_internal::isDensePointwise(Operation *op) {
   return isa<riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp,
              riscv::SelectOp, riscv::CastOp, riscv::BitcastOp,
-             riscv::WidenOp, riscv::NarrowOp, riscv::RVVSplatOp>(op);
+             riscv::WidenOp, riscv::NarrowOp, riscv::RVVSplatOp,
+             riscv::RVVWidenMultiplyOp, riscv::RVVWidenAddOp>(op);
 }
 
 DenseProducerGraph::DenseProducerGraph(ArrayRef<Operation *> sinks)

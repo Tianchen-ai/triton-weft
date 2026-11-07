@@ -58,6 +58,11 @@ partition。只有time/lane/register/fragment/local各自的总分解一致时�
 把它拼写成零拷贝binding；否则必须在此前插入显式physical conversion或把candidate判非法，
 不能由emitter调整坐标顺序。
 
+issue-window 投影通过保形的轴重命名时，按位置追溯输入轴，保留相同的窗口坐标。
+已压缩为 `regular` 的索引关系仍按原完整域求值：先加入 issue 的全局 offset，
+再计算 repeat、stride 和 base。不能只缩短 result type 后重复读取第一个窗口；
+重建的有界索引继续经过已有访存选择与资源检查。
+
 完整轴置换允许 layout pass 显式记录 `part_order`，重命名完整 scalar/RVV register parts。
 verifier 逐一验证 result 的每个 logical coordinate 对应唯一 source part，且 lane 序号不变；
 emitter 只按已验证的映射重排 binding，不选择 layout、不生成 lane shuffle。需要改变 lane

@@ -183,6 +183,8 @@ mlir::LogicalResult selectPointerMemory(mlir::ModuleOp module) {
         if (conversion.getConversion().getEffect() != "pure") return {};
         value = conversion.getInput();
       }
+      if (auto splat = value.getDefiningOp<riscv::RVVSplatOp>())
+        return splat.getScalar();
       if (auto initial = value.getDefiningOp<riscv::NewOp>(); initial &&
           initial.getInitial() && !mlir::isa<riscv::ValueType>(initial.getInitial().getType()))
         return initial.getInitial();
