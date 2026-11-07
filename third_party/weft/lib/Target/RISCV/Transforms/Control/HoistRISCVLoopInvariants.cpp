@@ -1,6 +1,7 @@
 #include "Weft/Target/RISCV/RISCVPasses.h"
 
 #include "Transforms/Support/RISCVPhysicalSupport.h"
+#include "Analysis/ValueLiveness.h"
 #include "Weft/Analysis/PhysicalDependence.h"
 
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
@@ -104,6 +105,31 @@ public:
       // registered Write instance. Numeric SSA motion is a separate question.
       const bool canHoistReads = hasAtLeastIterations(loop, 1) &&
           weft::riscv::hasOnlyReadEffects(loop, true);
+      auto fitsHoistedResidency = [&](mlir::Operation *operation) {
+        bool hasRegisterPayload = false;
+        for (mlir::Value result : operation->getResults()) {
+          auto groups = weft::riscv_internal::residentRegisterGroups(result);
+          if (!groups) return false;
+          hasRegisterPayload |= *groups > 0;
+        }
+        if (!hasRegisterPayload) return true;
+        auto kernel = operation->getParentOfType<weft::riscv::KernelOp>();
+        if (!kernel) return false;
+        mlir::Operation *control = loop.getOperation();
+        auto before = weft::riscv_internal::registerPeak(*control->getBlock());
+        if (!before) return false;
+        // Extending a vector's lifetime over the complete loop can make all
+        // independently named coordinate tiles live together. Evaluate that
+        // actual placement before LICM turns a legal per-consumer graph into
+        // private snapshots. Restore the original position for the utility's
+        // normal move callback and rebuild liveness after every candidate.
+        mlir::Operation *next = operation->getNextNode();
+        operation->moveBefore(control);
+        auto after = weft::riscv_internal::registerPeak(*control->getBlock());
+        operation->moveBefore(next);
+        return after && after->total() <=
+            std::max<int64_t>(before->total(), kernel.getTarget().getVectorRegisters());
+      };
       auto regions = loop.getLoopRegions();
       mlir::moveLoopInvariantCode(
           regions,
@@ -111,6 +137,7 @@ public:
             return loop.isDefinedOutsideOfLoop(value);
           },
           [&](mlir::Operation *operation, mlir::Region *) {
+            if (!fitsHoistedResidency(operation)) return false;
             if (operation->getDialect() &&
                 operation->getDialect()->getNamespace() == "arith")
               return mlir::isMemoryEffectFree(operation);
