@@ -170,6 +170,33 @@ public:
   }
 };
 
+class FoldIdentityLookup : public OpRewritePattern<weft::kernel::LookupOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::LookupOp lookup,
+                               PatternRewriter &rewriter) const override {
+    namespace k = weft::kernel;
+    auto table = dyn_cast<k::ValueType>(lookup.getTable().getType());
+    auto indices = dyn_cast<k::ValueType>(lookup.getIndices().getType());
+    auto result = dyn_cast<k::ValueType>(lookup.getResult().getType());
+    if (!table || !indices || !result || table.getShape().size() != 1 ||
+        table.getShape()[0] <= 0 || indices.getShape() != table.getShape() ||
+        result.getShape() != table.getShape() ||
+        result.getElementType() != table.getElementType() ||
+        !weft::analysis::hasUnsignedBound(lookup.getIndices(), table.getShape()[0]) ||
+        !weft::analysis::hasNonWrappingUnitStride(
+            lookup.getIndices(), indices.getAxisIds()[0]))
+      return failure();
+    // N consecutive, non-wrapping indices within [0, N) select the original
+    // SSA coordinates. Only their axis names can differ; the read epoch and
+    // any state/stage birth remain on the original value.
+    if (table == result) rewriter.replaceOp(lookup, lookup.getTable());
+    else rewriter.replaceOpWithNewOp<k::ReshapeOp>(lookup, result,
+        lookup.getTable(), table.getAxisIds());
+    return success();
+  }
+};
+
 class EraseUnusedEmpty : public OpRewritePattern<weft::kernel::EmptyOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -466,6 +493,7 @@ public:
     patterns.add<PushCoordinateRename, FoldScalarProjection, FoldStaticSubviewOffsets,
                  FoldIdentitySlice, FoldScalarInteger, FoldScalarIntegerCompare,
                  FoldConstantIf, NormalizeScalarSelect, NormalizeBoundedGather,
+                 FoldIdentityLookup,
                  EraseUnusedEmpty>(&getContext());
     // Dead control carries can be the only extra consumer of a coordinate
     // rename. Revisit both in the same bounded worklist, so deleting a carry

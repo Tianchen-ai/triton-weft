@@ -17,6 +17,9 @@ source 的 `new/materialize` birth 在变换期间保持各自身份，不能因
 一维数值快照的单轴 gather 在共同整数分析证明所有索引均处于表内时，
 归一化为同一 SSA 表与索引的 `lookup`。未知边界仍保持原投影及其有效性，
 不重读原存储，不改变作者的查表或遍历协议。
+一维 SSA 表的完整恒等 lookup 复用共同索引分析：N 个连续、无回绕且处于 `[0,N)`
+的坐标直接使用原 Value，只保留必要的轴重命名。原读取快照和 state/stage birth
+不变；非零子区间、重复／乱序坐标以及无法证明的窄整数回绕保留真实 lookup。
 每个 kernel 唯一的 root domain 是结构锚点；即使普通 Tensor 程序没有子 Level，
 它也不作为无使用的纯数值删除。目标转换消费该锚点，不产生运行时工作。
 完整、静态有效域上的零坐标标量投影消去纯 broadcast/extract 往返；相同坐标的
@@ -93,6 +96,7 @@ natural、grouped/layered、joined 几何事实；byte/bit order 和 persistent 
 joined 字段若全部消费者已经是具备标量坐标的 field read、规则窗口读取或可直接供给的标量投影，
 保留 Encoding 存储边，不先复制成完整数值数组。原 encoded load 的快照仍由同一
 read-snapshot 分析闭合；没有局部读取实现的数值消费者继续物化完整字段。
+标量投影同时涵盖普通整数／浮点／index 结果及 scalar carrier 的 shaped Value。
 完整 joined 数值字段的 local 与 RVV 消费者共用显式字节拼装程序，不能只把普通
 `encoded.field-read` 标记当作已闭合的向量实现。已选择的 interleaved 与规则窗口传输
 保留自己的读取合同与表示。

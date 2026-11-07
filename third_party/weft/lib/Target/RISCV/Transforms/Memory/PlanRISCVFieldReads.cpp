@@ -63,8 +63,12 @@ bool hasOnlyProjectedJoinedReads(Value value) {
     if (auto extract = dyn_cast<riscv::ExtractOp>(user)) {
       // A scalar coordinate (including scalar replicas) is implemented by
       // the existing encoded field read, without a complete numeric backing.
-      auto result = dyn_cast<riscv::ValueType>(extract.getResult().getType());
-      if (!result || result.getLayout().getCarrier() != "scalar") return false;
+      Type resultType = extract.getResult().getType();
+      if (auto result = dyn_cast<riscv::ValueType>(resultType)) {
+        if (result.getLayout().getCarrier() != "scalar") return false;
+      } else if (!isa<IntegerType, FloatType, IndexType>(resultType)) {
+        return false;
+      }
       continue;
     }
     if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(user)) {
