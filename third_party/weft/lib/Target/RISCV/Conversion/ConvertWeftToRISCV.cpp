@@ -1390,7 +1390,31 @@ private:
     } else if (mlir::isa<kernel::LookupOp>(source)) {
       addAccess(attrs);
       addLeaf(attrs);
-      targetName = riscv::LookupOp::getOperationName();
+      auto lookup = mlir::cast<kernel::LookupOp>(source);
+      auto table = mlir::dyn_cast<riscv::ValueType>(operands.front().getType());
+      auto element = table ? mlir::dyn_cast<mlir::IntegerType>(table.getElementType())
+                           : mlir::IntegerType();
+      auto field = operands.front().getDefiningOp<riscv::FieldOp>();
+      auto owner = field ? mlir::dyn_cast<riscv::ValueType>(field.getOwner().getType())
+                         : riscv::ValueType();
+      bool payload = owner && table && !owner.getAxisIds().empty() &&
+          llvm::is_contained(table.getAxisIds().asArrayRef(), owner.getAxisIds().asArrayRef().back());
+      // Canonical bounded-gather normalization retains the field SSA value.
+      // Keep its Encoding projection on the physical edge so ordinary field
+      // memory planning can select strided/segment reads at the original epoch.
+      // A computed numeric table still uses the normal snapshot lookup path.
+      if (lookup.getBounds() == "in_bounds" && table &&
+          table.getShape().size() == 1 && table.getShape()[0] > 0 &&
+          element && element.getWidth() >= 8 && payload) {
+        llvm::erase_if(attrs, [](mlir::NamedAttribute attribute) {
+          return attribute.getName() == "bounds";
+        });
+        attrs.emplace_back(builder.getStringAttr("selectors"),
+            builder.getArrayAttr({builder.getStringAttr("gather")}));
+        targetName = riscv::ExtractOp::getOperationName();
+      } else {
+        targetName = riscv::LookupOp::getOperationName();
+      }
     } else {
       return source->emitError(
           "ConvertWeftToRISCV has no physical operation for this canonical op");

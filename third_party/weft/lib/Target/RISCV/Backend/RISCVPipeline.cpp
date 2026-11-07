@@ -206,6 +206,9 @@ constexpr Entry prefix[] = {
     {PassID::CanonicalizeLayouts, "representation"},
     {PassID::Memory, "representation"},
     {PassID::Select, "representation"},
+    // Freeze regular encoded transfers while their affine coordinates still
+    // describe storage, before shared/dense realization creates numeric tiles.
+    {PassID::ReplicaLoads, "representation"},
     {PassID::SharedSupply, "representation"},
     {PassID::PrepareComposites, "program-materialization"},
     {PassID::DenseContractions, "program-materialization"},
@@ -214,6 +217,9 @@ constexpr Entry prefix[] = {
     {PassID::PanelTransfers, "program-materialization"},
     {PassID::DenseFragments, "program-materialization"},
     {PassID::Fragments, "program-materialization"},
+    // Close exact integer mul/add consumers before dense realization charges
+    // and stores their separate intermediate values.
+    {PassID::IntegerMACs, "program-materialization"},
     {PassID::ConsumerLayouts, "program-materialization"},
     {PassID::Values, "program-materialization"},
     {PassID::Programs, "program-materialization"},

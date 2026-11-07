@@ -27,6 +27,16 @@
 再使用子 Level 的相对分组坐标从私有存储中选择标量。标量与 shaped 消费者保持
 相同的读取时点和生命周期；选择分组不会重新读取 encoded 源存储。
 
+一维 encoded payload field 的有界 lookup 保留字段的物理供给边，使规则坐标能够使用
+strided 或 segment 访存。interleave 中逐 record 标量字段的 cohort 在坐标改名
+需要数值结果时，复用已有的字节安全字段传输；两者都保留原读取 epoch 和别名检查。
+Affine 供给分析保留数值不变的整数转换及完整 row-major reshape 拆分的坐标关系，
+转换须由共同整数范围证明排除回绕或饱和；非 affine reshape 仍保留显式转换。
+字段规划因此能够继续消费原 Encoding 关系，不因坐标改名而单独物化索引数组。
+逐 record 标量字段保留外层 record 坐标；选择 record 不能变成标量 metadata 内的元素偏移。
+单消费者的整数 fragment 运算也可跨越纯位置轴改名：先按原坐标计算，在数值出口恢复
+结果轴，保留显式 birth，使已有 fragment pointwise 与 MMA 累加器复用继续生效。
+
 ## 资源分析
 
 目标 profile 提供向量宽度、架构寄存器事实、支持指令与策略预算。

@@ -107,8 +107,16 @@ void decomposeAffineAxes(mlir::Value value, int64_t coefficient,
     decomposeAffineAxes(conversion.getInput(), coefficient, result, depth + 1);
     return;
   }
-  if (auto cast = value.getDefiningOp<riscv::CastOp>()) {
-    decomposeAffineAxes(cast.getInput(), coefficient, result, depth + 1);
+  if (auto input = riscv_internal::exactIntegerCoordinateInput(value)) {
+    decomposeAffineAxes(input, coefficient, result, depth + 1);
+    return;
+  }
+  if (auto reshape = value.getDefiningOp<riscv::ReshapeOp>()) {
+    AffineAxes source;
+    decomposeAffineAxes(reshape.getInput(), coefficient, source, depth + 1);
+    if (!source.valid || !riscv_internal::remapAffineCoordinates(reshape, source.coefficients))
+      return result.valid = false, void();
+    for (auto [axis, scale] : source.coefficients) addAxisCoefficient(result, axis, scale);
     return;
   }
   if (auto iota = value.getDefiningOp<riscv::IotaOp>()) {
@@ -608,9 +616,13 @@ bool hasCompleteLinearConsumer(mlir::Value root) {
       if (!visited.insert(user).second) continue;
       if (auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(user)) {
         auto output = reshape.getResult().getType();
+        auto outputElements =
+            riscv_internal::staticProduct(output.getShape().asArrayRef());
         if (reshape.getInput() == value &&
             llvm::equal(reshape.getOrder(), source.getAxisIds().asArrayRef()) &&
-            output.getShape().size() == 1 && output.getShape()[0] == *elements)
+            (output.getShape().size() == 1 ||
+             output.getShape().size() < source.getShape().size()) &&
+            outputElements && *outputElements == *elements)
           return true;
       }
       if (!layoutPreservingPointwise(user) || user->getNumResults() != 1) continue;

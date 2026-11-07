@@ -147,6 +147,15 @@ public:
   }
 };
 
+bool hasEncodedPayloadAxis(Value value) {
+  auto field = value.getDefiningOp<weft::kernel::FieldOp>();
+  if (!field) return false;
+  auto owner = dyn_cast<weft::kernel::ValueType>(field.getOwner().getType());
+  auto result = dyn_cast<weft::kernel::ValueType>(value.getType());
+  return owner && result && !owner.getAxisIds().empty() &&
+      llvm::is_contained(result.getAxisIds().asArrayRef(), owner.getAxisIds().asArrayRef().back());
+}
+
 class NormalizeBoundedGather : public OpRewritePattern<weft::kernel::ExtractOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -156,6 +165,11 @@ public:
     if (!table || table.getShape().size() != 1 || table.getShape()[0] <= 0 ||
         extract.getIndices().size() != 1 || extract.getSelectors().size() != 1 ||
         cast<StringAttr>(extract.getSelectors()[0]).getValue() != "gather")
+      return failure();
+    // Retain grouped payload projections until target memory planning. A
+    // scalar-per-record field instead has only outer record axes: an identity
+    // gather there is an ordinary numeric axis rename, not a payload window.
+    if (hasEncodedPayloadAxis(extract.getInput()))
       return failure();
     Value indices = extract.getIndices()[0];
     if (!weft::analysis::hasUnsignedBound(indices, table.getShape()[0]))
@@ -182,6 +196,8 @@ public:
     if (!table || !indices || !result || table.getShape().size() != 1 ||
         table.getShape()[0] <= 0 || result.getShape() != indices.getShape() ||
         result.getElementType() != table.getElementType())
+      return failure();
+    if (hasEncodedPayloadAxis(lookup.getTable()))
       return failure();
     int64_t elements = 1;
     for (int64_t extent : indices.getShape().asArrayRef()) {

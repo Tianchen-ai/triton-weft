@@ -395,8 +395,10 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     // A scalar field distributed across a declared interleave cohort already
     // has unit-byte and indexed-byte RVV transfers. Their selected byte loads
     // preserve the original alignment and avoid a scalar assembly buffer.
-    bool cohortWord = naturalWord && bits <= 32 && facts.scalarPerRecord && value &&
-        value.getLayout().getCarrier() == "rvv" && interleaveRows(field, encoding) > 0;
+    bool cohortWordGeometry =
+        ((naturalWord && bits <= 32) || (bits == 8 && facts.bitOffset % 8 == 0)) &&
+        facts.scalarPerRecord && value && interleaveRows(field, encoding) > 0;
+    bool cohortWord = cohortWordGeometry && value.getLayout().getCarrier() == "rvv";
     bool numericUnaligned = facts.alignment < bits / 8 && !scalarWord && !cohortWord &&
         (!value || value.getLayout().getCarrier() != "local");
     // A noncontiguous record window cannot use the contiguous byte-snapshot
@@ -421,18 +423,24 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
       auto groups = riscv_internal::operationRegisterGroups(user);
       return !groups || *groups > target.getVectorRegisters();
     });
+    bool joinedRecordArray = owner.getShape().size() > 1 &&
+        facts.mapping == "joined" && !scalarWord && !cohortWord;
     bool general = numericSnapshot || renamedCoordinates || numericJoined || indexedLocal || oversizedProjection || (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
-        (owner.getShape().size() > 1 && facts.mapping == "joined");
+        joinedRecordArray;
     if (!general) continue;
-    // A whole, naturally aligned one-axis field can be captured by its normal
-    // RVV transfer, then saved with the existing local-value conversion. A
-    // positional rename alone does not require byte-by-byte assembly.
-    if (renamedCoordinates && value && value.getShape().size() == 1 &&
-        value.getShape()[0] > 0 && facts.mapping == "natural" && bits % 8 == 0 &&
-        facts.alignment >= bits / 8 && field.getOwner() == load.getResult() &&
+    // A whole one-axis field can be captured by its normal RVV transfer,
+    // including an interleaved scalar-per-record cohort's byte-safe read.
+    // Positional renaming does not require a scalar assembly buffer.
+    if (value && value.getShape().size() == 1 &&
+        value.getShape()[0] > 0 && bits % 8 == 0 &&
+        ((renamedCoordinates && facts.mapping == "natural" &&
+          facts.alignment >= bits / 8) || cohortWordGeometry) &&
+        field.getOwner() == load.getResult() &&
         !needsReadSnapshot(load)) {
-      auto readType = valuePieceType(b, value, value.getAxisIds()[0], value.getShape()[0], target,
-          value.getLayout().getValidity() != "full");
+      auto readType = cohortWordGeometry && value.getLayout().getCarrier() == "scalar"
+          ? value
+          : valuePieceType(b, value, value.getAxisIds()[0], value.getShape()[0], target,
+              value.getLayout().getValidity() != "full");
       auto access = readType ? selectAccess(field, readType) : riscv::AccessAttr();
       auto temporary = readType ? riscv::fieldReadTemporaryGroups(field.getResult(), readType, access, {})
                                 : std::nullopt;

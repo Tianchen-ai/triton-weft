@@ -11,6 +11,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <optional>
@@ -192,6 +193,9 @@ bool knownMultipleOf(mlir::Value value, int64_t divisor,
                      unsigned depth = 0);
 std::optional<IntegerRange> integerRange(mlir::Value value,
                                          unsigned depth = 0);
+mlir::Value exactIntegerCoordinateInput(mlir::Value value);
+bool remapAffineCoordinates(riscv::ReshapeOp reshape,
+                           llvm::DenseMap<int64_t, int64_t> &coefficients);
 std::optional<int64_t> maximumMagnitude(mlir::Value value);
 mlir::Value stripRepresentationConversions(
     mlir::Value value,

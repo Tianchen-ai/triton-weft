@@ -436,6 +436,35 @@ mlir::Value exactIntegerExtensionInput(mlir::Value value) {
   return input;
 }
 
+bool feedsStorageCoordinate(mlir::Value root) {
+  llvm::SmallVector<mlir::Value> pending{root};
+  llvm::SmallPtrSet<mlir::Operation *, 32> visited;
+  while (!pending.empty()) {
+    auto value = pending.pop_back_val();
+    for (auto &use : value.getUses()) {
+      auto *user = use.getOwner();
+      if (llvm::any_of(user->getResultTypes(), [](mlir::Type type) {
+            return mlir::isa<riscv::MemDescType, riscv::PointType>(type);
+          })) return true;
+      if ((mlir::isa<riscv::ExtractOp, riscv::SliceOp, riscv::SubviewOp,
+                     riscv::FieldReadOp>(user) && use.getOperandNumber() > 0) ||
+          (mlir::isa<riscv::LookupOp, riscv::PointerLoadOp,
+                     riscv::PointerStoreOp, riscv::PointerAtomicOp>(user) && use.getOperandNumber() == 1))
+        return true;
+      if (!mlir::isa<riscv::UnaryOp, riscv::BinaryOp, riscv::CastOp,
+                     riscv::WidenOp, riscv::NarrowOp, riscv::ReshapeOp,
+                     riscv::ConvertLayoutOp, riscv::RVVAxisBroadcastOp,
+                     riscv::RVVSplatOp, riscv::RegisterMaterializeOp>(user) || !visited.insert(user).second)
+        continue;
+      if (visited.size() > 128) return true;
+      auto element = mlir::dyn_cast<mlir::IntegerType>(
+          riscv_internal::logicalElement(user->getResult(0).getType()));
+      if (element) pending.push_back(user->getResult(0));
+    }
+  }
+  return false;
+}
+
 void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
   llvm::SmallVector<riscv::BinaryOp> additions;
   module.walk([&](riscv::BinaryOp op) {
@@ -444,7 +473,8 @@ void selectScalarPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter)
   for (auto add : additions) {
     auto kernel = add->getParentOfType<riscv::KernelOp>();
     auto result = mlir::dyn_cast<riscv::ValueType>(add.getResult().getType());
-    if (!kernel || kernel.getResourcesMaterialized() || !result) continue;
+    if (!kernel || kernel.getResourcesMaterialized() || !result ||
+        feedsStorageCoordinate(add.getResult())) continue;
     for (unsigned side = 0; side < 2; ++side) {
       auto product = add->getOperand(side).getDefiningOp<riscv::BinaryOp>();
       auto accumulator = add->getOperand(1 - side);
@@ -536,7 +566,8 @@ void selectWidenPointwiseMAC(mlir::ModuleOp module, mlir::IRRewriter &rewriter) 
   for (auto add : additions) {
     auto kernel = add->getParentOfType<riscv::KernelOp>();
     auto type = mlir::dyn_cast<riscv::ValueType>(add.getResult().getType());
-    if (!kernel || kernel.getResourcesMaterialized() || !type) continue;
+    if (!kernel || kernel.getResourcesMaterialized() || !type ||
+        feedsStorageCoordinate(add.getResult())) continue;
     for (unsigned side = 0; side < 2; ++side) {
       auto product = add->getOperand(side).getDefiningOp<riscv::RVVWidenMultiplyOp>();
       auto accumulator = add->getOperand(1 - side);

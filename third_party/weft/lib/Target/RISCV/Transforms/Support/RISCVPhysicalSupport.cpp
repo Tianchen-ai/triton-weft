@@ -2178,6 +2178,66 @@ riscv_internal::integerRange(mlir::Value value, unsigned depth) {
   });
 }
 
+mlir::Value riscv_internal::exactIntegerCoordinateInput(mlir::Value value) {
+  auto *operation = value.getDefiningOp();
+  if (!mlir::isa_and_nonnull<riscv::CastOp, riscv::WidenOp, riscv::NarrowOp>(operation))
+    return {};
+  auto input = operation->getOperand(0);
+  auto from = mlir::dyn_cast<mlir::IntegerType>(logicalElement(input.getType()));
+  auto to = mlir::dyn_cast<mlir::IntegerType>(logicalElement(value.getType()));
+  if (!from || !to || from.isSignless() || to.isSignless()) return {};
+  auto range = integerRange(input);
+  return range && range->fits(to) ? input : mlir::Value();
+}
+
+bool riscv_internal::remapAffineCoordinates(
+    riscv::ReshapeOp reshape,
+    llvm::DenseMap<int64_t, int64_t> &coefficients) {
+  auto input = reshape.getInput().getType();
+  auto output = reshape.getResult().getType();
+  if (!llvm::equal(reshape.getOrder(), input.getAxisIds().asArrayRef())) return false;
+  for (auto [axis, coefficient] : coefficients)
+    if (!llvm::is_contained(input.getAxisIds().asArrayRef(), axis)) return false;
+  llvm::DenseMap<int64_t, int64_t> mapped;
+  if (input.getShape() == output.getShape()) {
+    for (auto [oldAxis, newAxis] : llvm::zip(input.getAxisIds().asArrayRef(),
+                                           output.getAxisIds().asArrayRef()))
+      if (auto found = coefficients.find(oldAxis); found != coefficients.end())
+        mapped[newAxis] = found->second;
+  } else {
+    auto elements = staticProduct(input.getShape().asArrayRef());
+    auto outputElements = staticProduct(output.getShape().asArrayRef());
+    if (!elements || *elements <= 0 || elements != outputElements) return false;
+    // Only a complete row-major affine ordinal crosses a split/merge here.
+    // Other expressions need a mixed-radix relation, not an axis-name guess.
+    std::optional<int64_t> unit;
+    int64_t stride = 1;
+    for (int64_t i = static_cast<int64_t>(input.getShape().size()) - 1; i >= 0; --i) {
+      int64_t extent = input.getShape()[i];
+      if (extent > 1) {
+        int64_t coefficient = coefficients.lookup(input.getAxisIds()[i]);
+        if (!unit) {
+          if (coefficient % stride) return false;
+          unit = coefficient / stride;
+        }
+        int64_t expected;
+        if (__builtin_mul_overflow(*unit, stride, &expected) || expected != coefficient)
+          return false;
+      }
+      if (__builtin_mul_overflow(stride, extent, &stride)) return false;
+    }
+    stride = 1;
+    for (int64_t i = static_cast<int64_t>(output.getShape().size()) - 1; i >= 0; --i) {
+      int64_t coefficient;
+      if (__builtin_mul_overflow(unit.value_or(0), stride, &coefficient)) return false;
+      if (output.getShape()[i] > 1 && coefficient) mapped[output.getAxisIds()[i]] = coefficient;
+      if (__builtin_mul_overflow(stride, output.getShape()[i], &stride)) return false;
+    }
+  }
+  coefficients = std::move(mapped);
+  return true;
+}
+
 std::optional<int64_t>
 riscv_internal::maximumMagnitude(mlir::Value value) {
   auto range = integerRange(value);

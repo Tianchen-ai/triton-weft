@@ -17,6 +17,26 @@ source 的 `new/materialize` birth 在变换期间保持各自身份，不能因
 一维数值快照的单轴 gather 在共同整数分析证明所有索引均处于表内时，
 归一化为同一 SSA 表与索引的 `lookup`。未知边界仍保持原投影及其有效性，
 不重读原存储，不改变作者的查表或遍历协议。
+直接 Encoding payload field 的投影保留 `extract`，不提前将其改成普通数值表或坐标 reshape；
+物理布局与字段供给规划仍须看见作者的 grouped/layered 关系。逐 record 标量字段只保留
+外层 record 轴，其恒等 gather 可按普通数值坐标改名，不能解释成 record 内字段索引。
+规则坐标供给通过共同整数范围证明穿过数值不变的 cast/widen/narrow，不能穿过可能回绕
+或饱和的转换。相同 shape 的坐标重命名按位置映射；完整 row-major affine ordinal 的
+split/merge 重新计算结果轴 stride。其它 mixed-radix 表达保持未证明，不能只按轴名重构。
+已能证明规则 Encoding 窗口的传输在 dense value realization 之前物理化；
+其坐标只参与地址选择，失去使用后清除，不能先独立生成一份数值索引数组再尝试恢复供给。
+精确整数 mul/add 在 fragment 物化后、dense 数值程序展开前使用同一 MAC 选择器闭合，
+使资源判断看到实际可复用的累加器，而非先为独立乘积和相加结果创建私有数组。
+晚期选择继续处理展开产生的局部运算；两次调用均保留原数值类型及单消费者条件。
+
+RISC-V 导入直接一维、至少 8 位整数 encoded payload field 的 `lookup(in_bounds)` 时，保留物理 `extract`
+供给边，由同一访存规划选择连续、strided 或 segment 读取。Canonical gather 的
+规范化不能强迫字段先变成完整私有数组，再逐标量查表。已经计算出的普通数值表
+仍采用原快照 lookup；别名写入检查及原读取 epoch 不变。
+fragment accumulator 的局部整数 pointwise 可穿过同 shape、行主序不变的轴改名：先在
+原 fragment 坐标上计算，再在数值出口恢复目标轴。该变换要求单消费者、同 block 和
+精确匹配的操作数坐标，不跨越显式 birth。兼容的整数 partial 因此仍由已有 fragment
+pointwise 与 MMA 累加器复用实现，不因匿名局部轴而先 unpack 两份完整结果。
 一维 SSA 表的完整恒等 lookup 复用共同索引分析：N 个连续、无回绕且处于 `[0,N)`
 的坐标直接使用原 Value，只保留必要的轴重命名。
 多轴坐标若在每条逻辑轴上具有 row-major stride，完整体积与表一致，且所有中间
@@ -472,8 +492,9 @@ signedness 来自 typed operands，继承完整 carrier、坐标及尾部，不�
 独立 pointwise 乘法的两个 widening 来源位宽不同时，若一侧已经是结果宽度的一半，
 另一侧更窄且 signedness 相同，可先显式扩展较窄侧到共同精度，再选择原有 widening
 multiply。原结果精度、全部 axes 和 carrier factors 必须闭合，不移动或放宽任何窄化。
-逐元素整数乘加的最终融合由访存决策之后的 `SelectRISCVIntegerMACs` 执行；这里保留
-地址算术的乘法与加法关系，供连续窗口、stride 和窄整数 wrap 分析使用。
+逐元素整数乘加由 `SelectRISCVIntegerMACs` 在 fragment 物化后和访存收口后选择；
+这里只确定独立运算的合法指令。坐标消费者保护保留地址算术的乘法与加法关系，
+供连续窗口、stride 和窄整数 wrap 分析使用。
 
 两个单 use 的整数 `widen` 若直接供给同一个 add，且窄 operands 的 signedness/type 与完整
 物理坐标相同、宽 result 保持 signedness 并具有双 SEW/LMUL，可以选择局部
@@ -1572,7 +1593,7 @@ tail passthrough 的 full-step leaf；其它 step 保留未更新 lane。整块�
 
 ### `SelectRISCVIntegerMACs`
 
-在 byte-window 分析与 memory specialization 之后、leaf finalization 之前，选择同 block、
+在 fragment 物化后、dense realization 前，以及 memory specialization 后、leaf finalization 前，选择同 block、
 单 use 的整数 pointwise 乘加。普通 vector/scalar 模乘加可形成 `rvv.vmacc.vx`，同型
 vector/vector 模乘加可形成 `rvv.vmacc.vv`；精确 widening
 来源和同结果 type 的 add 可形成合法的 widening vector/vector 或 vector/scalar MAC。
@@ -1583,8 +1604,9 @@ vector/vector 模乘加可形成 `rvv.vmacc.vv`；精确 widening
 整数 carrier；不能省略其截断、符号扩展或 zero extension。
 
 这项融合不在前期反复运行的 operation-family selection 中执行。地址分析需要看见
-`base * width + lane` 以及分段坐标的显式关系；过早形成不可分的 MAC 会隐藏连续访存证明，
-迫使后端保留逐元素 gather。访存形态确定后，仍存活的索引与普通数值表达式共用该 MAC 选择。
+`base * width + lane` 以及分段坐标的显式关系；MAC 选择沿整数表达式查询坐标消费者，
+保留供给 extract、lookup、指针偏移及 slice 的算术关系。纯 payload 乘加则在 dense
+realization 前闭合，避免独立乘积的私有存储；晚期调用继续处理新展开的数值表达式。
 vector/scalar 乘法的两端若来自同 signedness 的精确扩展，先检查 widening MAC 的完整
 坐标与目标合法性；不能因为扩展后的同宽 MAC 也合法就先选它，留下冗余向量 widen。
 没有合法 widening 关系时，同宽 MAC 继续按原输入选择，不改变显式窄化或累加精度。
@@ -1632,6 +1654,9 @@ emitter 重新判断。该折叠在资源闭合前完成，不改变 operand/res
 复用既有 access 与 result layout，不追穿已经计算的 numeric SSA，不改原 load/快照身份。
 `field_read` 的 Read effect、读取点和结果存活区间进入后续 CSE、snapshot 与资源核算；
 final pure `time_to_lane` 只允许已闭合的 numeric RVV pack，不保留 emitter 重读字段的例外。
+索引载体不能重读为更宽的 lane 读取时，先在原坐标上完成 scalar `field_read`，
+将有限 time 成员显式收为 scalar register replicas，再使用已有 `register_to_lane`。
+两个转换均保留完整有序坐标及已捕获的 SSA 值，不能让 emitter 重新查询 Encoding。
 已选的 register Extract 也是 numeric consumer：若它的 input 仍是 encoded storage
 projection，先形成同表示的 `field_read`；register gather 的 result 不能重新解释成地址。
 `PlanRISCVMemory` 对完整的一维寄存器表，可将已证明在表内的宽整数索引逐级精确缩窄到

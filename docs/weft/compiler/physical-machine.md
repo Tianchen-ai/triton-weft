@@ -34,6 +34,22 @@ that private storage using the sub-Level's relative group coordinate. Scalar and
 shaped consumers therefore retain the same read point and lifetime; selecting a
 group does not reread the encoded source.
 
+Bounded lookups on a one-axis encoded payload field retain that field's physical supply
+edge, so a regular coordinate pattern can use strided or segment memory access.
+Interleaved scalar-per-record cohorts use their existing byte-safe field transfer
+when a positional rename needs a numeric value. Both choices retain the original
+read epoch and its alias checks.
+Affine supply analysis retains coordinate relations across value-preserving
+integer casts and complete row-major reshape splits. The shared integer range
+proof must exclude wrapping or saturation; non-affine reshapes retain their
+explicit conversion. This lets storage planning consume the original Encoding
+relation without creating an index array solely because its axes were renamed.
+Scalar-per-record fields retain their outer record coordinates; selecting a
+record cannot become an element offset inside its scalar metadata word.
+Single-consumer integer fragment arithmetic also remains in fragment storage
+across a positional axis rename. The pass calculates in the original coordinates
+and restores the numeric result's axes at the exit, preserving explicit births.
+
 ## Resource analysis
 
 The target profile supplies vector width, register facts, supported instructions

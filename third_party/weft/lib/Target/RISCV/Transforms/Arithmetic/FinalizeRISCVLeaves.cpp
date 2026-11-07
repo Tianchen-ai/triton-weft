@@ -725,6 +725,25 @@ mlir::LogicalResult materializeFieldReads(mlir::ModuleOp module) {
     else {
       conversion.getInputMutable().assign(read.getResult());
       conversion.removeSourceAccessAttr();
+      if (kind == "time_to_lane" && readType.getLayout().getCarrier() == "scalar") {
+        auto coordinates = riscv::RegisterCoordinates::get(readType.getLayout());
+        if (!coordinates)
+          return conversion.emitError("numeric field pack has no complete scalar coordinates");
+        llvm::SmallVector<int64_t> one(readType.getShape().size(), 1);
+        auto layout = riscv::LayoutAttr::get(rewriter.getContext(), "scalar", readType.getAxisIds(),
+            rewriter.getDenseI64ArrayAttr(one), rewriter.getDenseI64ArrayAttr(one),
+            rewriter.getDenseI64ArrayAttr(coordinates->extents()),
+            rewriter.getDenseI64ArrayAttr(one), rewriter.getDenseI64ArrayAttr(one),
+            readType.getLayout().getSew(), 0, 1, 0, readType.getLayout().getValidity());
+        auto packedType = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(readType, layout));
+        auto tuple = riscv::ConvertLayoutOp::create(rewriter, conversion.getLoc(), packedType,
+            read.getResult(), riscv_internal::layoutConversion(rewriter, readType.getLayout(), layout),
+            riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
+        riscv_internal::copyOrigin(conversion, tuple);
+        conversion.getInputMutable().assign(tuple.getResult());
+        conversion.setConversionAttr(riscv_internal::layoutConversion(
+            rewriter, layout, conversion.getResult().getType().getLayout()));
+      }
       riscv_internal::selectLaneRepack(rewriter, conversion);
     }
   }

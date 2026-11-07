@@ -339,8 +339,19 @@ void decomposeShapedIndex(mlir::Value value, int64_t coefficient,
     decomposeShapedIndex(broadcast.getInput(), coefficient, result, depth + 1);
     return;
   }
-  if (auto cast = value.getDefiningOp<riscv::CastOp>()) {
-    decomposeShapedIndex(cast.getInput(), coefficient, result, depth + 1);
+  if (auto input = riscv_internal::exactIntegerCoordinateInput(value)) {
+    decomposeShapedIndex(input, coefficient, result, depth + 1);
+    return;
+  }
+  if (auto reshape = value.getDefiningOp<riscv::ReshapeOp>()) {
+    ShapedAffineIndex source;
+    decomposeShapedIndex(reshape.getInput(), coefficient, source, depth + 1);
+    if (!source.valid || !riscv_internal::remapAffineCoordinates(reshape, source.axisCoefficients))
+      return result.valid = false, void();
+    addConstant(result, source.constant);
+    if (source.scalarBase)
+      decomposeShapedIndex(source.scalarBase, source.scalarBaseCoefficient, result, depth + 1);
+    for (auto [axis, scale] : source.axisCoefficients) addAxisCoefficient(result, axis, scale);
     return;
   }
   if (auto iota = value.getDefiningOp<riscv::IotaOp>()) {
@@ -1217,6 +1228,8 @@ bool createInterleavedReplicaLoad(mlir::IRRewriter &rewriter,
   auto geometry = buildInterleavedReplicaGeometry(selectedType, recordRank);
   if (interleave <= 0 || !geometry || recordRank != 1 ||
       selectedType.getShape()[0] > interleave ||
+      (field.getAccess().getForm() != "strided" &&
+       field.getAccess().getForm() != "indexed") ||
       (field.getAccess().getMapping() != "natural" &&
        field.getAccess().getMapping() != "joined"))
     return false;

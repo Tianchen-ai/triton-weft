@@ -549,6 +549,48 @@ mlir::FailureOr<mlir::Value> weft::riscv_internal::materializeFragmentProduct(
 
 namespace {
 using namespace weft::riscv_internal;
+void exposeFragmentPointwise(mlir::IRRewriter &rewriter, mlir::ModuleOp module) {
+  llvm::SmallVector<riscv::BinaryOp> operations;
+  module.walk([&](riscv::BinaryOp operation) { operations.push_back(operation); });
+  for (auto operation : operations) {
+    if (operation.getKind() != "add" && operation.getKind() != "sub" && operation.getKind() != "mul")
+      continue;
+    auto left = operation.getLhs().getDefiningOp<riscv::ReshapeOp>();
+    auto right = operation.getRhs().getDefiningOp<riscv::ReshapeOp>();
+    if (!left && operation.getKind() != "sub") std::swap(left, right);
+    if (!left || !left.getResult().hasOneUse() || left->getBlock() != operation->getBlock() ||
+        left->hasAttr("birth_id")) continue;
+    auto input = left.getInput().getType(), output = left.getResult().getType();
+    if (input.getShape() != output.getShape() || input.getElementType() != output.getElementType() ||
+        !llvm::equal(left.getOrder(), input.getAxisIds().asArrayRef()) ||
+        operation.getResult().getType() != output) continue;
+    auto scalar = mlir::dyn_cast<mlir::IntegerType>(
+        (left.getResult() == operation.getLhs() ? operation.getRhs() : operation.getLhs()).getType());
+    if (right) {
+      if (!right.getResult().hasOneUse() || right->getBlock() != operation->getBlock() ||
+          right->hasAttr("birth_id") ||
+          right.getInput().getType() != input || right.getResult().getType() != output ||
+          !llvm::equal(right.getOrder(), input.getAxisIds().asArrayRef())) continue;
+    } else if (!scalar || scalar != input.getElementType()) continue;
+    if (!left.getInput().getDefiningOp<riscv::IMEUnpackOp>() &&
+        !(right && right.getInput().getDefiningOp<riscv::IMEUnpackOp>())) continue;
+    rewriter.setInsertionPoint(operation);
+    auto lhs = operation.getLhs() == left.getResult() ? left.getInput() :
+        right ? right.getInput() : operation.getLhs();
+    auto rhs = operation.getRhs() == left.getResult() ? left.getInput() :
+        right ? right.getInput() : operation.getRhs();
+    auto numeric = riscv::BinaryOp::create(rewriter, operation.getLoc(), input, lhs, rhs,
+        operation.getKind(), unselectedLeaf(rewriter));
+    copyOrigin(operation, numeric);
+    auto renamed = riscv::ReshapeOp::create(rewriter, operation.getLoc(), output,
+        numeric.getResult(), input.getAxisIds(), mlir::DenseI64ArrayAttr());
+    copyOrigin(operation, renamed);
+    rewriter.replaceOp(operation, renamed.getResult());
+    rewriter.eraseOp(left);
+    if (right) rewriter.eraseOp(right);
+  }
+}
+
 void retainFragmentPointwise(mlir::IRRewriter &rewriter, mlir::ModuleOp module) {
   llvm::SmallVector<riscv::BinaryOp> operations;
   module.walk([&](riscv::BinaryOp operation) { operations.push_back(operation); });
@@ -629,19 +671,24 @@ void retainFragmentAccumulators(
         !mma.getAccumulator().getDefiningOp<riscv::IMEZeroOp>())
       continue;
     mlir::Value numeric = unpack.getResult();
-    llvm::SmallVector<riscv::ConvertLayoutOp> handoff;
+    llvm::SmallVector<mlir::Operation *> handoff;
     while (numeric.hasOneUse()) {
-      auto conversion = mlir::dyn_cast<riscv::ConvertLayoutOp>(*numeric.getUsers().begin());
-      if (!conversion || conversion->getBlock() != unpack->getBlock() ||
-          conversion->hasAttr("birth_id") ||
-          conversion.getConversion().getKind() != "lane_repack" ||
-          conversion.getConversion().getEffect() != "pure") break;
+      auto *user = *numeric.getUsers().begin();
+      if (user->getBlock() != unpack->getBlock() || user->hasAttr("birth_id")) break;
       auto from = mlir::cast<riscv::ValueType>(numeric.getType());
-      auto to = conversion.getResult().getType();
-      if (from.getElementType() != to.getElementType() || from.getShape() != to.getShape() ||
-          from.getAxisIds() != to.getAxisIds()) break;
-      handoff.push_back(conversion);
-      numeric = conversion.getResult();
+      if (auto conversion = mlir::dyn_cast<riscv::ConvertLayoutOp>(user)) {
+        auto to = conversion.getResult().getType();
+        if (conversion.getConversion().getKind() != "lane_repack" ||
+            conversion.getConversion().getEffect() != "pure" ||
+            from.getElementType() != to.getElementType() || from.getShape() != to.getShape() ||
+            from.getAxisIds() != to.getAxisIds()) break;
+      } else if (auto rename = mlir::dyn_cast<riscv::ReshapeOp>(user)) {
+        auto to = rename.getResult().getType();
+        if (from.getElementType() != to.getElementType() || from.getShape() != to.getShape() ||
+            !llvm::equal(rename.getOrder(), from.getAxisIds().asArrayRef())) break;
+      } else break;
+      handoff.push_back(user);
+      numeric = user->getResult(0);
     }
     if (!numeric.hasOneUse()) continue;
     auto add = mlir::dyn_cast<riscv::BinaryOp>(*numeric.getUsers().begin());
@@ -667,12 +714,15 @@ void retainFragmentAccumulators(
     } else if (!carried.hasOneUse()) continue;
     const unsigned index = carried.getArgNumber() - 1;
     auto yield = mlir::cast<mlir::scf::YieldOp>(loop.getBody()->getTerminator());
-    auto initial = loop.getInitArgs()[index].getDefiningOp<riscv::NewOp>();
-    mlir::Value seed = initial ? initial.getInitial() : mlir::Value();
+    auto initializer = loop.getInitArgs()[index];
+    auto initial = initializer.getDefiningOp<riscv::NewOp>();
+    auto plainSplat = initializer.getDefiningOp<riscv::RVVSplatOp>();
+    mlir::Value seed = initial ? initial.getInitial() : initializer;
     if (auto splat = seed ? seed.getDefiningOp<riscv::RVVSplatOp>() : riscv::RVVSplatOp())
       seed = splat.getScalar();
-    if (!initial || !initial.getInitialized() || initial.getPlacement() != "register" ||
-        !initial.getResult().hasOneUse() ||
+    if ((!initial && !plainSplat) ||
+        (initial && (!initial.getInitialized() || initial.getPlacement() != "register")) ||
+        !initializer.hasOneUse() ||
         !seed || constantInt(seed) != 0 ||
         yield.getOperand(index) != next ||
         carried.getType() != numeric.getType() ||
@@ -692,11 +742,16 @@ void retainFragmentAccumulators(
       continue;
     auto oldType = unpack.getResult().getType();
     auto fragment = mma.getResult().getType();
-    rewriter.setInsertionPoint(initial);
+    rewriter.setInsertionPoint(initializer.getDefiningOp());
     auto zero = riscv::IMEZeroOp::create(rewriter, loop.getLoc(), fragment,
         riscv_internal::leaf(rewriter, "ime", "fragment-init", "ime.zero", "ime.zero", 0, 0));
-    initial.getInitialMutable().assign(zero.getResult());
-    initial.getResult().setType(fragment);
+    if (initial) {
+      initial.getInitialMutable().assign(zero.getResult());
+      initial.getResult().setType(fragment);
+    } else {
+      loop.getInitArgsMutable()[index].assign(zero.getResult());
+      rewriter.eraseOp(plainSplat);
+    }
     carried.setType(fragment);
     mma->setOperand(2, carried);
     yield.setOperand(index, mma.getResult());
@@ -726,6 +781,7 @@ public:
   llvm::StringRef getDescription() const override { return "Retain compatible integer fragment state across bounded physical issue loops"; }
   void runOnOperation() override {
     mlir::IRRewriter rewriter(&getContext());
+    exposeFragmentPointwise(rewriter, getOperation());
     retainFragmentPointwise(rewriter, getOperation());
     retainFragmentAccumulators(rewriter, getOperation());
   }
