@@ -565,6 +565,10 @@ storage proposal 一致时保留该 mapping；不一致但拥有相同 reduction
 coalesce。storage order 只决定 operand 怎样供应这个 carrier，不能分别替两个 operand 决定
 互不相容的 contraction layout；所需差异必须由后续显式 memory form 或 conversion 承载。
 
+已选 widening issue slices 若具有相同 reduction lanes/streams，但分别使用不同的 fractional
+LMUL，composite pass 显式把较小 operand 扩展到两者中较大的合法 carrier（至多 m1）。
+转换保留原逻辑坐标、active lanes 与驻留；不能只接受 fractional 到 m1，而拒绝 mf4 到 mf2。
+
 pointwise、state 与 control handoff 的要求不一致时，pass 插入真实 `convert_layout`；
 `for/if/while` 的 carried/result types 同时被改写。无法保持 logical axes 或无合法 LMUL 时
 失败，不通过静默 scalarization 继续。

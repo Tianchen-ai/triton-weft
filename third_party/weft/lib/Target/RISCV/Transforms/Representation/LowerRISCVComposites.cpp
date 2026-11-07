@@ -1850,24 +1850,25 @@ private:
             rhsType ? planWidenDotLaneSlices(rhsType, laneResultType,
                                              physicalReductionAxes, target)
                     : std::nullopt;
-        // A packed source may supply an m1 slice while an equally sized
-        // storage window uses a fractional register. Give that window an
-        // explicit m1 carrier; its logical lanes and register residency stay
-        // unchanged, and both operands then use the same widening instruction.
+        // A packed source and a storage window can use different fractional
+        // groups for the same reduction lanes. Extend the smaller operand to
+        // the larger slice carrier, preserving its coordinates and residency.
         if (lhsLaneSlices && rhsLaneSlices &&
             lhsLaneSlices->reductionLanes == rhsLaneSlices->reductionLanes &&
             lhsLaneSlices->reductionStreams == rhsLaneSlices->reductionStreams &&
             lhsLaneSlices->sliceLmulEighths != rhsLaneSlices->sliceLmulEighths &&
             std::max(lhsLaneSlices->sliceLmulEighths,
-                     rhsLaneSlices->sliceLmulEighths) == 8) {
+                     rhsLaneSlices->sliceLmulEighths) <= 8) {
+          const int64_t commonLMUL = std::max(lhsLaneSlices->sliceLmulEighths,
+                                             rhsLaneSlices->sliceLmulEighths);
           auto extendFractional = [&](mlir::Value &value, riscv::ValueType &type) {
             auto layout = type.getLayout();
-            if (layout.getLmulEighths() >= 8) return;
+            if (layout.getLmulEighths() >= commonLMUL) return;
             auto extended = riscv::LayoutAttr::get(
                 rewriter.getContext(), layout.getCarrier(), layout.getAxisIds(),
                 layout.getTimeFactors(), layout.getLaneFactors(),
                 layout.getReplicaFactors(), layout.getFragmentFactors(),
-                layout.getLocalFactors(), layout.getSew(), 8, layout.getVl(),
+                layout.getLocalFactors(), layout.getSew(), commonLMUL, layout.getVl(),
                 layout.getRegisterGroups(), layout.getValidity());
             if (!riscv::supportsRVVLayout(target, extended)) return;
             type = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(type, extended));
