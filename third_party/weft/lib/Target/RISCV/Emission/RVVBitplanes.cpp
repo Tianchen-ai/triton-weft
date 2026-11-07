@@ -443,20 +443,34 @@ mlir::LogicalResult Emitter::compileRVVSignedBitmaskReduce(
     return fail(operation,
                 "RVV signed-bitmask reduction selected an illegal mask ratio");
   const std::string vl = partVL(operation.getData(), 0);
-  const std::string suffix = vectorSuffix(operation.getData());
-  const std::string vectorTypeName = vectorType(operation.getData());
+  auto *context = operation.getContext();
+  auto wideLayout = riscv::LayoutAttr::get(
+      context, layout.getCarrier(), layout.getAxisIds(), layout.getTimeFactors(),
+      layout.getLaneFactors(), layout.getReplicaFactors(),
+      layout.getFragmentFactors(), layout.getLocalFactors(), 16,
+      layout.getLmulEighths() * 2, layout.getVl(),
+      std::max<int64_t>(1, (layout.getLmulEighths() * 2 + 7) / 8),
+      layout.getValidity(), layout.getReplicaGroup());
+  auto wideType = riscv::ValueType::get(
+      context, mlir::IntegerType::get(context, 16, mlir::IntegerType::Signed),
+      dataType.getShape(), dataType.getAxisIds(), wideLayout);
+  const std::string suffix = vectorSuffixFor(wideType);
+  const std::string vectorTypeName = "vint16" + suffix.substr(3) + "_t";
+  std::string widened = fresh("signed_bitmask_widened");
+  line(vectorTypeName + " " + widened + " = __riscv_vsext_vf2_" + suffix +
+       "(" + data.parts.front() + ", " + vl + ");");
   std::string negated = fresh("signed_bitmask_negated");
   line(vectorTypeName + " " + negated + " = __riscv_vneg_v_" + suffix +
-       "(" + data.parts.front() + ", " + vl + ");");
+       "(" + widened + ", " + vl + ");");
   std::string selected = fresh("signed_bitmask_selected");
   line(vectorTypeName + " " + selected + " = __riscv_vmerge_vvm_" + suffix +
-       "(" + negated + ", " + data.parts.front() + ", " +
+       "(" + negated + ", " + widened + ", " +
        mask.parts.front() + ", " + vl + ");");
   std::string zero = fresh("signed_bitmask_zero");
   line("vint16m1_t " + zero +
        " = __riscv_vmv_v_x_i16m1(0, 1);");
   std::string reduced = fresh("signed_bitmask_sum");
-  line("vint16m1_t " + reduced + " = __riscv_vwredsum_vs_" + suffix +
+  line("vint16m1_t " + reduced + " = __riscv_vredsum_vs_" + suffix +
        "_i16m1(" + selected + ", " + zero + ", " + vl + ");");
   Binding result;
   result.kind = Binding::Kind::Scalar;

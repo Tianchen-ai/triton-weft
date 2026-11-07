@@ -276,7 +276,9 @@ matchSignedBitmaskReduction(riscv::RVVWidenDotOp dot, mlir::Value centered,
   const size_t position = static_cast<size_t>(
       axis - dataType.getAxisIds().asArrayRef().begin());
   const int64_t extent = dataType.getShape()[position];
-  if (extent <= 0 || extent * 128 >= 32768 ||
+  if (extent <= 0 || extent >= 256 ||
+      dataType.getLayout().getLmulEighths() <= 0 ||
+      dataType.getLayout().getLmulEighths() > 32 ||
       dataType.getLayout().getTimeFactors()[position] != 1 ||
       dataType.getLayout().getLaneFactors()[position] != extent)
     return std::nullopt;
@@ -698,7 +700,9 @@ public:
       auto dataType =
           mlir::cast<riscv::ValueType>(relation->data.getType());
       const int64_t dataGroups = dataType.getLayout().getRegisterGroups();
-      const int64_t temporaryGroups = std::max<int64_t>(1, dataGroups + 1);
+      const int64_t wideGroups = std::max<int64_t>(
+          1, (dataType.getLayout().getLmulEighths() * 2 + 7) / 8);
+      const int64_t temporaryGroups = 2 * wideGroups + 1;
       const bool tail = dataType.getLayout().getValidity() == "tail";
       auto maskLeaf = relation->mask.getLeaf();
       relation->mask->setAttr(
