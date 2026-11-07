@@ -1,21 +1,90 @@
-# Triton–Weft
+# Triton–Weft 1.0
 
-**Compose high-performance CPU kernels from encoded fields, typed computation,
-shared values and state.**
+[中文](README.zh-CN.md) · [Download 1.0](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0) · [Handbook](https://tianchen-ai.github.io/triton-weft/) · [Examples](examples/weft/README.md) · [Bench website](https://tianchen-ai.github.io/triton-weft-bench/) · [All paper results](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/)
 
-Weft is a programming model implemented by extending Triton. Its source objects
-keep data representation, numerical groups, sharing and state updates explicit.
-The compiler uses those relationships to construct vector and matrix execution
-for x86 and RISC-V. Programs use `@triton.jit(model="weft")`, the normal
-`kernel[grid](...)` interface, configuration, autotuning, caching and native export.
+**Compose expert CPU kernels. Let the compiler construct their machine execution.**
 
-The installable library `triton.kernels.weft` supplies kernels, stored formats,
-layouts, numerical helpers, tuning resources and host composition. The library
-includes dense and quantized projections, normalization, online attention,
-streaming statistics and stateful model components. NumPy and CPU Torch are
-optional host-buffer integrations.
+The interface `Y = X @ W.T` leaves the most consequential implementation choices
+open. Should packed weights be expanded first, or should one prepared region
+serve several outputs? Which products share a narrow partial sum, and how long
+should the output accumulator live? High-performance CPU kernels depend on these
+choices. Expressing them through blocks, explicit vectors or intrinsics also
+leaves the developer to maintain their connections as the kernel changes.
+
+Weft makes those connections programmable. Encoded views describe stored fields;
+typed groups specify local arithmetic; computation levels give shared inputs and
+initialized state their own scopes. Authors can compose and evolve these choices
+while the compiler constructs operand layouts, register partitions and vector or
+matrix instructions for **x86 and RISC-V**.
+
+[![Paper Fig. 1: the abstraction gap and Weft's direct expression of implementation choices](docs/weft/assets/paper/overview.svg)](docs/weft/assets/paper/overview.svg)
+
+*One operator admits different implementations. Weft expresses the selected
+organization in source; its compiler maps that organization to the CPU.*
+
+Triton–Weft implements this model by extending Triton. Programs use
+`@triton.jit(model="weft")` and the familiar `kernel[grid](...)` interface, with
+configuration, autotuning, caching and native export. The installed
+`triton.kernels.weft` library includes dense and quantized projections,
+normalization, online attention, streaming statistics and stateful model
+components, together with reusable formats and numerical helpers.
+
+Across **543 matched operator comparisons**, per-target geometric-mean speedups
+over optimized library references are **1.32–1.83×**. The
+[results below](#performance-control-and-reuse) connect these gains to author
+control, source reuse and complete llama.cpp inference. **[Triton–Weft Bench](https://github.com/Tianchen-ai/triton-weft-bench)**
+provides the workloads, references, reproduction commands and
+[complete paper figure gallery](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/).
+
+Weft's release is **1.0.0**, based on upstream Triton **3.8.0**. The distribution
+is **`triton==3.8.0+weft.1.0.0`**. `triton.__weft_version__` identifies Weft;
+`triton.__version__` preserves the upstream base identity.
+
+## Performance, control and reuse
+
+The paper evaluates **553 operator/target cases**, including **543 matched
+comparisons** with optimized GGML and oneDNN references. The distributions below
+include every matched comparison.
+
+[![All matched operator comparisons](docs/weft/assets/paper/operators-ecdf.svg)](docs/weft/assets/paper/operators-ecdf.svg)
+
+| CPU | SG2044 | K1 | K3 A100 | Xeon Platinum 8470Q |
+|---|---:|---:|---:|---:|
+| Geometric-mean speedup | **1.60×** | **1.54×** | **1.83×** | **1.32×** |
+| Matched comparisons | 132 | 136 | 135 | 140 |
+
+The same kernels accelerate complete llama.cpp prefill and decode. The figure
+covers eight model/platform deployments; K3 also shows a second reference backend.
+SG2044 uses 64 application threads and the other CPUs use eight.
+
+[![Complete llama.cpp prefill and decode speedups](docs/weft/assets/paper/models.svg)](docs/weft/assets/paper/models.svg)
+
+**Control becomes execution.** In the Q4_K study, five routes implement local or
+shared preparation crossed with direct or grouped accumulation. Calls include
+activation quantization and the complete projection at `N=256, K=4096`; each
+shape is normalized to intrinsic C local/direct. The
+[Q6_K comparison and selected bindings](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/#five-routes-for-the-same-control-tasks)
+extend the same task.
+
+[![Q4_K control tasks in intrinsic C, Triton CPU, Exo 2, TensorIR and Weft](docs/weft/assets/paper/routes-q4.svg)](docs/weft/assets/paper/routes-q4.svg)
+
+**New formats reuse existing knowledge.** Adding MXFP4, NVFP4 and IQ2_XXS
+dequantization establishes definitions that the subsequent dot operator reuses.
+The figure separates added Encoding, decoder and operator source from reused
+definitions. The [model and compiler results](https://tianchen-ai.github.io/triton-weft/experiments/results/)
+also show how source relationships enable decoding, forwarding and state retention.
+
+[![Source added and reused when introducing a second operator](docs/weft/assets/paper/increment-measurements.svg)](docs/weft/assets/paper/increment-measurements.svg)
+
+**Explore and reproduce:** [all paper result figures](https://tianchen-ai.github.io/triton-weft-bench/paper/gallery/)
+· [sixteen CSV tables](results/README.md) · [Bench commands](docs/weft/experiments/reproduce.md)
+· [measurement provenance](results/provenance.json).
+
 
 ## Build and install
+
+Download a matching Linux wheel from [Weft 1.0](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0), then run `python -m pip install ./triton-*.whl numpy`.
+The release also provides complete source packages, the bilingual offline handbook and checksums.
 
 The source tree builds without a `.git` directory. Use Python 3.10 or newer,
 Git, CMake, Ninja, GCC 12 or newer and the LLVM/MLIR revision in
@@ -27,28 +96,20 @@ To build the dependency SDK from the public LLVM project:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install 'setuptools>=40.8.0' wheel 'pybind11>=2.13.1'
+python -m pip install -r python/requirements.txt numpy pytest
 LLVM_PROJECT_PATH="$PWD/.deps/llvm-project" \
 LLVM_BUILD_PATH="$PWD/.deps/llvm-build" \
 LLVM_INSTALL_PATH="$PWD/.deps/llvm" \
 bash scripts/build-llvm-project.sh
 ```
 
-An existing SDK built from that exact revision can be selected instead. Build
-the product with the host GCC and SDK locations explicitly (`gcc-12`/`g++-12`
-can be used on systems where those are the installed compiler names):
+An existing SDK built from that exact revision can be selected instead. The
+installer discovers the SDK's Clang and OpenMP paths and uses host GCC to build
+the extension:
 
 ```sh
-CC=gcc \
-CXX=g++ \
-LLVM_SYSPATH="$PWD/.deps/llvm" \
-TRITON_WEFT_CLANG_ROOT="$PWD/.deps/llvm" \
-TRITON_WEFT_OPENMP_LIBRARY="$PWD/.deps/llvm/lib/libomp.so" \
-TRITON_WEFT_OPENMP_INCLUDE_DIR="$PWD/.deps/llvm/lib/clang/23/include" \
-TRITON_BUILD_DIR="$PWD/.build" \
-TRITON_BUILD_PROTON=OFF \
-python -m pip install --no-build-isolation .
-python -m pip install numpy pytest
+LLVM_SYSPATH="$PWD/.deps/llvm" bash scripts/build-weft.sh
+python -c 'import triton; print("Weft", triton.__weft_version__, "on Triton", triton.__version__)'
 ```
 
 LLVM installations with a target-specific library directory should pass that
@@ -59,27 +120,44 @@ also describes explicit and cross-compilation toolchains.
 
 ## Write and call a kernel
 
+Save this complete program as `quickstart.py` and run it after installation:
+
 ```python
+from __future__ import annotations
 import numpy as np
 import triton
 import triton.language as tl
 
 @triton.jit(model="weft")
-def affine(X, Y, N, scale, bias, B: tl.constexpr):
-    i = tl.program_id(0) * B + tl.arange(0, B)
-    value = tl.load(X + i, mask=i < N, other=0.0)
-    tl.store(Y + i, value * scale + bias, mask=i < N)
+def row_sum_squares(X: tl.View[tl.f32, (M, N)], Y: tl.View[tl.f32, (M,)],
+                    BLOCK: tl.constexpr = 32):
+    with tl.level.rows(M, group=1) as row:
+        values = tl.stage(tl.load(X[row]))
+        total = tl.state(tl.f32, [1], init=0)
+        with tl.level.blocks(N, extent=BLOCK) as block:
+            part = values[:, block]
+            total += tl.reduce(part * part, axis="n")
+        tl.store(Y[row], total)
 
-x = np.arange(131, dtype=np.float32)
-y = np.empty_like(x)
-compiled = affine[(triton.cdiv(x.size, 64),)](
-    x, y, x.size, 1.25, -0.5, B=64, num_cpu_threads=2)
-np.testing.assert_array_equal(y, x * 1.25 - 0.5)
+x = np.random.default_rng(19).normal(size=(4, 65)).astype(np.float32)
+y = np.empty(4, dtype=np.float32)
+compiled = row_sum_squares[(1,)](x, y, BLOCK=32, num_cpu_threads=1)
+np.testing.assert_allclose(y, np.sum(x.astype(np.float64)**2, axis=1), rtol=1e-5)
+print(y, list(compiled.asm))
 ```
 
 The grid describes independent programs; `num_cpu_threads` selects the CPU
 worker count. Typed `tl.View` arguments additionally expose logical fields,
 shapes and storage to the compiler.
+
+The row owns one staged input observation and one accumulator. Its inner blocks
+update that same state, including the tail. The
+[runnable version](examples/weft/quickstart.py) also writes the actual IR and exports
+a native artifact:
+
+```sh
+python -m examples.weft.quickstart --dump-ir /tmp/weft-ir --export /tmp/weft-native
+```
 
 | Author object | Program expression | Information used by compilation |
 |---|---|---|
@@ -94,6 +172,12 @@ library's [`organized_projection.py`](python/triton/kernels/weft/ggml/blocks/mul
 Q4_K and Q6_K share the typed entry, preparation framework, weighted computation
 and both output-state traversals. Each format supplies its field helper; Q4_K
 also supplies its correction fields.
+
+[![Shared fields, weighted partials and output state](docs/weft/assets/paper/model.svg)](docs/weft/assets/paper/model.svg)
+
+[Online attention](python/triton/kernels/weft/attention/online_f32.py) and
+[Welford](python/triton/kernels/weft/programs/statistics.py) compose different
+coupled states through the same programming model.
 
 ## Run complete examples
 
@@ -128,14 +212,10 @@ the same on both CPU families. See the
 [C++ deployment example](examples/weft/deployment) and
 [native SDK guide](docs/weft/compiler/native-sdk.md).
 
-## Recorded results
-
-The accompanying `results/*.csv` files contain the measured operator, model and
-controlled-study results with their comparison boundaries. Values and counts
-come from those files. The source package contains the complete compiler,
-normal kernel library, examples and correctness tests.
 
 ## Source map
+
+[![Canonical program and x86/RISC-V construction](docs/weft/assets/paper/compiler.svg)](docs/weft/assets/paper/compiler.svg)
 
 | Component | Location |
 |---|---|

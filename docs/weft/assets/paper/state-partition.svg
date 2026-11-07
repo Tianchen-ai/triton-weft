@@ -1,0 +1,297 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="529" viewBox="0 0 1536 529">
+<title>Preserving one logical state under physical slicing</title>
+<desc>Within one kc panel and a fixed row m, the logical state over N is divided into disjoint slices P0 and P1. Dashed projections give s_i^t = s^t[P_i] at every step. The prepared value wp feeds contribution nodes delta, each added to its own state. Each slice is initialised from and stored to the same Y coordinates; no state passes between the slices.</desc>
+<rect id="canvas" x="0" y="0" width="1536" height="529" fill="#FFFFFF" stroke="none" />
+<rect id="prepared-wp" x="486.00" y="8.00" width="754.00" height="48.00" fill="#EDF4F8" stroke="#376784" stroke-width="2.2" />
+<polyline id="prepared-wp-split" points="863.00,8.00 863.00,56.00" fill="none" stroke="#376784" stroke-width="2" />
+<text id="wp-b-0" x="668" y="41.68" font-family="Liberation Mono" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">fields[·, b]</text>
+<text id="wp-b1-0" x="1045" y="41.68" font-family="Liberation Mono" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">fields[·, b + 1]</text>
+<text id="t-0-0" x="441.98" y="97.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">t</text>
+<text id="t-0-1" x="462.84" y="97.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">=</text>
+<text id="t-0-2" x="497.66" y="97.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="label-s0-0" x="436.39" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="label-s0-1" x="454.41" y="128.20" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="label-s0-2" x="470.64" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="label-s0-3" x="483.13" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">N</text>
+<text id="label-s0-4" x="511.13" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<text id="t-1-0" x="818.98" y="97.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">t</text>
+<text id="t-1-1" x="839.84" y="97.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">=</text>
+<text id="t-1-2" x="874.66" y="97.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="label-s1-0" x="813.39" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="label-s1-1" x="831.41" y="128.20" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="label-s1-2" x="847.64" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="label-s1-3" x="860.13" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">N</text>
+<text id="label-s1-4" x="888.13" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<text id="t-2-0" x="1195.98" y="97.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">t</text>
+<text id="t-2-1" x="1216.84" y="97.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">=</text>
+<text id="t-2-2" x="1251.66" y="97.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="label-s2-0" x="1190.39" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="label-s2-1" x="1208.41" y="128.20" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="label-s2-2" x="1224.64" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="label-s2-3" x="1237.13" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">N</text>
+<text id="label-s2-4" x="1265.13" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<text id="label-y-in-0" x="265" y="141.00" font-family="Liberation Sans" font-size="32" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">init 0</text>
+<text id="label-y-out-0" x="1381.61" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">Y</text>
+<text id="label-y-out-1" x="1402.73" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="label-y-out-2" x="1415.22" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">m</text>
+<text id="label-y-out-3" x="1445.56" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">,</text>
+<text id="label-y-out-5" x="1465.91" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">N</text>
+<text id="label-y-out-6" x="1493.91" y="141.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<polyline id="proj-p0-0" points="436.00,201.00 436.00,303.00" fill="none" stroke="#747D84" stroke-width="1.7" stroke-dasharray="7 6" />
+<polygon id="proj-p0-0-head" points="436.00,313.00 441.00,302.00 431.00,302.00" fill="#747D84" stroke="none" />
+<polyline id="proj-p1-0-0" points="524.00,201.00 524.00,328.00" fill="none" stroke="#747D84" stroke-width="1.7" stroke-dasharray="7 6" />
+<polyline id="proj-p1-0-1" points="524.00,344.00 524.00,461.00" fill="none" stroke="#747D84" stroke-width="1.7" stroke-dasharray="7 6" />
+<polygon id="proj-p1-0-1-head" points="524.00,471.00 529.00,460.00 519.00,460.00" fill="#747D84" stroke="none" />
+<polyline id="proj-p0-1" points="813.00,201.00 813.00,303.00" fill="none" stroke="#747D84" stroke-width="1.7" stroke-dasharray="7 6" />
+<polygon id="proj-p0-1-head" points="813.00,313.00 818.00,302.00 808.00,302.00" fill="#747D84" stroke="none" />
+<polyline id="proj-p1-1-0" points="901.00,201.00 901.00,328.00" fill="none" stroke="#747D84" stroke-width="1.7" stroke-dasharray="7 6" />
+<polyline id="proj-p1-1-1" points="901.00,344.00 901.00,461.00" fill="none" stroke="#747D84" stroke-width="1.7" stroke-dasharray="7 6" />
+<polygon id="proj-p1-1-1-head" points="901.00,471.00 906.00,460.00 896.00,460.00" fill="#747D84" stroke="none" />
+<polyline id="proj-p0-2" points="1190.00,201.00 1190.00,303.00" fill="none" stroke="#747D84" stroke-width="1.7" stroke-dasharray="7 6" />
+<polygon id="proj-p0-2-head" points="1190.00,313.00 1195.00,302.00 1185.00,302.00" fill="#747D84" stroke="none" />
+<polyline id="proj-p1-2-0" points="1278.00,201.00 1278.00,328.00" fill="none" stroke="#747D84" stroke-width="1.7" stroke-dasharray="7 6" />
+<polyline id="proj-p1-2-1" points="1278.00,344.00 1278.00,461.00" fill="none" stroke="#747D84" stroke-width="1.7" stroke-dasharray="7 6" />
+<polygon id="proj-p1-2-1-head" points="1278.00,471.00 1283.00,460.00 1273.00,460.00" fill="#747D84" stroke="none" />
+<polyline id="bus-0-0" points="578.00,56.00 578.00,170.00" fill="none" stroke="#376784" stroke-width="2.4" />
+<polyline id="bus-0-1" points="578.00,186.00 578.00,328.00" fill="none" stroke="#376784" stroke-width="2.4" />
+<polyline id="bus-0-2" points="578.00,344.00 578.00,421.00" fill="none" stroke="#376784" stroke-width="2.4" />
+<polyline id="tap-0-0" points="578.00,105.00 586.50,105.00" fill="none" stroke="#376784" stroke-width="2.2" />
+<polygon id="tap-0-0-head" points="596.50,105.00 585.50,100.00 585.50,110.00" fill="#376784" stroke="none" />
+<polyline id="tap-0-1" points="578.00,263.00 586.50,263.00" fill="none" stroke="#376784" stroke-width="2.2" />
+<polygon id="tap-0-1-head" points="596.50,263.00 585.50,258.00 585.50,268.00" fill="#376784" stroke="none" />
+<polyline id="tap-0-2" points="578.00,421.00 586.50,421.00" fill="none" stroke="#376784" stroke-width="2.2" />
+<polygon id="tap-0-2-head" points="596.50,421.00 585.50,416.00 585.50,426.00" fill="#376784" stroke="none" />
+<polyline id="bus-1-0" points="955.00,56.00 955.00,170.00" fill="none" stroke="#376784" stroke-width="2.4" />
+<polyline id="bus-1-1" points="955.00,186.00 955.00,328.00" fill="none" stroke="#376784" stroke-width="2.4" />
+<polyline id="bus-1-2" points="955.00,344.00 955.00,421.00" fill="none" stroke="#376784" stroke-width="2.4" />
+<polyline id="tap-1-0" points="955.00,105.00 963.50,105.00" fill="none" stroke="#376784" stroke-width="2.2" />
+<polygon id="tap-1-0-head" points="973.50,105.00 962.50,100.00 962.50,110.00" fill="#376784" stroke="none" />
+<polyline id="tap-1-1" points="955.00,263.00 963.50,263.00" fill="none" stroke="#376784" stroke-width="2.2" />
+<polygon id="tap-1-1-head" points="973.50,263.00 962.50,258.00 962.50,268.00" fill="#376784" stroke="none" />
+<polyline id="tap-1-2" points="955.00,421.00 963.50,421.00" fill="none" stroke="#376784" stroke-width="2.2" />
+<polygon id="tap-1-2-head" points="973.50,421.00 962.50,416.00 962.50,426.00" fill="#376784" stroke="none" />
+<polyline id="init-logical" points="354.00,178.00 382.00,178.00" fill="none" stroke="#25292D" stroke-width="2.4" />
+<polygon id="init-logical-head" points="392.00,178.00 381.00,173.00 381.00,183.00" fill="#25292D" stroke="none" />
+<polyline id="init-p0" points="228.00,201.00 228.00,336.00 382.00,336.00" fill="none" stroke="#25292D" stroke-width="2.3" />
+<polygon id="init-p0-head" points="392.00,336.00 381.00,331.00 381.00,341.00" fill="#25292D" stroke="none" />
+<polyline id="init-p1-a" points="312.00,201.00 312.00,328.00" fill="none" stroke="#25292D" stroke-width="2.3" />
+<polyline id="init-p1-b" points="312.00,344.00 312.00,494.00 470.00,494.00" fill="none" stroke="#25292D" stroke-width="2.3" />
+<polygon id="init-p1-b-head" points="480.00,494.00 469.00,489.00 469.00,499.00" fill="#25292D" stroke="none" />
+<polyline id="store-logical" points="1322.00,178.00 1350.00,178.00" fill="none" stroke="#25292D" stroke-width="2.4" />
+<polygon id="store-logical-head" points="1360.00,178.00 1349.00,173.00 1349.00,183.00" fill="#25292D" stroke="none" />
+<polyline id="store-p0" points="1234.00,336.00 1402.00,336.00 1402.00,211.00" fill="none" stroke="#25292D" stroke-width="2.3" />
+<polygon id="store-p0-head" points="1402.00,201.00 1397.00,212.00 1407.00,212.00" fill="#25292D" stroke="none" />
+<polyline id="store-p1" points="1322.00,494.00 1486.00,494.00 1486.00,211.00" fill="none" stroke="#25292D" stroke-width="2.3" />
+<polygon id="store-p1-head" points="1486.00,201.00 1481.00,212.00 1491.00,212.00" fill="#25292D" stroke="none" />
+<polyline id="carry-0-0a" points="568.00,178.00 643.50,178.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-0-0a-head" points="653.50,178.00 642.50,173.00 642.50,183.00" fill="#A38348" stroke="none" />
+<polyline id="carry-0-0b" points="695.50,178.00 759.00,178.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-0-0b-head" points="769.00,178.00 758.00,173.00 758.00,183.00" fill="#A38348" stroke="none" />
+<rect id="delta-0-0" x="596.50" y="79.00" width="156.00" height="52.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6" />
+<text id="delta-0-0-label-0" x="630.22" y="113.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-0-0-label-1" x="649.49" y="120.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">b</text>
+<text id="delta-0-0-label-2" x="665.81" y="113.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="delta-0-0-label-3" x="678.29" y="113.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">N</text>
+<text id="delta-0-0-label-4" x="706.29" y="113.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<polyline id="delta-0-0-in" points="674.50,131.00 674.50,147.00" fill="none" stroke="#25292D" stroke-width="1.9" />
+<polygon id="delta-0-0-in-head" points="674.50,157.00 679.50,146.00 669.50,146.00" fill="#25292D" stroke="none" />
+<circle id="plus-0-0" cx="674.50" cy="178.00" r="21" fill="#FFFFFF" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-0-0-h" points="663.50,178.00 685.50,178.00" fill="none" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-0-0-v" points="674.50,167.00 674.50,189.00" fill="none" stroke="#25292D" stroke-width="2" />
+<polyline id="carry-0-1a" points="945.00,178.00 1020.50,178.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-0-1a-head" points="1030.50,178.00 1019.50,173.00 1019.50,183.00" fill="#A38348" stroke="none" />
+<polyline id="carry-0-1b" points="1072.50,178.00 1136.00,178.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-0-1b-head" points="1146.00,178.00 1135.00,173.00 1135.00,183.00" fill="#A38348" stroke="none" />
+<rect id="delta-0-1" x="973.50" y="79.00" width="156.00" height="52.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6" />
+<text id="delta-0-1-label-0" x="989.05" y="113.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-0-1-label-1" x="1008.32" y="120.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">b</text>
+<text id="delta-0-1-label-2" x="1024.64" y="120.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">+1</text>
+<text id="delta-0-1-label-3" x="1060.98" y="113.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="delta-0-1-label-4" x="1073.46" y="113.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">N</text>
+<text id="delta-0-1-label-5" x="1101.46" y="113.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<polyline id="delta-0-1-in" points="1051.50,131.00 1051.50,147.00" fill="none" stroke="#25292D" stroke-width="1.9" />
+<polygon id="delta-0-1-in-head" points="1051.50,157.00 1056.50,146.00 1046.50,146.00" fill="#25292D" stroke="none" />
+<circle id="plus-0-1" cx="1051.50" cy="178.00" r="21" fill="#FFFFFF" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-0-1-h" points="1040.50,178.00 1062.50,178.00" fill="none" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-0-1-v" points="1051.50,167.00 1051.50,189.00" fill="none" stroke="#25292D" stroke-width="2" />
+<rect id="state-0-0" x="392.00" y="155.00" width="176.00" height="46.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2" />
+<polyline id="state-0-0-rule-1" points="436.00,155.00 436.00,201.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<polyline id="state-0-0-rule-2" points="480.00,155.00 480.00,201.00" fill="none" stroke="#A38348" stroke-width="3" />
+<polyline id="state-0-0-rule-3" points="524.00,155.00 524.00,201.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<text id="state-0-0-0-0" x="396.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-0-0-1" x="416.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="state-0-0-1-0" x="440.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-0-1-1" x="460.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="state-0-0-2-0" x="484.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-0-2-1" x="504.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="state-0-0-3-0" x="528.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-0-3-1" x="548.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">3</text>
+<rect id="state-0-1" x="769.00" y="155.00" width="176.00" height="46.00" fill="#F1E2BE" stroke="#A38348" stroke-width="2" />
+<polyline id="state-0-1-rule-1" points="813.00,155.00 813.00,201.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<polyline id="state-0-1-rule-2" points="857.00,155.00 857.00,201.00" fill="none" stroke="#A38348" stroke-width="3" />
+<polyline id="state-0-1-rule-3" points="901.00,155.00 901.00,201.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<text id="state-0-1-0-0" x="773.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-1-0-1" x="793.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="state-0-1-1-0" x="817.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-1-1-1" x="837.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="state-0-1-2-0" x="861.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-1-2-1" x="881.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="state-0-1-3-0" x="905.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-1-3-1" x="925.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">3</text>
+<rect id="state-0-2" x="1146.00" y="155.00" width="176.00" height="46.00" fill="#E8D3A0" stroke="#A38348" stroke-width="2" />
+<polyline id="state-0-2-rule-1" points="1190.00,155.00 1190.00,201.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<polyline id="state-0-2-rule-2" points="1234.00,155.00 1234.00,201.00" fill="none" stroke="#A38348" stroke-width="3" />
+<polyline id="state-0-2-rule-3" points="1278.00,155.00 1278.00,201.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<text id="state-0-2-0-0" x="1150.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-2-0-1" x="1170.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="state-0-2-1-0" x="1194.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-2-1-1" x="1214.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="state-0-2-2-0" x="1238.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-2-2-1" x="1258.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="state-0-2-3-0" x="1282.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-0-2-3-1" x="1302.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">3</text>
+<polyline id="carry-1-0a" points="480.00,336.00 643.50,336.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-1-0a-head" points="653.50,336.00 642.50,331.00 642.50,341.00" fill="#A38348" stroke="none" />
+<polyline id="carry-1-0b" points="695.50,336.00 759.00,336.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-1-0b-head" points="769.00,336.00 758.00,331.00 758.00,341.00" fill="#A38348" stroke="none" />
+<rect id="delta-1-0" x="596.50" y="237.00" width="156.00" height="52.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6" />
+<text id="delta-1-0-label-0" x="625.34" y="271.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-1-0-label-1" x="644.61" y="278.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">b</text>
+<text id="delta-1-0-label-2" x="660.93" y="271.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="delta-1-0-label-3" x="673.41" y="271.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">P</text>
+<text id="delta-1-0-label-4" x="694.95" y="278.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="delta-1-0-label-5" x="711.17" y="271.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<polyline id="delta-1-0-in" points="674.50,289.00 674.50,305.00" fill="none" stroke="#25292D" stroke-width="1.9" />
+<polygon id="delta-1-0-in-head" points="674.50,315.00 679.50,304.00 669.50,304.00" fill="#25292D" stroke="none" />
+<circle id="plus-1-0" cx="674.50" cy="336.00" r="21" fill="#FFFFFF" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-1-0-h" points="663.50,336.00 685.50,336.00" fill="none" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-1-0-v" points="674.50,325.00 674.50,347.00" fill="none" stroke="#25292D" stroke-width="2" />
+<polyline id="carry-1-1a" points="857.00,336.00 1020.50,336.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-1-1a-head" points="1030.50,336.00 1019.50,331.00 1019.50,341.00" fill="#A38348" stroke="none" />
+<polyline id="carry-1-1b" points="1072.50,336.00 1136.00,336.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-1-1b-head" points="1146.00,336.00 1135.00,331.00 1135.00,341.00" fill="#A38348" stroke="none" />
+<rect id="delta-1-1" x="973.50" y="237.00" width="156.00" height="52.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6" />
+<text id="delta-1-1-label-0" x="984.17" y="271.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-1-1-label-1" x="1003.44" y="278.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">b</text>
+<text id="delta-1-1-label-2" x="1019.76" y="278.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">+1</text>
+<text id="delta-1-1-label-3" x="1056.10" y="271.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="delta-1-1-label-4" x="1068.58" y="271.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">P</text>
+<text id="delta-1-1-label-5" x="1090.11" y="278.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="delta-1-1-label-6" x="1106.34" y="271.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<polyline id="delta-1-1-in" points="1051.50,289.00 1051.50,305.00" fill="none" stroke="#25292D" stroke-width="1.9" />
+<polygon id="delta-1-1-in-head" points="1051.50,315.00 1056.50,304.00 1046.50,304.00" fill="#25292D" stroke="none" />
+<circle id="plus-1-1" cx="1051.50" cy="336.00" r="21" fill="#FFFFFF" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-1-1-h" points="1040.50,336.00 1062.50,336.00" fill="none" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-1-1-v" points="1051.50,325.00 1051.50,347.00" fill="none" stroke="#25292D" stroke-width="2" />
+<rect id="state-1-0" x="392.00" y="313.00" width="88.00" height="46.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2" />
+<polyline id="state-1-0-rule-1" points="436.00,313.00 436.00,359.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<text id="state-1-0-0-0" x="396.73" y="342.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-1-0-0-1" x="416.05" y="350.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="state-1-0-1-0" x="440.73" y="342.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-1-0-1-1" x="460.05" y="350.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="label-s0-0-0" x="391.75" y="298.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="label-s0-0-1" x="407.53" y="305.68" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="label-s0-0-2" x="409.77" y="285.20" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<rect id="state-1-1" x="769.00" y="313.00" width="88.00" height="46.00" fill="#F1E2BE" stroke="#A38348" stroke-width="2" />
+<polyline id="state-1-1-rule-1" points="813.00,313.00 813.00,359.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<text id="state-1-1-0-0" x="773.73" y="342.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-1-1-0-1" x="793.05" y="350.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="state-1-1-1-0" x="817.73" y="342.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-1-1-1-1" x="837.05" y="350.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="label-s0-1-0" x="768.75" y="298.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="label-s0-1-1" x="784.53" y="305.68" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="label-s0-1-2" x="786.77" y="285.20" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<rect id="state-1-2" x="1146.00" y="313.00" width="88.00" height="46.00" fill="#E8D3A0" stroke="#A38348" stroke-width="2" />
+<polyline id="state-1-2-rule-1" points="1190.00,313.00 1190.00,359.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<text id="state-1-2-0-0" x="1150.73" y="342.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-1-2-0-1" x="1170.05" y="350.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="state-1-2-1-0" x="1194.73" y="342.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-1-2-1-1" x="1214.05" y="350.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="label-s0-2-0" x="1145.75" y="298.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="label-s0-2-1" x="1161.53" y="305.68" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="label-s0-2-2" x="1163.77" y="285.20" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<polyline id="carry-2-0a" points="568.00,494.00 643.50,494.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-2-0a-head" points="653.50,494.00 642.50,489.00 642.50,499.00" fill="#A38348" stroke="none" />
+<polyline id="carry-2-0b" points="695.50,494.00 847.00,494.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-2-0b-head" points="857.00,494.00 846.00,489.00 846.00,499.00" fill="#A38348" stroke="none" />
+<rect id="delta-2-0" x="596.50" y="395.00" width="156.00" height="52.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6" />
+<text id="delta-2-0-label-0" x="625.34" y="429.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-2-0-label-1" x="644.61" y="436.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">b</text>
+<text id="delta-2-0-label-2" x="660.93" y="429.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="delta-2-0-label-3" x="673.41" y="429.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">P</text>
+<text id="delta-2-0-label-4" x="694.95" y="436.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="delta-2-0-label-5" x="711.17" y="429.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<polyline id="delta-2-0-in" points="674.50,447.00 674.50,463.00" fill="none" stroke="#25292D" stroke-width="1.9" />
+<polygon id="delta-2-0-in-head" points="674.50,473.00 679.50,462.00 669.50,462.00" fill="#25292D" stroke="none" />
+<circle id="plus-2-0" cx="674.50" cy="494.00" r="21" fill="#FFFFFF" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-2-0-h" points="663.50,494.00 685.50,494.00" fill="none" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-2-0-v" points="674.50,483.00 674.50,505.00" fill="none" stroke="#25292D" stroke-width="2" />
+<polyline id="carry-2-1a" points="945.00,494.00 1020.50,494.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-2-1a-head" points="1030.50,494.00 1019.50,489.00 1019.50,499.00" fill="#A38348" stroke="none" />
+<polyline id="carry-2-1b" points="1072.50,494.00 1224.00,494.00" fill="none" stroke="#A38348" stroke-width="2.6" />
+<polygon id="carry-2-1b-head" points="1234.00,494.00 1223.00,489.00 1223.00,499.00" fill="#A38348" stroke="none" />
+<rect id="delta-2-1" x="973.50" y="395.00" width="156.00" height="52.00" fill="#FFFFFF" stroke="#25292D" stroke-width="1.6" />
+<text id="delta-2-1-label-0" x="984.17" y="429.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">δ</text>
+<text id="delta-2-1-label-1" x="1003.44" y="436.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">b</text>
+<text id="delta-2-1-label-2" x="1019.76" y="436.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">+1</text>
+<text id="delta-2-1-label-3" x="1056.10" y="429.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">[</text>
+<text id="delta-2-1-label-4" x="1068.58" y="429.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">P</text>
+<text id="delta-2-1-label-5" x="1090.11" y="436.98" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="delta-2-1-label-6" x="1106.34" y="429.30" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">]</text>
+<polyline id="delta-2-1-in" points="1051.50,447.00 1051.50,463.00" fill="none" stroke="#25292D" stroke-width="1.9" />
+<polygon id="delta-2-1-in-head" points="1051.50,473.00 1056.50,462.00 1046.50,462.00" fill="#25292D" stroke="none" />
+<circle id="plus-2-1" cx="1051.50" cy="494.00" r="21" fill="#FFFFFF" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-2-1-h" points="1040.50,494.00 1062.50,494.00" fill="none" stroke="#25292D" stroke-width="2" />
+<polyline id="plus-2-1-v" points="1051.50,483.00 1051.50,505.00" fill="none" stroke="#25292D" stroke-width="2" />
+<rect id="state-2-0" x="480.00" y="471.00" width="88.00" height="46.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2" />
+<polyline id="state-2-0-rule-1" points="524.00,471.00 524.00,517.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<text id="state-2-0-0-0" x="484.73" y="500.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-2-0-0-1" x="504.05" y="508.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="state-2-0-1-0" x="528.73" y="500.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-2-0-1-1" x="548.05" y="508.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">3</text>
+<text id="label-s1-0-0" x="479.75" y="456.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="label-s1-0-1" x="495.53" y="463.68" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="label-s1-0-2" x="497.77" y="443.20" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<rect id="state-2-1" x="857.00" y="471.00" width="88.00" height="46.00" fill="#F1E2BE" stroke="#A38348" stroke-width="2" />
+<polyline id="state-2-1-rule-1" points="901.00,471.00 901.00,517.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<text id="state-2-1-0-0" x="861.73" y="500.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-2-1-0-1" x="881.05" y="508.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="state-2-1-1-0" x="905.73" y="500.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-2-1-1-1" x="925.05" y="508.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">3</text>
+<text id="label-s1-1-0" x="856.75" y="456.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="label-s1-1-1" x="872.53" y="463.68" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="label-s1-1-2" x="874.77" y="443.20" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<rect id="state-2-2" x="1234.00" y="471.00" width="88.00" height="46.00" fill="#E8D3A0" stroke="#A38348" stroke-width="2" />
+<polyline id="state-2-2-rule-1" points="1278.00,471.00 1278.00,517.00" fill="none" stroke="#A38348" stroke-width="1.3" />
+<text id="state-2-2-0-0" x="1238.73" y="500.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-2-2-0-1" x="1258.05" y="508.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="state-2-2-1-0" x="1282.73" y="500.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="state-2-2-1-1" x="1302.05" y="508.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">3</text>
+<text id="label-s1-2-0" x="1233.75" y="456.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">s</text>
+<text id="label-s1-2-1" x="1249.53" y="463.68" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="label-s1-2-2" x="1251.77" y="443.20" font-family="DejaVu Serif" font-size="24.0" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<rect id="y-in" x="186.00" y="155.00" width="168.00" height="46.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2" />
+<polyline id="y-in-rule-1" points="228.00,155.00 228.00,201.00" fill="none" stroke="#25292D" stroke-width="1.3" />
+<polyline id="y-in-rule-2" points="270.00,155.00 270.00,201.00" fill="none" stroke="#25292D" stroke-width="3" />
+<polyline id="y-in-rule-3" points="312.00,155.00 312.00,201.00" fill="none" stroke="#25292D" stroke-width="1.3" />
+<text id="y-in-0-0" x="189.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="y-in-0-1" x="209.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="y-in-1-0" x="231.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="y-in-1-1" x="251.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="y-in-2-0" x="273.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="y-in-2-1" x="293.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="y-in-3-0" x="315.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="y-in-3-1" x="335.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">3</text>
+<rect id="y-out" x="1360.00" y="155.00" width="168.00" height="46.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2" />
+<polyline id="y-out-rule-1" points="1402.00,155.00 1402.00,201.00" fill="none" stroke="#25292D" stroke-width="1.3" />
+<polyline id="y-out-rule-2" points="1444.00,155.00 1444.00,201.00" fill="none" stroke="#25292D" stroke-width="3" />
+<polyline id="y-out-rule-3" points="1486.00,155.00 1486.00,201.00" fill="none" stroke="#25292D" stroke-width="1.3" />
+<text id="y-out-0-0" x="1363.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="y-out-0-1" x="1383.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">0</text>
+<text id="y-out-1-0" x="1405.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="y-out-1-1" x="1425.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<text id="y-out-2-0" x="1447.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="y-out-2-1" x="1467.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<text id="y-out-3-0" x="1489.73" y="184.91" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">n</text>
+<text id="y-out-3-1" x="1509.05" y="192.11" font-family="DejaVu Serif" font-size="22.5" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">3</text>
+<text x="12" y="42" font-family="Liberation Sans" font-size="27" fill="#78838B" text-anchor="start" font-weight="normal">Fixed row m</text><text x="12" y="187" font-family="Liberation Sans" font-size="28" fill="#25292D" text-anchor="start" font-weight="bold">Logical N</text><text x="12" y="346" font-family="Liberation Sans" font-size="28" fill="#25292D" text-anchor="start" font-weight="bold">Slice</text><text x="95.244" y="346" font-family="DejaVu Serif" font-size="28" fill="#25292D" text-anchor="start" font-weight="normal">P</text><text x="112.604" y="352.16" font-family="DejaVu Serif" font-size="19.599999999999998" fill="#25292D" text-anchor="start" font-weight="normal">0</text><text x="12" y="504" font-family="Liberation Sans" font-size="28" fill="#25292D" text-anchor="start" font-weight="bold">Slice</text><text x="95.244" y="504" font-family="DejaVu Serif" font-size="28" fill="#25292D" text-anchor="start" font-weight="normal">P</text><text x="112.604" y="510.16" font-family="DejaVu Serif" font-size="19.599999999999998" fill="#25292D" text-anchor="start" font-weight="normal">1</text></svg>

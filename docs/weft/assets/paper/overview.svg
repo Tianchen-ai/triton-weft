@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="536" viewBox="0 0 1536 536">
+<title>Two implementations of one operator and two ways to author the selected one</title>
+<desc>A familiar operator matmul(X, W) hides two implementation choices that use X: expanding the packed weights before computing Y, or preparing a weight region and reusing it for several output computations. The selected choice is authored either by assembling it from existing authoring objects (block programs, SIMD, intrinsics) or directly as a Weft program whose compiler performs the machine mapping. Both routes reach the same x86 and RISC-V CPUs.</desc>
+<rect id="canvas" x="0" y="0" width="1536" height="536" fill="#FFFFFF" stroke="none"/>
+<text id="formula-0" x="29.76" y="200.00" font-family="DejaVu Serif" font-size="44" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">Y</text>
+<text id="formula-1" x="68.48" y="200.00" font-family="DejaVu Serif" font-size="44" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">=</text>
+<text id="formula-2" x="115.03" y="200.00" font-family="DejaVu Serif" font-size="44" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">X</text>
+<text id="formula-3" x="146.36" y="200.00" font-family="DejaVu Serif" font-size="44" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">W</text>
+<text id="formula-4" x="194.22" y="181.52" font-family="DejaVu Serif" font-size="31.7" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">T</text>
+<text id="op-library" x="120.00" y="254.00" font-family="Liberation Sans" font-size="29" font-weight="bold" font-style="normal" text-anchor="middle" fill="#25292D">Operator library</text>
+<rect id="matmul-box" x="12.00" y="284.00" width="222.00" height="58.00" fill="#F1F2F3" stroke="#25292D" stroke-width="2"/>
+<text id="matmul" x="123.00" y="322.00" font-family="Liberation Mono" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">matmul(X, W)</text>
+<text id="choice-inside" x="123.00" y="382.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">choice inside</text>
+<polyline id="zoom-top" points="234.00,284.00 274.00,10.00" fill="none" stroke="#747D84" stroke-width="1.6" stroke-dasharray="6 5"/>
+<polyline id="zoom-bottom" points="234.00,342.00 274.00,526.00" fill="none" stroke="#747D84" stroke-width="1.6" stroke-dasharray="6 5"/>
+<rect id="frame" x="274.00" y="10.00" width="552.00" height="516.00" fill="#FFFFFF" stroke="#CCD2D6" stroke-width="2"/>
+<text id="frame-title" x="288.00" y="50.00" font-family="Liberation Sans" font-size="29" font-weight="bold" font-style="normal" text-anchor="start" fill="#25292D">Implementation choices</text>
+<text id="same-operator" x="814.00" y="50.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="end" fill="#747D84">same operator</text>
+<rect id="upper-box" x="284.00" y="70.00" width="532.00" height="186.00" fill="#FFFFFF" stroke="#CCD2D6" stroke-width="1.8"/>
+<text id="upper-title" x="300.00" y="106.00" font-family="Liberation Sans" font-size="29" font-weight="bold" font-style="normal" text-anchor="start" fill="#25292D">Expand, then compute</text>
+<rect id="u-packed" x="304.00" y="147.00" width="104.00" height="50.00" fill="#EDF4F8" stroke="#376784" stroke-width="2"/>
+<path id="u-packed-div" d="M 330.00 147.00 L 330.00 197.00 M 356.00 147.00 L 356.00 197.00 M 382.00 147.00 L 382.00 197.00" fill="none" stroke="#376784" stroke-width="1.6"/>
+<text id="u-packed-label" x="356.00" y="229.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">packed W</text>
+<polyline id="u-a1" points="408.00,172.00 451.00,172.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="u-a1-head" points="462.00,172.00 450.00,166.50 450.00,177.50" fill="#25292D" stroke="none"/>
+<rect id="expanded" x="462.00" y="147.00" width="166.00" height="50.00" fill="#F1F2F3" stroke="#9CA6AD" stroke-width="1.8"/>
+<path id="expanded-rules" d="M 471.00 149.00 L 471.00 195.00 M 480.00 149.00 L 480.00 195.00 M 489.00 149.00 L 489.00 195.00 M 498.00 149.00 L 498.00 195.00 M 507.00 149.00 L 507.00 195.00 M 516.00 149.00 L 516.00 195.00 M 525.00 149.00 L 525.00 195.00 M 534.00 149.00 L 534.00 195.00 M 543.00 149.00 L 543.00 195.00 M 552.00 149.00 L 552.00 195.00 M 561.00 149.00 L 561.00 195.00 M 570.00 149.00 L 570.00 195.00 M 579.00 149.00 L 579.00 195.00 M 588.00 149.00 L 588.00 195.00 M 597.00 149.00 L 597.00 195.00 M 606.00 149.00 L 606.00 195.00 M 615.00 149.00 L 615.00 195.00 M 624.00 149.00 L 624.00 195.00" fill="none" stroke="#9CA6AD" stroke-width="1.2"/>
+<text id="expanded-label" x="545.00" y="229.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">expanded W</text>
+<polyline id="u-a2" points="628.00,172.00 721.00,172.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="u-a2-head" points="732.00,172.00 720.00,166.50 720.00,177.50" fill="#25292D" stroke="none"/>
+<text id="u-with-x-0" x="641.25" y="160.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#747D84">with </text>
+<text id="u-with-x-1" x="698.82" y="160.00" font-family="DejaVu Serif" font-size="28" font-weight="normal" font-style="italic" text-anchor="start" fill="#747D84">X</text>
+<rect id="Y-box" x="732.00" y="147.00" width="64.00" height="50.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="Y-0" x="753.44" y="183.00" font-family="DejaVu Serif" font-size="32" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">Y</text>
+<rect id="lower-box" x="284.00" y="270.00" width="532.00" height="244.00" fill="#FFFFFF" stroke="#A38348" stroke-width="2.6"/>
+<text id="lower-title" x="300.00" y="306.00" font-family="Liberation Sans" font-size="29" font-weight="bold" font-style="normal" text-anchor="start" fill="#A38348">Prepare a region, reuse it</text>
+<rect id="l-packed" x="304.00" y="386.00" width="104.00" height="50.00" fill="#EDF4F8" stroke="#376784" stroke-width="2"/>
+<path id="l-packed-div" d="M 330.00 386.00 L 330.00 436.00 M 356.00 386.00 L 356.00 436.00 M 382.00 386.00 L 382.00 436.00" fill="none" stroke="#376784" stroke-width="1.6"/>
+<text id="l-packed-label" x="356.00" y="468.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">packed W</text>
+<polyline id="l-a1" points="408.00,411.00 463.00,411.00" fill="none" stroke="#25292D" stroke-width="2.2"/>
+<polygon id="l-a1-head" points="474.00,411.00 462.00,405.50 462.00,416.50" fill="#25292D" stroke="none"/>
+<rect id="prepared" x="474.00" y="386.00" width="128.00" height="50.00" fill="#EDF4F8" stroke="#376784" stroke-width="2"/>
+<path id="prepared-div" d="M 506.00 386.00 L 506.00 436.00 M 538.00 386.00 L 538.00 436.00 M 570.00 386.00 L 570.00 436.00" fill="none" stroke="#376784" stroke-width="1.6"/>
+<text id="prepared-label" x="538.00" y="468.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">prepared region</text>
+<polyline id="fan-stem" points="602.00,411.00 702.00,411.00" fill="none" stroke="#A38348" stroke-width="2.6"/>
+<polyline id="fan-bus" points="702.00,349.00 702.00,473.00" fill="none" stroke="#A38348" stroke-width="2.6"/>
+<text id="l-with-x-0" x="613.25" y="397.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#747D84">with </text>
+<text id="l-with-x-1" x="670.82" y="397.00" font-family="DejaVu Serif" font-size="28" font-weight="normal" font-style="italic" text-anchor="start" fill="#747D84">X</text>
+<polyline id="fan-0" points="702.00,349.00 723.00,349.00" fill="none" stroke="#A38348" stroke-width="2.6"/>
+<polygon id="fan-0-head" points="734.00,349.00 722.00,343.50 722.00,354.50" fill="#A38348" stroke="none"/>
+<rect id="y1-box" x="734.00" y="324.00" width="62.00" height="50.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="y1-0" x="749.35" y="358.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">y</text>
+<text id="y1-1" x="766.30" y="364.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">1</text>
+<polyline id="fan-1" points="702.00,411.00 723.00,411.00" fill="none" stroke="#A38348" stroke-width="2.6"/>
+<polygon id="fan-1-head" points="734.00,411.00 722.00,405.50 722.00,416.50" fill="#A38348" stroke="none"/>
+<rect id="y2-box" x="734.00" y="386.00" width="62.00" height="50.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="y2-0" x="749.35" y="420.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">y</text>
+<text id="y2-1" x="766.30" y="426.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">2</text>
+<polyline id="fan-2" points="702.00,473.00 723.00,473.00" fill="none" stroke="#A38348" stroke-width="2.6"/>
+<polygon id="fan-2-head" points="734.00,473.00 722.00,467.50 722.00,478.50" fill="#A38348" stroke="none"/>
+<rect id="y3-box" x="734.00" y="448.00" width="62.00" height="50.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="y3-0" x="749.35" y="482.00" font-family="DejaVu Serif" font-size="30" font-weight="normal" font-style="italic" text-anchor="start" fill="#25292D">y</text>
+<text id="y3-1" x="766.30" y="488.60" font-family="DejaVu Serif" font-size="21.6" font-weight="normal" font-style="normal" text-anchor="start" fill="#25292D">3</text>
+<polyline id="fork-stem" points="816.00,411.00 842.00,411.00" fill="none" stroke="#A38348" stroke-width="2.8"/>
+<circle id="fork-dot" cx="842.00" cy="411.00" r="7" fill="#A38348" stroke="#A38348" stroke-width="1"/>
+<polyline id="direct" points="842.00,411.00 959.00,411.00" fill="none" stroke="#A38348" stroke-width="2.8"/>
+<polygon id="direct-head" points="972.00,411.00 958.00,404.50 958.00,417.50" fill="#A38348" stroke="none"/>
+<text id="direct-1" x="856.00" y="367.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#A38348">direct</text>
+<text id="direct-2" x="856.00" y="397.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="start" fill="#A38348">control</text>
+<polyline id="today" points="842.00,411.00 842.00,172.00 959.00,172.00" fill="none" stroke="#A38348" stroke-width="2.6" stroke-dasharray="9 6"/>
+<polygon id="today-head" points="972.00,172.00 958.00,165.50 958.00,178.50" fill="#A38348" stroke="none"/>
+<text id="today-label" x="856.00" y="299.50" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="italic" text-anchor="start" fill="#A38348">today</text>
+<rect id="existing-box" x="972.00" y="76.00" width="404.00" height="192.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="existing-title" x="1174.00" y="112.00" font-family="Liberation Sans" font-size="29" font-weight="bold" font-style="normal" text-anchor="middle" fill="#25292D">Existing authoring objects</text>
+<rect id="object-0" x="982.00" y="138.00" width="124.00" height="68.00" fill="#F1F2F3" stroke="#B9C0C5" stroke-width="1.6"/>
+<text id="object-0-a" x="1044.00" y="166.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">Block</text>
+<text id="object-0-b" x="1044.00" y="196.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">program</text>
+<rect id="object-1" x="1112.00" y="138.00" width="124.00" height="68.00" fill="#F1F2F3" stroke="#B9C0C5" stroke-width="1.6"/>
+<text id="object-1" x="1174.00" y="182.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">SIMD</text>
+<rect id="object-2" x="1242.00" y="138.00" width="124.00" height="68.00" fill="#F1F2F3" stroke="#B9C0C5" stroke-width="1.6"/>
+<text id="object-2" x="1304.00" y="182.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">Intrinsics</text>
+<text id="assemble" x="1174.00" y="250.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">assemble the implementation</text>
+<rect id="weft-box" x="972.00" y="353.00" width="228.00" height="116.00" fill="#F8F0DE" stroke="#A38348" stroke-width="2.6"/>
+<text id="weft-title" x="1086.00" y="405.00" font-family="Liberation Sans" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#25292D">Weft program</text>
+<text id="weft-sub" x="1086.00" y="441.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">Triton extension</text>
+<polyline id="to-compiler" points="1200.00,411.00 1215.00,411.00" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polygon id="to-compiler-head" points="1226.00,411.00 1214.00,405.50 1214.00,416.50" fill="#25292D" stroke="none"/>
+<rect id="compiler-box" x="1226.00" y="353.00" width="148.00" height="116.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="compiler" x="1300.00" y="393.00" font-family="Liberation Sans" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#25292D">compiler</text>
+<text id="machine" x="1300.00" y="427.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">machine</text>
+<text id="mapping" x="1300.00" y="457.00" font-family="Liberation Sans" font-size="28" font-weight="normal" font-style="normal" text-anchor="middle" fill="#747D84">mapping</text>
+<rect id="cpu-box" x="1398.00" y="110.00" width="126.00" height="363.00" fill="#FFFFFF" stroke="#25292D" stroke-width="2"/>
+<text id="x86" x="1461.00" y="283.50" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">x86</text>
+<text id="riscv" x="1461.00" y="321.50" font-family="Liberation Sans" font-size="30" font-weight="normal" font-style="normal" text-anchor="middle" fill="#25292D">RISC-V</text>
+<polyline id="existing-to-cpu" points="1376.00,172.00 1387.00,172.00" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polygon id="existing-to-cpu-head" points="1398.00,172.00 1386.00,166.50 1386.00,177.50" fill="#25292D" stroke="none"/>
+<polyline id="compiler-to-cpu" points="1374.00,411.00 1387.00,411.00" fill="none" stroke="#25292D" stroke-width="2.4"/>
+<polygon id="compiler-to-cpu-head" points="1398.00,411.00 1386.00,405.50 1386.00,416.50" fill="#25292D" stroke="none"/>
+</svg>

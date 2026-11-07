@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="428.4pt" height="20.692913pt" viewBox="0 0 428.4 20.692913" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.9, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 20.692913 
+L 428.4 20.692913 
+L 428.4 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 235.62 9.725669 
+L 415.548 9.725669 
+L 415.548 2.897008 
+L 235.62 2.897008 
+z
+" style="fill: #ffffff"/>
+   </g>
+   <g id="QuadMesh_1">
+    <g clip-path="url(#p98bba95724)">
+     <filter id="colorAdd">
+      <feComposite in="SourceGraphic" in2="BackgroundImage" operator="arithmetic" k2="1" k3="1"/>
+     </filter>
+     <filter id="colorMat">
+      <feColorMatrix type="matrix" values="1 0 0 0 0 
+0 1 0 0 0 
+0 0 1 0 0 
+1 1 1 1 0 
+0 0 0 0 1 "/>
+     </filter>
+     <defs>
+      <linearGradient id="GR0_0" gradientUnits="userSpaceOnUse" x1="235.62" y1="9.725669" x2="236.135356" y2="2.936126">
+       <stop offset="1" style="stop-color: #e1cbc0; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #c99c89; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR0_1" gradientUnits="userSpaceOnUse" x1="325.584" y1="9.725669" x2="325.068644" y2="2.936126">
+       <stop offset="1" style="stop-color: #e1cbc0; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #f9faf8; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR0_2" gradientUnits="userSpaceOnUse" x1="280.602" y1="6.311339" x2="280.602" y2="9.725669">
+       <stop offset="1" style="stop-color: #e1cbc0; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #e1cbc0; stop-opacity: 0"/>
+      </linearGradient>
+     </defs>
+     <path d="M 280.602,6.311339 L 235.62,9.725669 325.584,9.725669 Z" fill="#e1cbc0" fill-opacity="1" shape-rendering="crispEdges"/>
+     <g stroke="none" stroke-width="0" shape-rendering="crispEdges" filter="url(#colorMat)">
+      <path d="M 280.602,6.311339 L 235.62,9.725669 325.584,9.725669 Z" fill="url(#GR0_0)" shape-rendering="crispEdges"/>
+      <path d="M 280.602,6.311339 L 235.62,9.725669 325.584,9.725669 Z" fill="url(#GR0_1)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+      <path d="M 280.602,6.311339 L 235.62,9.725669 325.584,9.725669 Z" fill="url(#GR0_2)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+     </g>
+     <defs>
+      <linearGradient id="GR1_0" gradientUnits="userSpaceOnUse" x1="325.584" y1="9.725669" x2="325.068644" y2="2.936126">
+       <stop offset="1" style="stop-color: #f1eae5; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #f9faf8; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR1_1" gradientUnits="userSpaceOnUse" x1="325.584" y1="2.897008" x2="325.068644" y2="9.686552">
+       <stop offset="1" style="stop-color: #f1eae5; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #f9faf8; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR1_2" gradientUnits="userSpaceOnUse" x1="280.602" y1="6.311339" x2="325.584" y2="6.311339">
+       <stop offset="1" style="stop-color: #f1eae5; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #e1cbc0; stop-opacity: 0"/>
+      </linearGradient>
+     </defs>
+     <path d="M 280.602,6.311339 L 325.584,9.725669 325.584,2.897008 Z" fill="#f1eae5" fill-opacity="1" shape-rendering="crispEdges"/>
+     <g stroke="none" stroke-width="0" shape-rendering="crispEdges" filter="url(#colorMat)">
+      <path d="M 280.602,6.311339 L 325.584,9.725669 325.584,2.897008 Z" fill="url(#GR1_0)" shape-rendering="crispEdges"/>
+      <path d="M 280.602,6.311339 L 325.584,9.725669 325.584,2.897008 Z" fill="url(#GR1_1)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+      <path d="M 280.602,6.311339 L 325.584,9.725669 325.584,2.897008 Z" fill="url(#GR1_2)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+     </g>
+     <defs>
+      <linearGradient id="GR2_0" gradientUnits="userSpaceOnUse" x1="325.584" y1="2.897008" x2="325.068644" y2="9.686552">
+       <stop offset="1" style="stop-color: #e1cbc0; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #f9faf8; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR2_1" gradientUnits="userSpaceOnUse" x1="235.62" y1="2.897008" x2="236.135356" y2="9.686552">
+       <stop offset="1" style="stop-color: #e1cbc0; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #c99c89; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR2_2" gradientUnits="userSpaceOnUse" x1="280.602" y1="6.311339" x2="280.602" y2="2.897008">
+       <stop offset="1" style="stop-color: #e1cbc0; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #e1cbc0; stop-opacity: 0"/>
+      </linearGradient>
+     </defs>
+     <path d="M 280.602,6.311339 L 325.584,2.897008 235.62,2.897008 Z" fill="#e1cbc0" fill-opacity="1" shape-rendering="crispEdges"/>
+     <g stroke="none" stroke-width="0" shape-rendering="crispEdges" filter="url(#colorMat)">
+      <path d="M 280.602,6.311339 L 325.584,2.897008 235.62,2.897008 Z" fill="url(#GR2_0)" shape-rendering="crispEdges"/>
+      <path d="M 280.602,6.311339 L 325.584,2.897008 235.62,2.897008 Z" fill="url(#GR2_1)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+      <path d="M 280.602,6.311339 L 325.584,2.897008 235.62,2.897008 Z" fill="url(#GR2_2)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+     </g>
+     <defs>
+      <linearGradient id="GR3_0" gradientUnits="userSpaceOnUse" x1="235.62" y1="2.897008" x2="236.135356" y2="9.686552">
+       <stop offset="1" style="stop-color: #d1ac9b; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #c99c89; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR3_1" gradientUnits="userSpaceOnUse" x1="235.62" y1="9.725669" x2="236.135356" y2="2.936126">
+       <stop offset="1" style="stop-color: #d1ac9b; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #c99c89; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR3_2" gradientUnits="userSpaceOnUse" x1="280.602" y1="6.311339" x2="235.62" y2="6.311339">
+       <stop offset="1" style="stop-color: #d1ac9b; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #e1cbc0; stop-opacity: 0"/>
+      </linearGradient>
+     </defs>
+     <path d="M 280.602,6.311339 L 235.62,2.897008 235.62,9.725669 Z" fill="#d1ac9b" fill-opacity="1" shape-rendering="crispEdges"/>
+     <g stroke="none" stroke-width="0" shape-rendering="crispEdges" filter="url(#colorMat)">
+      <path d="M 280.602,6.311339 L 235.62,2.897008 235.62,9.725669 Z" fill="url(#GR3_0)" shape-rendering="crispEdges"/>
+      <path d="M 280.602,6.311339 L 235.62,2.897008 235.62,9.725669 Z" fill="url(#GR3_1)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+      <path d="M 280.602,6.311339 L 235.62,2.897008 235.62,9.725669 Z" fill="url(#GR3_2)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+     </g>
+     <defs>
+      <linearGradient id="GR4_0" gradientUnits="userSpaceOnUse" x1="325.584" y1="9.725669" x2="326.099356" y2="2.936126">
+       <stop offset="1" style="stop-color: #a2bcc8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #f9faf8; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR4_1" gradientUnits="userSpaceOnUse" x1="415.548" y1="9.725669" x2="415.032644" y2="2.936126">
+       <stop offset="1" style="stop-color: #a2bcc8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #4b7f98; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR4_2" gradientUnits="userSpaceOnUse" x1="370.566" y1="6.311339" x2="370.566" y2="9.725669">
+       <stop offset="1" style="stop-color: #a2bcc8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #a2bcc8; stop-opacity: 0"/>
+      </linearGradient>
+     </defs>
+     <path d="M 370.566,6.311339 L 325.584,9.725669 415.548,9.725669 Z" fill="#a2bcc8" fill-opacity="1" shape-rendering="crispEdges"/>
+     <g stroke="none" stroke-width="0" shape-rendering="crispEdges" filter="url(#colorMat)">
+      <path d="M 370.566,6.311339 L 325.584,9.725669 415.548,9.725669 Z" fill="url(#GR4_0)" shape-rendering="crispEdges"/>
+      <path d="M 370.566,6.311339 L 325.584,9.725669 415.548,9.725669 Z" fill="url(#GR4_1)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+      <path d="M 370.566,6.311339 L 325.584,9.725669 415.548,9.725669 Z" fill="url(#GR4_2)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+     </g>
+     <defs>
+      <linearGradient id="GR5_0" gradientUnits="userSpaceOnUse" x1="415.548" y1="9.725669" x2="415.032644" y2="2.936126">
+       <stop offset="1" style="stop-color: #6893a8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #4b7f98; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR5_1" gradientUnits="userSpaceOnUse" x1="415.548" y1="2.897008" x2="415.032644" y2="9.686552">
+       <stop offset="1" style="stop-color: #6893a8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #4b7f98; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR5_2" gradientUnits="userSpaceOnUse" x1="370.566" y1="6.311339" x2="415.548" y2="6.311339">
+       <stop offset="1" style="stop-color: #6893a8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #a2bcc8; stop-opacity: 0"/>
+      </linearGradient>
+     </defs>
+     <path d="M 370.566,6.311339 L 415.548,9.725669 415.548,2.897008 Z" fill="#6893a8" fill-opacity="1" shape-rendering="crispEdges"/>
+     <g stroke="none" stroke-width="0" shape-rendering="crispEdges" filter="url(#colorMat)">
+      <path d="M 370.566,6.311339 L 415.548,9.725669 415.548,2.897008 Z" fill="url(#GR5_0)" shape-rendering="crispEdges"/>
+      <path d="M 370.566,6.311339 L 415.548,9.725669 415.548,2.897008 Z" fill="url(#GR5_1)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+      <path d="M 370.566,6.311339 L 415.548,9.725669 415.548,2.897008 Z" fill="url(#GR5_2)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+     </g>
+     <defs>
+      <linearGradient id="GR6_0" gradientUnits="userSpaceOnUse" x1="415.548" y1="2.897008" x2="415.032644" y2="9.686552">
+       <stop offset="1" style="stop-color: #a2bcc8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #4b7f98; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR6_1" gradientUnits="userSpaceOnUse" x1="325.584" y1="2.897008" x2="326.099356" y2="9.686552">
+       <stop offset="1" style="stop-color: #a2bcc8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #f9faf8; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR6_2" gradientUnits="userSpaceOnUse" x1="370.566" y1="6.311339" x2="370.566" y2="2.897008">
+       <stop offset="1" style="stop-color: #a2bcc8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #a2bcc8; stop-opacity: 0"/>
+      </linearGradient>
+     </defs>
+     <path d="M 370.566,6.311339 L 415.548,2.897008 325.584,2.897008 Z" fill="#a2bcc8" fill-opacity="1" shape-rendering="crispEdges"/>
+     <g stroke="none" stroke-width="0" shape-rendering="crispEdges" filter="url(#colorMat)">
+      <path d="M 370.566,6.311339 L 415.548,2.897008 325.584,2.897008 Z" fill="url(#GR6_0)" shape-rendering="crispEdges"/>
+      <path d="M 370.566,6.311339 L 415.548,2.897008 325.584,2.897008 Z" fill="url(#GR6_1)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+      <path d="M 370.566,6.311339 L 415.548,2.897008 325.584,2.897008 Z" fill="url(#GR6_2)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+     </g>
+     <defs>
+      <linearGradient id="GR7_0" gradientUnits="userSpaceOnUse" x1="325.584" y1="2.897008" x2="326.099356" y2="9.686552">
+       <stop offset="1" style="stop-color: #dce5e8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #f9faf8; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR7_1" gradientUnits="userSpaceOnUse" x1="325.584" y1="9.725669" x2="326.099356" y2="2.936126">
+       <stop offset="1" style="stop-color: #dce5e8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #f9faf8; stop-opacity: 0"/>
+      </linearGradient>
+      <linearGradient id="GR7_2" gradientUnits="userSpaceOnUse" x1="370.566" y1="6.311339" x2="325.584" y2="6.311339">
+       <stop offset="1" style="stop-color: #dce5e8; stop-opacity: 1"/>
+       <stop offset="0" style="stop-color: #a2bcc8; stop-opacity: 0"/>
+      </linearGradient>
+     </defs>
+     <path d="M 370.566,6.311339 L 325.584,2.897008 325.584,9.725669 Z" fill="#dce5e8" fill-opacity="1" shape-rendering="crispEdges"/>
+     <g stroke="none" stroke-width="0" shape-rendering="crispEdges" filter="url(#colorMat)">
+      <path d="M 370.566,6.311339 L 325.584,2.897008 325.584,9.725669 Z" fill="url(#GR7_0)" shape-rendering="crispEdges"/>
+      <path d="M 370.566,6.311339 L 325.584,2.897008 325.584,9.725669 Z" fill="url(#GR7_1)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+      <path d="M 370.566,6.311339 L 325.584,2.897008 325.584,9.725669 Z" fill="url(#GR7_2)" filter="url(#colorAdd)" shape-rendering="crispEdges"/>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <defs>
+       <path id="m6cd9c81c9b" d="M 0 0 
+L 0 1.5 
+" style="stroke: #000000; stroke-width: 0.45"/>
+      </defs>
+      <g>
+       <use xlink:href="#m6cd9c81c9b" x="235.62" y="9.725669" style="stroke: #000000; stroke-width: 0.45"/>
+      </g>
+     </g>
+     <g id="text_1">
+      <text style="font-size: 5.9px; font-family: 'Liberation Serif'; text-anchor: middle" x="235.62" y="16.319716" transform="rotate(-0 235.62 16.319716)">0.125</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_2">
+      <g>
+       <use xlink:href="#m6cd9c81c9b" x="265.608" y="9.725669" style="stroke: #000000; stroke-width: 0.45"/>
+      </g>
+     </g>
+     <g id="text_2">
+      <text style="font-size: 5.9px; font-family: 'Liberation Serif'; text-anchor: middle" x="265.608" y="16.319716" transform="rotate(-0 265.608 16.319716)">0.25</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_3">
+      <g>
+       <use xlink:href="#m6cd9c81c9b" x="295.596" y="9.725669" style="stroke: #000000; stroke-width: 0.45"/>
+      </g>
+     </g>
+     <g id="text_3">
+      <text style="font-size: 5.9px; font-family: 'Liberation Serif'; text-anchor: middle" x="295.596" y="16.319716" transform="rotate(-0 295.596 16.319716)">0.5</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_4">
+      <g>
+       <use xlink:href="#m6cd9c81c9b" x="325.584" y="9.725669" style="stroke: #000000; stroke-width: 0.45"/>
+      </g>
+     </g>
+     <g id="text_4">
+      <text style="font-size: 5.9px; font-family: 'Liberation Serif'; text-anchor: middle" x="325.584" y="16.319716" transform="rotate(-0 325.584 16.319716)">1</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_5">
+      <g>
+       <use xlink:href="#m6cd9c81c9b" x="355.572" y="9.725669" style="stroke: #000000; stroke-width: 0.45"/>
+      </g>
+     </g>
+     <g id="text_5">
+      <text style="font-size: 5.9px; font-family: 'Liberation Serif'; text-anchor: middle" x="355.572" y="16.319716" transform="rotate(-0 355.572 16.319716)">2</text>
+     </g>
+    </g>
+    <g id="xtick_6">
+     <g id="line2d_6">
+      <g>
+       <use xlink:href="#m6cd9c81c9b" x="385.56" y="9.725669" style="stroke: #000000; stroke-width: 0.45"/>
+      </g>
+     </g>
+     <g id="text_6">
+      <text style="font-size: 5.9px; font-family: 'Liberation Serif'; text-anchor: middle" x="385.56" y="16.319716" transform="rotate(-0 385.56 16.319716)">4</text>
+     </g>
+    </g>
+    <g id="xtick_7">
+     <g id="line2d_7">
+      <g>
+       <use xlink:href="#m6cd9c81c9b" x="415.548" y="9.725669" style="stroke: #000000; stroke-width: 0.45"/>
+      </g>
+     </g>
+     <g id="text_7">
+      <text style="font-size: 5.9px; font-family: 'Liberation Serif'; text-anchor: middle" x="415.548" y="16.319716" transform="rotate(-0 415.548 16.319716)">8</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2"/>
+   <g id="patch_3">
+    <path d="M 235.62 9.725669 
+L 235.62 2.897008 
+" style="fill: none; stroke: #202020; stroke-width: 0.35; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 415.548 9.725669 
+L 415.548 2.897008 
+" style="fill: none; stroke: #202020; stroke-width: 0.35; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 235.62 9.725669 
+L 415.548 9.725669 
+" style="fill: none; stroke: #202020; stroke-width: 0.35; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 235.62 2.897008 
+L 415.548 2.897008 
+" style="fill: none; stroke: #202020; stroke-width: 0.35; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+  </g>
+  <g id="text_8">
+   <text style="font-size: 6.5px; font-family: 'Liberation Serif'; text-anchor: start; fill: #202020" x="6.426" y="7.357063" transform="rotate(-0 6.426 7.357063)">Speedup vs intrinsic C local/direct</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p98bba95724">
+   <rect x="235.62" y="2.897008" width="179.928" height="6.828661"/>
+  </clipPath>
+ </defs>
+</svg>

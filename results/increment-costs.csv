@@ -1,0 +1,4 @@
+format,first,encoding,decoder,first_operator,second,reused_by_dot,new_reduction_helper
+mxfp4,19,6,0,13,49,6,22
+nvfp4,22,6,0,16,57,6,22
+iq2_xxs,36,7,21,8,24,28,0

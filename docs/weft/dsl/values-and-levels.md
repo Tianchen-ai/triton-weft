@@ -53,6 +53,11 @@ with tl.level.rows(M, group=1) as row:
 This makes the read's scope explicit. A body-local temporary belongs to the body;
 an initializer captures the incoming SSA environment.
 
+[![State partition into physical slices](../assets/paper/state-partition.svg)](../assets/paper/state-partition.svg)
+
+Each physical slice carries coordinates of one logical state and follows its
+declared initialization, updates and handoff.
+
 ## Updates and handoff
 
 Ordinary assignments express state changes: `total += contribution`,

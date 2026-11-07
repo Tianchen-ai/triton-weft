@@ -15,13 +15,13 @@ specific vector or matrix machine.
 | Which consumers share a value | Level and stage | Several output groups consume one staged weight panel |
 | How long an update chain lives | Level and state | An F32 accumulator persists across all blocks of a panel |
 
-[![Independent storage, grouping and state boundaries in Q4_K projection](../assets/paper/model.png)](../assets/paper/model.png)
+[![Independent storage, grouping and state boundaries in Q4_K projection](../assets/paper/model.svg)](../assets/paper/model.svg)
 
-In the paper's Q4_K projection, **A** is a shared weight panel; **B** is each
-output group's F32 state; **C** is an I32 state for one 256-element block; **D**
-contains the grouped I16 partials. Changing the shared panel's scope affects
-repeated preparation. Changing a partial's width affects arithmetic and conversion.
-Both choices remain visible in the source.
+The blue fields are shared by two independent output states. Each record
+contributes a scaled update. The expansion shows widened integer partials and
+Q4_K's correction; the lowest row exposes the four-product I16 boundary.
+Moving the fields' scope changes repeated preparation; changing partial types
+changes numerical grouping. Both remain author choices.
 
 ## A small complete example
 
@@ -77,3 +77,10 @@ Read [Encoding](../dsl/encoding-and-artifacts.md), [Level and state](../dsl/valu
 and [numerical operations](../dsl/functions-and-operations.md) in that order.
 The complete [model contract](https://github.com/Tianchen-ai/triton-weft/blob/main/docs/specification/programming-model/index.md)
 defines the author/physical boundary.
+
+## Reuse definitions across consumers
+
+[![One Encoding serves different consumers](../assets/paper/encoding-reuse.svg)](../assets/paper/encoding-reuse.svg)
+
+One field definition serves dequantization, dot products and full projection.
+Factories bind format helpers while sharing preparation, arithmetic and traversal.

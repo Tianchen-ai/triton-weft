@@ -4,12 +4,18 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      handbook_only:
+        description: 'Publish handbook updates for an already validated release'
+        type: boolean
+        default: false
   schedule:
     - cron: '0 8 * * *'
 permissions:
   contents: read
 jobs:
   wheel:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.handbook_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -21,7 +27,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -r python/requirements.txt build
+      - run: python -m pip install -r python/requirements.txt build numpy pytest
       - name: Select the matching LLVM compiler
         run: |
           python python/build_helpers.py write_thirdparty_cmake_vars --triton-cache-path "$RUNNER_TEMP/triton-dependencies" --packages llvm --output "$RUNNER_TEMP/triton-llvm.cmake"
@@ -34,7 +40,7 @@ jobs:
           if len(matches) != 1:
               raise RuntimeError("LLVM helper did not resolve one SDK")
           sdk = Path(matches[0])
-          values = {"LLVM_SYSPATH": sdk, "CC": sdk / "bin/clang", "CXX": sdk / "bin/clang++"}
+          values = {"LLVM_SYSPATH": sdk, "TRITON_WEFT_CLANG_ROOT": sdk}
           for key, path in values.items():
               if not path.exists():
                   raise RuntimeError(f"missing {key}: {path}")
@@ -42,9 +48,42 @@ jobs:
               for key, path in values.items():
                   output.write(f"{key}={path}\n")
           PY
+      - name: Select the supported host GCC 12 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-12 g++-12
+          echo 'CC=gcc-12' >> "$GITHUB_ENV"
+          echo 'CXX=g++-12' >> "$GITHUB_ENV"
+      - name: Build the OpenMP runtime matching Clang
+        run: |
+          revision=$(python -c 'import json; print(json.load(open("cmake/llvm-info.json"))["llvm_hash"])')
+          git init "$RUNNER_TEMP/llvm-runtime-source"
+          git -C "$RUNNER_TEMP/llvm-runtime-source" remote add origin https://github.com/llvm/llvm-project.git
+          git -C "$RUNNER_TEMP/llvm-runtime-source" fetch --depth 1 origin "$revision"
+          git -C "$RUNNER_TEMP/llvm-runtime-source" checkout --detach FETCH_HEAD
+          install -m 644 "$RUNNER_TEMP/llvm-runtime-source/llvm/LICENSE.TXT" "$LLVM_SYSPATH/LICENSE.TXT"
+          cmake -S "$RUNNER_TEMP/llvm-runtime-source/runtimes" -B "$RUNNER_TEMP/openmp-build" -G Ninja \
+            -DLLVM_ENABLE_RUNTIMES=openmp -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$LLVM_SYSPATH/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$LLVM_SYSPATH/bin/clang++" \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/openmp"
+          cmake --build "$RUNNER_TEMP/openmp-build" --parallel 2
+          cmake --install "$RUNNER_TEMP/openmp-build"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'openmp'
+          library = next(root.rglob('libomp.so'))
+          header = next(root.rglob('omp.h')).parent
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'TRITON_WEFT_OPENMP_LIBRARY={library}\n')
+              output.write(f'TRITON_WEFT_OPENMP_INCLUDE_DIR={header}\n')
+          PY
       - run: python -m build --wheel --no-isolation
       - run: python -m pip install --no-deps dist/*.whl
-      - run: python -c "import triton; from triton._C.libtriton import weft; from triton.runtime.package import sdk_prefix; print(triton.__version__, sdk_prefix())"
+      - run: python -c "import triton; from triton._C.libtriton import weft; from triton.runtime.package import sdk_prefix; assert triton.__weft_version__ == '1.0.0'; print(triton.__version__, triton.__weft_version__, sdk_prefix())"
+      - run: python -m examples.weft.quickstart
+      - run: python -m pytest python/test/weft -s --tb=short
       - uses: actions/upload-artifact@v4
         with:
           name: triton-host-compiler-wheel
