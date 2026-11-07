@@ -180,13 +180,16 @@ public:
     auto indices = dyn_cast<k::ValueType>(lookup.getIndices().getType());
     auto result = dyn_cast<k::ValueType>(lookup.getResult().getType());
     if (!table || !indices || !result || table.getShape().size() != 1 ||
-        table.getShape()[0] <= 0 || indices.getShape() != table.getShape() ||
-        result.getShape() != table.getShape() ||
-        result.getElementType() != table.getElementType() ||
-        !weft::analysis::hasUnsignedBound(lookup.getIndices(), table.getShape()[0]) ||
-        !weft::analysis::hasNonWrappingUnitStride(
-            lookup.getIndices(), indices.getAxisIds()[0]))
+        table.getShape()[0] <= 0 || result.getShape() != indices.getShape() ||
+        result.getElementType() != table.getElementType())
       return failure();
+    int64_t elements = 1;
+    for (int64_t extent : indices.getShape().asArrayRef()) {
+      if (extent <= 0 || elements > table.getShape()[0] / extent) return failure();
+      elements *= extent;
+    }
+    if (elements != table.getShape()[0] ||
+        !weft::analysis::hasRowMajorCoordinates(lookup.getIndices())) return failure();
     // N consecutive, non-wrapping indices within [0, N) select the original
     // SSA coordinates. Only their axis names can differ; the read epoch and
     // any state/stage birth remain on the original value.

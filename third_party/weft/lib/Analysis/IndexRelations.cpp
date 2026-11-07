@@ -81,6 +81,8 @@ class IndexRelations {
     }
     if (auto fresh = dyn_cast_or_null<wk::NewOp>(op))
       if (fresh.getInitial()) return remember(range(fresh.getInitial(), depth + 1));
+    if (auto reshape = dyn_cast_or_null<wk::ReshapeOp>(op))
+      return remember(range(reshape.getInput(), depth + 1));
     if (auto binary = dyn_cast_or_null<wk::BinaryOp>(op)) {
       Bounds left = range(binary.getLhs(), depth + 1), right = range(binary.getRhs(), depth + 1);
       StringRef kind = binary.getKind();
@@ -137,15 +139,35 @@ class IndexRelations {
     }
     if (auto fresh = dyn_cast_or_null<wk::NewOp>(op))
       if (fresh.getInitial()) return remember(step(fresh.getInitial(), depth + 1));
+    if (auto reshape = dyn_cast_or_null<wk::ReshapeOp>(op)) {
+      auto input = reshape.getInput().getType();
+      if (input.getShape() == shaped.getShape() &&
+          llvm::equal(reshape.getOrder(), input.getAxisIds().asArrayRef()))
+        return remember(IndexRelations(input.getAxisIds()[found - ids.begin()])
+            .step(reshape.getInput(), depth + 1));
+    }
     if (auto binary = dyn_cast_or_null<wk::BinaryOp>(op)) {
       auto left = step(binary.getLhs(), depth + 1), right = step(binary.getRhs(), depth + 1);
       Bounds a = range(binary.getLhs()), b = range(binary.getRhs());
-      // Only unit/invariant additions are needed for memory packets. Requiring
-      // nonnegative ranges also handles signed reinterpretation at the final
-      // pointer-width extension, rather than trusting a modular stride alone.
+      // Keep exact nonnegative affine strides, including row-major index
+      // construction. Each arithmetic result must fit its declared type.
       if (left && right && binary.getKind() == "add" && *left >= 0 && *right >= 0 &&
-          *left <= 1 && *right <= 1 && a.high <= limit && b.high <= limit - a.high)
+          *right <= INT64_MAX - *left && a.high <= limit && b.high <= limit - a.high)
         return remember(*left + *right);
+      auto scaled = [&](std::optional<int64_t> stride, Bounds factor) -> std::optional<int64_t> {
+        if (!stride || *stride < 0 || factor.low != factor.high ||
+            (factor.high && uint64_t(*stride) > uint64_t(INT64_MAX) / factor.high)) return {};
+        return *stride * factor.high;
+      };
+      if (left && right && binary.getKind() == "mul" &&
+          a.high <= limit && (!b.high || a.high <= limit / b.high)) {
+        if (*right == 0) return remember(scaled(left, b));
+        if (*left == 0) return remember(scaled(right, a));
+      }
+      if (left && right && *right == 0 && binary.getKind() == "shl" &&
+          b.low == b.high && b.high < type.getWidth() &&
+          a.high <= (limit >> b.high))
+        return remember(scaled(left, {uint64_t(1) << b.high, uint64_t(1) << b.high}));
     }
     return remember({});
   }
@@ -153,6 +175,7 @@ class IndexRelations {
 public:
   explicit IndexRelations(int64_t axis) : axis(axis) {}
   bool unit(Value value) { return step(value) == std::optional<int64_t>(1); }
+  bool hasStep(Value value, int64_t expected) { return step(value) == std::optional<int64_t>(expected); }
   bool below(Value value, uint64_t extent) { return extent && range(value).high < extent; }
 };
 } // namespace
@@ -162,4 +185,18 @@ bool weft::analysis::hasNonWrappingUnitStride(Value value, int64_t axis) {
 }
 bool weft::analysis::hasUnsignedBound(Value value, uint64_t extent) {
   return IndexRelations(0).below(value, extent);
+}
+bool weft::analysis::hasRowMajorCoordinates(Value value) {
+  auto type = dyn_cast<wk::ValueType>(value.getType());
+  if (!type) return false;
+  uint64_t stride = 1;
+  auto axes = type.getAxisIds().asArrayRef(), shape = type.getShape().asArrayRef();
+  for (size_t dimension = shape.size(); dimension-- > 0;) {
+    int64_t extent = shape[dimension];
+    if (extent <= 0 || stride > uint64_t(INT64_MAX) / uint64_t(extent)) return false;
+    if (extent > 1 && !IndexRelations(axes[dimension]).hasStep(value, stride))
+      return false;
+    stride *= extent;
+  }
+  return IndexRelations(0).below(value, stride);
 }
