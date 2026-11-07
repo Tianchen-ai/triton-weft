@@ -1054,6 +1054,10 @@ riscv::ValueType separateBitmaskWindowAxes(
     mlir::Builder &builder, riscv::ValueType result, int64_t recordAxis,
     size_t retainedAxes, llvm::SmallVectorImpl<int64_t> &windowAxes,
     int64_t &nextAxis) {
+  // A single source-axis window replaces that axis directly. Only a split
+  // window needs private axes disjoint from the retained record coordinates.
+  if (windowAxes.size() == 1 && windowAxes.front() == recordAxis)
+    return result;
   auto axes = llvm::to_vector(result.getAxisIds().asArrayRef());
   bool renamed = false;
   for (auto [offset, axis] : llvm::enumerate(windowAxes)) {

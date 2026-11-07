@@ -37,6 +37,9 @@ fragment accumulator 的局部整数 pointwise 可穿过同 shape、行主序不
 原 fragment 坐标上计算，再在数值出口恢复目标轴。该变换要求单消费者、同 block 和
 精确匹配的操作数坐标，不跨越显式 birth。兼容的整数 partial 因此仍由已有 fragment
 pointwise 与 MMA 累加器复用实现，不因匿名局部轴而先 unpack 两份完整结果。
+单轴 packed-bit 窗口直接替换原字段轴，保留所选谓词的坐标身份；只有拆成多个
+窗口轴时才引入私有轴。相同域上的符号乘积因此可以直接消费 packed predicate，
+不必先将它解码为 byte、改回原轴再重新构造 mask。读取位置和源窗口范围不变。
 一维 SSA 表的完整恒等 lookup 复用共同索引分析：N 个连续、无回绕且处于 `[0,N)`
 的坐标直接使用原 Value，只保留必要的轴重命名。
 多轴坐标若在每条逻辑轴上具有 row-major stride，完整体积与表一致，且所有中间

@@ -34,6 +34,10 @@ source axis, and records the result rename as an explicit representation edge.
 The index expression does not require a numeric scratch array. The read keeps
 its original snapshot and active domain. Byte-carried Boolean values use dense
 byte transfers; a packed mask retains its separate bit-storage contract.
+A single-axis packed-bit window keeps that source axis. Only a window split
+across multiple axes needs private window coordinates. A sign consumer with
+the same geometry can therefore consume the selected predicate directly,
+without decoding it into bytes and rebuilding the mask.
 
 A grouped read from a one-dimensional numeric snapshot can also produce a scalar.
 The representation pass saves the original Value once and selects the scalar from
