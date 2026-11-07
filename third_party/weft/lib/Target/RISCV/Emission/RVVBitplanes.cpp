@@ -443,39 +443,22 @@ mlir::LogicalResult Emitter::compileRVVSignedBitmaskReduce(
     return fail(operation,
                 "RVV signed-bitmask reduction selected an illegal mask ratio");
   const std::string vl = partVL(operation.getData(), 0);
-  auto *context = operation.getContext();
-  auto wideLayout = riscv::LayoutAttr::get(
-      context, layout.getCarrier(), layout.getAxisIds(), layout.getTimeFactors(),
-      layout.getLaneFactors(), layout.getReplicaFactors(),
-      layout.getFragmentFactors(), layout.getLocalFactors(), 16,
-      layout.getLmulEighths() * 2, layout.getVl(),
-      std::max<int64_t>(1, (layout.getLmulEighths() * 2 + 7) / 8),
-      layout.getValidity(), layout.getReplicaGroup());
-  auto wideType = riscv::ValueType::get(
-      context, mlir::IntegerType::get(context, 16, mlir::IntegerType::Signed),
-      dataType.getShape(), dataType.getAxisIds(), wideLayout);
-  const std::string suffix = vectorSuffixFor(wideType);
-  const std::string vectorTypeName = "vint16" + suffix.substr(3) + "_t";
-  const std::string narrowSuffix = vectorSuffix(operation.getData());
-  std::string negative = fresh("signed_bitmask_negative");
-  line(vectorType(operation.getData()) + " " + negative +
-       " = __riscv_vmv_v_x_" + narrowSuffix + "(-1, " + vl + ");");
-  std::string signs = fresh("signed_bitmask_signs");
-  line(vectorType(operation.getData()) + " " + signs +
-       " = __riscv_vmerge_vxm_" + narrowSuffix + "(" + negative +
-       ", 1, " + mask.parts.front() + ", " + vl + ");");
-  std::string product = fresh("signed_bitmask_product");
-  line(vectorTypeName + " " + product + " = __riscv_vwmul_vv_" + suffix +
-       "(" + data.parts.front() + ", " + signs + ", " + vl + ");");
+  const std::string suffix = vectorSuffix(operation.getData());
   std::string zero = fresh("signed_bitmask_zero");
   line("vint16m1_t " + zero +
        " = __riscv_vmv_v_x_i16m1(0, 1);");
-  std::string reduced = fresh("signed_bitmask_sum");
-  line("vint16m1_t " + reduced + " = __riscv_vredsum_vs_" + suffix +
-       "_i16m1(" + product + ", " + zero + ", " + vl + ");");
+  std::string total = fresh("signed_bitmask_total");
+  line("vint16m1_t " + total + " = __riscv_vwredsum_vs_" + suffix +
+       "_i16m1_tu(" + zero + ", " + data.parts.front() + ", " + zero +
+       ", " + vl + ");");
+  std::string positive = fresh("signed_bitmask_positive");
+  line("vint16m1_t " + positive + " = __riscv_vwredsum_vs_" + suffix +
+       "_i16m1_tum(" + mask.parts.front() + ", " + zero + ", " +
+       data.parts.front() + ", " + zero + ", " + vl + ");");
   Binding result;
   result.kind = Binding::Kind::Scalar;
-  result.scalar = "((int32_t)__riscv_vmv_x_s_i16m1_i16(" + reduced + "))";
+  result.scalar = "(2 * (int32_t)__riscv_vmv_x_s_i16m1_i16(" + positive +
+                  ") - (int32_t)__riscv_vmv_x_s_i16m1_i16(" + total + "))";
   bindings[operation.getResult()] = std::move(result);
   return mlir::success();
 }

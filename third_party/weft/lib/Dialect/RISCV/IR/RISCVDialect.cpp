@@ -6784,7 +6784,7 @@ mlir::LogicalResult RVVSignedBitmaskReduceOp::verify() {
       !resultElement || !resultElement.isSigned() ||
       resultElement.getWidth() != 32 || !hasAxis || extent <= 0 ||
       extent >= 256 || data.getLayout().getLmulEighths() <= 0 ||
-      data.getLayout().getLmulEighths() > 32 ||
+      data.getLayout().getLmulEighths() > 64 ||
       mask.getShape() != data.getShape() ||
       mask.getAxisIds() != data.getAxisIds() ||
       mask.getLayout() != data.getLayout() || !onlyReductionAxisIsStreamed ||
@@ -6796,13 +6796,11 @@ mlir::LogicalResult RVVSignedBitmaskReduceOp::verify() {
               data.getLayout().getLaneFactors()[axisPosition] !=
           extent ||
       (validity != "full" && validity != "tail") ||
-      getLeaf().getTemporaryGroups() !=
-          data.getLayout().getRegisterGroups() +
-              std::max<int64_t>(1, (data.getLayout().getLmulEighths() * 2 + 7) / 8) + 1 ||
+      getLeaf().getTemporaryGroups() != 3 ||
       !exactLeaf(getLeaf(), "rvv", "signed-bitmask-reduce",
                  "rvv.signed-bitmask-reduce.i8-i16", "none", tail))
     return emitOpError(
-        "RVV signed-bitmask reduction requires one signed-i8 lane value, a legal doubled-width i16 carrier, one materialized logical-u1 mask in the same exact lane geometry, a proven i16-safe reduction extent, and the exact selected leaf and temporary carriers");
+        "RVV signed-bitmask reduction requires one legal signed-i8 lane value, one materialized logical-u1 mask in the same exact lane geometry, a proven i16-safe reduction extent, and the exact selected leaf with its seed and two i16 reduction carriers");
   return mlir::success();
 }
 
