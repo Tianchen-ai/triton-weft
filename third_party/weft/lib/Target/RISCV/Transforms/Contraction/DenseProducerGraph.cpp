@@ -15,6 +15,14 @@ using namespace weft;
 using namespace weft::riscv_internal;
 
 bool riscv_internal::isDensePointwise(Operation *op) {
+  // A selected widening-dot finalizer owns the producer's typed partial
+  // representation. Dense consumers may reuse that completed value, but
+  // cannot replace the selected chain with a scalarized numeric snapshot.
+  if (auto product = dyn_cast<riscv::RVVWidenMultiplyOp>(op))
+    if (llvm::any_of(product.getResult().getUsers(), [](Operation *user) {
+          return isa<riscv::RVVFinalizeWidenDotOp>(user);
+        }))
+      return false;
   return isa<riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp,
              riscv::SelectOp, riscv::CastOp, riscv::BitcastOp,
              riscv::WidenOp, riscv::NarrowOp, riscv::RVVSplatOp,

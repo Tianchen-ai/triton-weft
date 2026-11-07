@@ -1429,6 +1429,11 @@ accumulate/reduction leaf。nested、layered 与 scaled/reduced-scaled plan 同�
 reduction、finalization leaf 与同时存活的 resource groups；materializer 只能按这些字段创建
 operation，不能从 shape 或当前 SSA spelling 再次推断。
 
+被 `rvv_finalize_widen_dot` 直接消费的 `rvv_widen_multiply` 保持所选 typed partial
+链的边界。通用 dense producer graph 可以读取其已完成结果，但不将该 producer
+作为普通 pointwise 节点重新展开到 scalar scratch；否则 finalizer 将失去已验证的
+partial 来源。该链的寄存器压力仍由既有 resource pass 通过显式 spill/reload 处理。
+
 nested planner 的最大 issue window 若不能闭合资源，可以沿同一物理轴依次减半，
 只考虑能精确划分原逻辑 extent 的窗口，至多检查 64 个候选，优先选择 issue 数最少的合法项。
 这不改变作者的 reduction axes、scale 位置或整数宽度。选定的 window、issue 数与资源估计
