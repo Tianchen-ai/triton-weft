@@ -5688,6 +5688,10 @@ mlir::LogicalResult ConvertLayoutOp::verify() {
         getConversion().getTemporaryGroups() != rvvLayoutRepackTemporaryGroups(kernel.getTarget(), input, result))
       return emitOpError("lane repack requires a bounded complete ordered slice relation and its temporary resources");
   }
+  if (getLeaf().getEngine() != "unselected" && kind == "tuple" && source == "rvv" && target == "rvv" &&
+      input.getLayout().getReplicaFactors() == result.getLayout().getReplicaFactors() &&
+      !hasContiguousRVVTimeRepartition(input, result))
+    return emitOpError("noncontiguous lane/time coordinates require an explicit ordered lane repack");
   if (source == "scalar" && target == "rvv" &&
       kind == "register_to_lane") {
     auto sourceLayout = input.getLayout();

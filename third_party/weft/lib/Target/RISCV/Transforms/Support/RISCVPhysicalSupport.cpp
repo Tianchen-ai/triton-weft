@@ -847,7 +847,7 @@ bool riscv_internal::selectLaneRepack(mlir::Builder &builder, riscv::ConvertLayo
       riscv::fieldReadProjection(operation.getInput())) return false;
   auto source = operation.getInput().getType(), target = operation.getResult().getType();
   if (conversion.getKind() == "tuple" &&
-      source.getLayout().getReplicaFactors() == target.getLayout().getReplicaFactors())
+      riscv::hasContiguousRVVTimeRepartition(source, target))
     return false;
   bool laneMovesOut = false;
   if (source.getAxisIds() == target.getAxisIds())

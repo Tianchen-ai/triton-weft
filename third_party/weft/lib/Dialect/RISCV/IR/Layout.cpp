@@ -354,6 +354,38 @@ std::optional<llvm::SmallVector<int64_t>> weft::riscv::rvvLaneCoordinates(
   return coordinates->logical(part, lane);
 }
 
+bool weft::riscv::hasContiguousRVVTimeRepartition(ValueType input, ValueType result) {
+  auto before = input.getLayout(), after = result.getLayout();
+  if (input.getElementType() != result.getElementType() ||
+      input.getShape() != result.getShape() || input.getAxisIds() != result.getAxisIds() ||
+      before.getCarrier() != "rvv" || after.getCarrier() != "rvv" ||
+      before.getAxisIds() != after.getAxisIds() ||
+      before.getReplicaGroup() != 1 || after.getReplicaGroup() != 1 ||
+      before.getReplicaFactors() != after.getReplicaFactors() ||
+      before.getFragmentFactors() != after.getFragmentFactors() ||
+      before.getLocalFactors() != after.getLocalFactors())
+    return false;
+  using Digit = std::pair<int64_t, int64_t>;
+  auto order = [](LayoutAttr layout) -> std::optional<llvm::SmallVector<Digit>> {
+    llvm::SmallVector<Digit> digits;
+    for (auto factors : {layout.getTimeFactors(), layout.getLaneFactors()})
+      for (auto [axis, factor] : llvm::zip(layout.getAxisIds().asArrayRef(), factors.asArrayRef())) {
+        if (factor <= 0) return std::nullopt;
+        if (factor == 1) continue;
+        if (!digits.empty() && digits.back().first == axis) {
+          if (digits.back().second > std::numeric_limits<int64_t>::max() / factor)
+            return std::nullopt;
+          digits.back().second *= factor;
+        } else {
+          digits.emplace_back(axis, factor);
+        }
+      }
+    return digits;
+  };
+  auto sourceOrder = order(before), resultOrder = order(after);
+  return sourceOrder && resultOrder && *sourceOrder == *resultOrder;
+}
+
 std::optional<llvm::SmallVector<RVVLayoutSlice>>
 weft::riscv::rvvLayoutRepackSlices(ValueType input, ValueType result) {
   auto before = input.getLayout(), after = result.getLayout();

@@ -373,6 +373,10 @@ RVV part-to-lane 直接拼接必须保持源 lane 内部的逻辑轴顺序；已
 active lane 数拼接，不能把整寄存器容量中的无效尾部带入结果。需要交错的关系必须在
 资源闭合前由合法的 index/layout 改写处理，或明确拒绝。
 
+`tuple` 的 lane/time 拆分必须保留完整坐标顺序：按 issue-time、lane 展平后的
+有序轴因子须一致。相同的逐轴乘积不足以证明连续；将较晚轴移到 time、同时
+保留较早 lane 轴，需要显式有序 `lane_repack` 及其临时资源。
+
 `lane_repack` 是同域 RVV 表示间的显式有序坐标交换，允许一个轴从 lane 移出、另一轴移入。
 两端 type 唯一确定 `part=replica×streams+time` 与行主序 lane 坐标；共享几何函数把最多4096个
 元素合为连续 source-part/lane slices，verifier 与 translator 消费同一关系。它不依赖第三种

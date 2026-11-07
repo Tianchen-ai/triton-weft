@@ -1033,18 +1033,7 @@ Emitter::compileConvertLayout(riscv::ConvertLayoutOp conversion) {
     auto sourceLayout = sourceType.getLayout();
     auto resultLayout = resultType.getLayout();
     bool sameRepartitionDomain =
-        sourceLayout.getAxisIds() == resultLayout.getAxisIds() &&
-        sourceLayout.getReplicaFactors() == resultLayout.getReplicaFactors() &&
-        sourceLayout.getFragmentFactors() == resultLayout.getFragmentFactors() &&
-        sourceLayout.getLocalFactors() == resultLayout.getLocalFactors();
-    if (sameRepartitionDomain)
-      for (size_t position = 0;
-           position < sourceLayout.getAxisIds().size(); ++position)
-        sameRepartitionDomain &=
-            sourceLayout.getTimeFactors()[position] *
-                    sourceLayout.getLaneFactors()[position] ==
-            resultLayout.getTimeFactors()[position] *
-                resultLayout.getLaneFactors()[position];
+        riscv::hasContiguousRVVTimeRepartition(sourceType, resultType);
     if (input.kind == Binding::Kind::Vector &&
         sourceLayout.getCarrier() == "rvv" &&
         resultLayout.getCarrier() == "rvv" &&

@@ -78,6 +78,8 @@ std::optional<llvm::SmallVector<int64_t>> reshapeCarrierParts(
 std::optional<int64_t> rvvCarrierCount(LayoutAttr layout);
 std::optional<llvm::SmallVector<int64_t>> rvvLaneCoordinates(
     LayoutAttr layout, int64_t part, int64_t lane);
+// Flattening issue-time then lane coordinates preserves the same logical order.
+bool hasContiguousRVVTimeRepartition(ValueType input, ValueType result);
 
 // Exact ordered slices for a bounded, same-domain RVV representation change.
 // No numerical permutation, memory access, or implicit layout choice occurs.
