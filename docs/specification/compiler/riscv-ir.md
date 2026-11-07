@@ -492,6 +492,9 @@ multiply 在 I16 中应用符号，再于已证明不溢出的 I16 域中归约�
 
 pipeline参数只有在改写成真实 guard、prologue、steady-state、epilogue与buffer-version carry后
 才算实现。未消费 `ScheduleAttr` 或只有一个 depth 字段的module不能进入emission。
+最终 native loop 收口复用物理 SSA 活跃区间与外围驻留分析；若两个 issue body 副本
+已经超过目标向量寄存器预算，显式标记禁止下游重新展开。未知的重复 body 成本不视为
+零，也不据此新增展开。该决定只约束同一物理程序的局部复制，不改变作者 Level 树。
 尚未物化的 record/field 投影不能作为 numeric carry 或可重放地址；调度将其原读 epoch 及
 相关消费者保持在同一阶段，只有显式数值窗口跨阶段传递。原始存储的读取不得通过重建
 descriptor 重复执行，作用域、依赖和私有 buffer 的版本约束仍由共同验证器核对。

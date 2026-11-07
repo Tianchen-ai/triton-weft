@@ -77,6 +77,16 @@ public:
                            (unroll && unroll.getValue() == "disable");
         }
       });
+      // Native unrolling can overlap copies of a fully materialized vector
+      // body after its physical live set was accepted. Preserve the selected
+      // issue window when even two copies exceed the architectural budget.
+      if (vectorBody && !loop->hasAttr("weft.riscv.system_unroll") &&
+          !loop->hasAttr("weft.riscv.native_unroll_count")) {
+        auto repeated = riscv_internal::nativeUnrollRegisterGroups(loop, 2);
+        if (repeated && *repeated > kernel.getTarget().getVectorRegisters())
+          loop->setAttr("weft.riscv.system_unroll",
+                        StringAttr::get(&getContext(), "disable"));
+      }
       // A finite child traversal can disappear in native code generation.
       // Align its enclosing vector-work loop, but do not pad every outer
       // traversal around a surviving child. Those headers add no vector issue
