@@ -702,7 +702,7 @@ public:
       const int64_t dataGroups = dataType.getLayout().getRegisterGroups();
       const int64_t wideGroups = std::max<int64_t>(
           1, (dataType.getLayout().getLmulEighths() * 2 + 7) / 8);
-      const int64_t temporaryGroups = 2 * wideGroups + 1;
+      const int64_t temporaryGroups = dataGroups + wideGroups + 1;
       const bool tail = dataType.getLayout().getValidity() == "tail";
       auto maskLeaf = relation->mask.getLeaf();
       relation->mask->setAttr(

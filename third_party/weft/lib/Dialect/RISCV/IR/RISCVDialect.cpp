@@ -6797,7 +6797,8 @@ mlir::LogicalResult RVVSignedBitmaskReduceOp::verify() {
           extent ||
       (validity != "full" && validity != "tail") ||
       getLeaf().getTemporaryGroups() !=
-          2 * std::max<int64_t>(1, (data.getLayout().getLmulEighths() * 2 + 7) / 8) + 1 ||
+          data.getLayout().getRegisterGroups() +
+              std::max<int64_t>(1, (data.getLayout().getLmulEighths() * 2 + 7) / 8) + 1 ||
       !exactLeaf(getLeaf(), "rvv", "signed-bitmask-reduce",
                  "rvv.signed-bitmask-reduce.i8-i16", "none", tail))
     return emitOpError(

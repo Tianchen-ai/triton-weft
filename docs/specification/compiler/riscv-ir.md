@@ -484,10 +484,11 @@ owner，不为补齐计数而移到初始化区域，也不把子 Level 的 birt
 已选 packed predicate 可以被其定义所支配的嵌套结构化控制捕获，仍只供 typed mask
 consumer 使用。CSE 共享这个 SSA 定义不会改变其表示；完整寄存器分析计入延长的 mask
 lifetime。mask 不通过普通 yield 或未标识的 block argument 逃逸，也不冒充 Boolean byte value。
-`rvv_signed_bitmask_reduce` 在 I16 中应用符号：先将 I8 payload 符号扩展，再选择
-原值或取负值，最后在已证明不溢出的 I16 域中归约并返回 I32。不能先在 I8 中
-取负，因为合法输入 -128 的正值为 +128。所选 leaf 要求合法的双倍 LMUL，并显式
-计入两个 widened 临时 carrier 与归约 seed；不满足该 carrier 合同的候选不选用此 leaf。
+`rvv_signed_bitmask_reduce` 将 mask 映射为 I8 的 ±1 系数，通过 signed widening
+multiply 在 I16 中应用符号，再于已证明不溢出的 I16 域中归约并返回 I32。不能先
+在 I8 中对 payload 取负，因为合法输入 -128 的正值为 +128。所选 leaf 要求合法的
+双倍 LMUL，并显式计入 I8 系数、I16 乘积及归约 seed；不满足该 carrier 合同的
+候选不选用此 leaf。系数只依赖原 mask，不扩大读取范围或改变整数归约边界。
 
 pipeline参数只有在改写成真实 guard、prologue、steady-state、epilogue与buffer-version carry后
 才算实现。未消费 `ScheduleAttr` 或只有一个 depth 字段的module不能进入emission。
