@@ -1,4 +1,5 @@
 #include "Weft/Analysis/LogicalAxes.h"
+#include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "Weft/Target/RISCV/RISCVPasses.h"
 #include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Transforms/Representation/NumericalValidity.h"
@@ -298,9 +299,13 @@ private:
     b.setInsertionPoint(op);
     Location loc = op->getLoc();
     SmallVector<SmallVector<Value>> bounds;
+    bool complete = true;
     for (Value input : inputs) {
       auto active = activeNumericExtents(b, input);
       if (failed(active)) return op->emitError("grouped arithmetic requires a complete active-coordinate relation for each input");
+      auto type = cast<riscv::ValueType>(input.getType());
+      for (auto [bound, extent] : llvm::zip(*active, type.getShape().asArrayRef()))
+        complete &= extent > 0 && riscv::denseConstantIndex(bound) == std::optional<int64_t>(extent);
       bounds.push_back(*active);
     }
     auto makeType = [&](Type element, ArrayRef<int64_t> shape, ArrayRef<int64_t> axes) {
@@ -339,13 +344,14 @@ private:
     auto product = [&](Value member) -> std::pair<Value, Value> {
       Value selected = riscv::BinaryOp::create(b, loc, indexType, bases, member, "add", unselectedLeaf(b));
       SmallVector<Value> values;
-      Value valid = riscv::ConstantOp::create(b, loc, b.getI1Type(), b.getBoolAttr(true));
+      Value valid = complete ? Value() : riscv::ConstantOp::create(b, loc, b.getI1Type(), b.getBoolAttr(true));
       SmallVector<int64_t> validityShape, validityAxes;
       for (auto [inputNumber, input] : llvm::enumerate(inputs)) {
         auto type = cast<riscv::ValueType>(input.getType());
         SmallVector<int64_t> shape(type.getShape().asArrayRef()), axes(type.getAxisIds().asArrayRef());
         shape.back() = relation->groups; axes.back() = groupedAxis;
         for (auto [dimension, axis] : llvm::enumerate(axes)) {
+          if (complete) continue;
           int64_t completeAxis = predicateAxisMap.lookup(axis);
           Value coordinates = dimension + 1 == axes.size() ? selected :
               Value(riscv::IotaOp::create(b, loc, makeType(u32, {shape[dimension]}, {completeAxis}),
@@ -373,6 +379,7 @@ private:
         values.push_back(projected);
       }
       Value value = mac ? Value(riscv::BinaryOp::create(b, loc, accumulatorType, values[0], values[1], "mul", unselectedLeaf(b))) : values[0];
+      if (complete) return {value, Value()};
       Attribute zero = isa<FloatType>(result.getElementType()) ? Attribute(b.getFloatAttr(result.getElementType(), 0.0)) :
           Attribute(b.getIntegerAttr(result.getElementType(), 0));
       Value identity = riscv::ConstantOp::create(b, loc, result.getElementType(), zero);
@@ -389,7 +396,9 @@ private:
     if (relation->group > 1) {
       auto lower = arith::ConstantIndexOp::create(b, loc, 1);
       auto upper = arith::ConstantIndexOp::create(b, loc, relation->group);
-      auto loop = scf::ForOp::create(b, loc, lower, upper, lower, ValueRange{accumulator, active});
+      SmallVector<Value> carried{accumulator};
+      if (!complete) carried.push_back(active);
+      auto loop = scf::ForOp::create(b, loc, lower, upper, lower, carried);
       copyOrigin(op, loop);
       {
         OpBuilder::InsertionGuard guard(b);
@@ -399,11 +408,14 @@ private:
         auto [term, valid] = product(member);
         Value value = riscv::BinaryOp::create(b, loc, accumulatorType, loop.getRegionIterArg(0),
             term, "add", unselectedLeaf(b));
-        Value any = riscv::BinaryOp::create(b, loc, predicateType, loop.getRegionIterArg(1), valid, "or", unselectedLeaf(b));
-        scf::YieldOp::create(b, loc, ValueRange{value, any});
+        SmallVector<Value> yielded{value};
+        if (!complete)
+          yielded.push_back(riscv::BinaryOp::create(b, loc, predicateType,
+              loop.getRegionIterArg(1), valid, "or", unselectedLeaf(b)));
+        scf::YieldOp::create(b, loc, yielded);
       }
       accumulator = loop.getResult(0);
-      active = loop.getResult(1);
+      if (!complete) active = loop.getResult(1);
     }
     auto orderedType = makeType(result.getElementType(), result.getShape().asArrayRef(), outputAxes);
     if (productAxes != outputAxes)
@@ -412,16 +424,17 @@ private:
     SmallVector<int64_t> orderedMaskAxes;
     for (int64_t axis : outputAxes) orderedMaskAxes.push_back(predicateAxisMap.lookup(axis));
     auto orderedMask = makeType(b.getI1Type(), result.getShape().asArrayRef(), orderedMaskAxes);
-    if (productAxes != outputAxes)
+    if (!complete && productAxes != outputAxes)
       active = riscv::ReshapeOp::create(b, loc, orderedMask, active,
           b.getDenseI64ArrayAttr(orderedMaskAxes), DenseI64ArrayAttr());
     auto restored = riscv::ReshapeOp::create(b, loc, result, accumulator,
         orderedType.getAxisIds(), DenseI64ArrayAttr());
     copyOrigin(op, restored);
     results[op->getResult(0)] = restored;
-    masks[op->getResult(0)] = riscv::ReshapeOp::create(b, loc,
-        makeType(b.getI1Type(), result.getShape().asArrayRef(), result.getAxisIds().asArrayRef()), active,
-        orderedMask.getAxisIds(), DenseI64ArrayAttr());
+    if (!complete)
+      masks[op->getResult(0)] = riscv::ReshapeOp::create(b, loc,
+          makeType(b.getI1Type(), result.getShape().asArrayRef(), result.getAxisIds().asArrayRef()), active,
+          orderedMask.getAxisIds(), DenseI64ArrayAttr());
     return success();
   }
 };

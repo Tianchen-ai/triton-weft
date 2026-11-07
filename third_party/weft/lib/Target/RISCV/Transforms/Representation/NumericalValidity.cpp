@@ -229,13 +229,19 @@ public:
       }
     } else if (auto lookup = dyn_cast<riscv::LookupOp>(op)) {
       // A rectangular index domain does not prove validity of arbitrary table
-      // entries. Only an independently complete computed table qualifies here.
+      // entries. A complete-or-empty snapshot contributes its own guard to
+      // every output coordinate; arbitrary partial tables remain unsupported.
+      Value present;
       if (auto table = dyn_cast<riscv::ValueType>(lookup.getTable().getType())) {
         auto tableExtents = get(lookup.getTable());
         if (failed(tableExtents)) return failure();
         for (auto [bound, expected] : llvm::zip(*tableExtents, table.getShape().asArrayRef())) {
           auto actual = riscv::denseConstantIndex(bound);
-          if (!actual || *actual != expected) return failure();
+          if (actual && *actual == expected) continue;
+          if (expected <= 0 || !completeOrEmpty(bound, expected)) return failure();
+          Value capacity = arith::ConstantIndexOp::create(b, op->getLoc(), expected);
+          Value full = b.createOrFold<arith::CmpIOp>(op->getLoc(), arith::CmpIPredicate::eq, bound, capacity);
+          present = present ? b.createOrFold<arith::AndIOp>(op->getLoc(), present, full) : full;
         }
       } else if (!isa<riscv::MemDescType>(lookup.getTable().getType())) {
         return failure();
@@ -243,6 +249,11 @@ public:
       auto extents = get(lookup.getIndices());
       if (failed(extents)) return failure();
       result = *extents;
+      if (present) {
+        Value zero = arith::ConstantIndexOp::create(b, op->getLoc(), 0);
+        for (Value &bound : result)
+          bound = b.createOrFold<arith::SelectOp>(op->getLoc(), present, bound, zero);
+      }
     } else if (auto select = dyn_cast<riscv::SelectOp>(op)) {
       auto project = [&](Value operand) -> FailureOr<SmallVector<Value>> {
         auto input = dyn_cast<riscv::ValueType>(operand.getType());
@@ -836,8 +847,7 @@ public:
           Type element = logicalElement(table.getType());
           Value zero = riscv::ConstantOp::create(b, loc, element, b.getZeroAttr(element));
           Value padded = choose(tableMask, table, zero, table.getType(), loc);
-          lookup.getTableMutable().assign(riscv::RegisterMaterializeOp::create(b, loc,
-              cast<riscv::ValueType>(table.getType()), padded, -1, -1, -1, "physical-share"));
+          lookup.getTableMutable().assign(padded);
           Value selected = tableMask;
           if (isa<riscv::ValueType>(tableMask.getType()))
             selected = riscv::LookupOp::create(b, loc, predicateType(b, lookup.getResult().getType()),

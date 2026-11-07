@@ -311,6 +311,10 @@ free-axis 对齐和完整分组范围，再展开为闭合 primitive 内的 type
 整数分组输入的有效范围沿 lookup、字段 gather 和 reshape 保留。索引已证明落在容量内、
 而原字段只可能完整或为空时，gather 仍携带原字段的非空条件。reshape 保留未改变的
 前缀维度及其尾部；只对完整或空的后缀重排矩形范围，不把任意部分矩形当作完整数据。
+已经证明 exact 的物理 Level point 可直接提供 partition 作为 active extent。
+完整 grouped 输入因此不生成多余的逐坐标谓词和谓词 carry；有尾部的输入继续沿用
+同一有效域传播与 identity 补齐。完整或空的计算表 lookup 也保留表的存在条件，
+不能把 nominal capacity 当作完整有效，更不把 shaped padding 伪装成 scalar physical-share。
 谓词的逻辑域覆盖整个容量，非活动位置明确为 false。谓词合取与选择使用私有坐标
 别名完成，再投影回原数值轴，避免外层数值 tail 的 VL 截短谓词本身；同域的单一
 谓词直接复用，不为窄化后再扩宽额外生成向量合取。
@@ -481,6 +485,9 @@ replica factor 为 1 而遗漏该数值域。转换后的完整驻留重新进�
 完整 numeric lookup table 可以由纯计算产生。若其完整坐标域能放入消费者的 register
 group，而两端 LMUL 不同，使用该 lookup edge 上的显式 conversion 适配寄存器容量；
 不更改表的逻辑 extent，不改变其它消费者，也不回溯重读构造表时的输入。
+小型寄存器表的索引可在共同整数范围证明后收窄到对应 gather 的 SEW；内存索引仍按
+真实元素字节偏移选择位宽。流式供给只分片结果与索引域，完整的寄存器表保持不变的
+SSA 快照，其驻留计入周围活跃资源，不把表的坐标误当作消费者的逐元素坐标。
 
 完整 codebook entry 的 indexed supply 可沿同 shape/axis 的 pointwise 与有序 carry
 查询下游归约；标准全元素 sum 的静态线性展平也提供原轴全部被消费的证明。
@@ -596,6 +603,9 @@ stride 用于整个合并后的 VL。转换保持原访问点、完整 shape/axe
 没有可能别名写入，包括嵌套循环的较早迭代。无法保持原读取且没有合法的已物化 table
 表示时，明确拒绝该候选。memory-descriptor lookup 声明 Read effect；只有寄存器 table
 lookup 是 pure，CSE 不得跨写入合并前者。
+需要多个 issue 才能加载的完整表，在选择整表访存载体前先闭合上述读取区间证明，
+允许其 lookup 消费者直接使用 descriptor。占满完整连续 record 的自然字段通过同一
+storage mapping 处理；其余消费者仍保留原快照，不为已无消费者的整表建立寄存器载体。
 同一 block 内，lookup 的 index 若已支配原 load，或是可以原样复制的常量，则可以在
 原 load 点保存所需的数值。此时跨写入传递的是已读取的结果，不能在写入后重读 View；
 未被观察的整张表不需要占据局部存储。该规则不跨控制边界，不移动作者 stage birth，

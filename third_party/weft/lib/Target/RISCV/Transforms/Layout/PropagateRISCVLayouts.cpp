@@ -3095,6 +3095,28 @@ public:
       if (!tableElements || *tableElements <= 0 || *tableElements > tableCapacity ||
           table.getLayout().getValidity() != "full")
         return;
+      if (table.getLayout().getSew() == result.getLayout().getSew() &&
+          indices.getLayout().getSew() != result.getLayout().getSew()) {
+        auto element = mlir::IntegerType::get(&getContext(), result.getLayout().getSew(),
+                                              mlir::IntegerType::Unsigned);
+        auto range = riscv_internal::integerRange(lookup.getIndices());
+        if (range && range->fits(element)) {
+          auto narrowed = riscv::ValueType::get(&getContext(), element, indices.getShape(),
+              indices.getAxisIds(), indices.getLayout());
+          auto required = riscv_internal::projectLayout(builder, narrowed, result.getLayout(),
+              lookup->getParentOfType<riscv::KernelOp>().getTarget());
+          if (required && required.getSew() == result.getLayout().getSew()) {
+            mlir::OpBuilder::InsertionGuard guard(builder);
+            builder.setInsertionPoint(lookup);
+            auto cast = riscv::CastOp::create(builder, lookup.getLoc(),
+                riscv_internal::withLayout(narrowed, required), lookup.getIndices(),
+                riscv_internal::unselectedLeaf(builder));
+            riscv_internal::copyOrigin(lookup, cast);
+            lookup.getIndicesMutable().assign(cast);
+            indices = mlir::cast<riscv::ValueType>(cast.getResult().getType());
+          }
+        }
+      }
       // The equal-SEW restriction belongs to an actual register-table
       // realization. Large/dynamic tables use indexed memory, whose EEW is
       // independent of the payload SEW; their indices must remain wide enough.

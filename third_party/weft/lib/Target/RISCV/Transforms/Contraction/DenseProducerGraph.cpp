@@ -137,12 +137,21 @@ bool DenseProducerGraph::collect(Value value) {
     }
     reads.push_back(load);
   } else if (auto lookup = dyn_cast<riscv::LookupOp>(op); lookup && op == root) {
-    // A large memory lookup reads its table at the original lookup boundary.
-    // Only the index/value window is streamed; the table remains one address
-    // operand and is never cloned or admitted as a full register value.
-    if (!isa<riscv::MemDescType>(lookup.getTable().getType()) ||
-        !riscv::isAddressableDenseDescriptor(lookup.getTable()) ||
-        !collect(lookup.getIndices())) return false;
+    // Stream the result/index domain while retaining the table at its original
+    // read boundary. A complete register snapshot stays an invariant SSA value;
+    // it is not a pointwise input with the consumer's unrelated coordinates.
+    if (isa<riscv::MemDescType>(lookup.getTable().getType())) {
+      if (!riscv::isAddressableDenseDescriptor(lookup.getTable())) return false;
+    } else {
+      auto table = dyn_cast<riscv::ValueType>(lookup.getTable().getType());
+      auto residency = residentRegisterGroups(lookup.getTable());
+      if (!table || table.getLayout().getCarrier() != "rvv" ||
+          table.getLayout().getValidity() != "full" || !residency ||
+          *residency > root->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters() ||
+          staticProduct(table.getLayout().getTimeFactors().asArrayRef()) != std::optional<int64_t>(1))
+        return false;
+    }
+    if (!collect(lookup.getIndices())) return false;
   } else if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(op)) {
     if (isCompleteLocalRead(conversion)) localReads.push_back(conversion);
     else if (conversion.getConversion().getKind() == "local_load" &&

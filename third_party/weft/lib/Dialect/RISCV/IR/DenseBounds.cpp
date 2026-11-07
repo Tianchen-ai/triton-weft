@@ -26,6 +26,16 @@ arith::CmpIPredicate reversed(arith::CmpIPredicate predicate) {
   default: return predicate;
   }
 }
+OpFoldResult pointExtent(Value value) {
+  if (auto point = value.getDefiningOp<PhysicalPointOp>()) return point.getActive();
+  auto argument = dyn_cast<BlockArgument>(value);
+  if (!argument || argument.getArgNumber() != 0) return {};
+  auto loop = dyn_cast<LoopOp>(argument.getOwner()->getParentOp());
+  if (!loop || loop.getDomain().getType().getTail() != "exact") return {};
+  auto domain = loop.getDomain().getDefiningOp<DomainOp>();
+  return domain ? OpFoldResult(domain.getPartition()) : OpFoldResult{};
+}
+
 class ExtentQuery {
 public:
   OpFoldResult get(Value memory, unsigned axis, unsigned depth = 0) {
@@ -60,9 +70,7 @@ public:
           continue;
         }
         if (kind == "all") return get(slice.getBase(), sourceAxis, depth + 1);
-        if (auto point = slice.getIndices()[operand].getDefiningOp<PhysicalPointOp>())
-          return point.getActive();
-        return {};
+        return pointExtent(slice.getIndices()[operand]);
       }
       return {};
     }
@@ -78,8 +86,7 @@ public:
     if (!value) return {};
     if (auto shape = value.getDefiningOp<LocalShapeOp>()) return index(shape.getExtent(), depth + 1);
     if (auto active = value.getDefiningOp<PointActiveOp>())
-      if (auto point = active.getPoint().getDefiningOp<PhysicalPointOp>())
-        return index(point.getActive(), depth + 1);
+      if (auto extent = pointExtent(active.getPoint())) return index(extent, depth + 1);
     if (auto extent = value.getDefiningOp<ExtentOp>()) {
       auto resolved = get(extent.getBase(), extent.getAxis(), depth + 1);
       return resolved ? index(resolved, depth + 1) : input;
@@ -519,6 +526,5 @@ OpFoldResult ExtentOp::fold(FoldAdaptor) {
 }
 
 OpFoldResult PointActiveOp::fold(FoldAdaptor) {
-  if (auto point = getPoint().getDefiningOp<PhysicalPointOp>()) return point.getActive();
-  return {};
+  return pointExtent(getPoint());
 }

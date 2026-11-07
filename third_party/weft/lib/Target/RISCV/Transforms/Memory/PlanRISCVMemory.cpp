@@ -3531,6 +3531,41 @@ public:
       signalPassFailure();
       return;
     }
+    // Close field addressing before choosing a carrier for whole-table loads.
+    // A complete natural record field may be an indexed descriptor supply;
+    // its load need not first fit a multi-axis register carrier.
+    getOperation().walk([&](riscv::FieldOp operation) {
+      riscv_internal::FieldFacts facts = riscv_internal::fieldFacts(operation);
+      if (facts.mapping == "opaque") {
+        operation.emitError("encoded field has no complete storage mapping");
+        failed = true;
+        return;
+      }
+      auto access = fieldAccess(builder, operation, operation.getResult().getType());
+      auto target = operation->getParentOfType<riscv::KernelOp>().getTarget();
+      if (access.getForm() == "indexed" && !target.getHasIndexedMemory()) {
+        operation.emitError("encoded field requires indexed memory unsupported by the target profile");
+        failed = true;
+        return;
+      }
+      operation.setAccessAttr(access);
+      operation.setLeafAttr(transferLeaf(
+          builder, "encoded-field", ("rvv.encoded." + access.getMapping()).str()));
+      if (riscv::isContiguousRecordField(operation.getResult())) {
+        llvm::SmallVector<riscv::LoadOp> readers;
+        for (auto *user : operation.getResult().getUsers())
+          if (auto read = mlir::dyn_cast<riscv::LoadOp>(user)) readers.push_back(read);
+        for (auto read : readers) {
+          rewriter.setInsertionPoint(read);
+          auto zero = mlir::arith::ConstantIndexOp::create(rewriter, read.getLoc(), 0);
+          auto view = riscv::FieldViewOp::create(rewriter, read.getLoc(), operation.getResult().getType(),
+                                                operation.getResult(), zero);
+          riscv_internal::copyOrigin(operation, view);
+          read.getRegionMutable().assign(view.getResult());
+        }
+      }
+    });
+    if (failed) { signalPassFailure(); return; }
     llvm::SmallVector<riscv::LoadOp> deadTableLoads;
     llvm::SmallVector<riscv::MaterializeOp> deadTableMaterializations;
     llvm::DenseMap<mlir::Value, mlir::Value> tableSnapshots;
@@ -3570,6 +3605,25 @@ public:
       auto encoding = mlir::cast<kernel::EncodingType>(memory.getEncoding());
       auto original = mlir::dyn_cast<riscv::ValueType>(operation.getResult().getType());
       if (encoding.getKind() == "dense" && original) {
+        auto parts = riscv_internal::staticProduct(original.getLayout().getTimeFactors().asArrayRef());
+        if (parts && *parts > 1 && original.getLayout().getValidity() == "full" &&
+            riscv::isAddressableDenseDescriptor(operation.getRegion())) {
+          llvm::SmallVector<riscv::LookupOp> indexedConsumers;
+          for (mlir::Operation *user : operation.getResult().getUsers())
+            if (auto lookup = mlir::dyn_cast<riscv::LookupOp>(user);
+                lookup && lookup.getTable() == operation.getResult() &&
+                !riscv::readCrossesWrite(operation, lookup))
+              indexedConsumers.push_back(lookup);
+          // A multi-issue table cannot be one register gather source. Preserve
+          // the unchanged read interval as an indexed descriptor edge before
+          // trying to repack the unused whole table into a memory carrier.
+          for (auto lookup : indexedConsumers)
+            lookup.getTableMutable().assign(operation.getRegion());
+          if (!indexedConsumers.empty() && operation.getResult().use_empty()) {
+            deadTableLoads.push_back(operation);
+            return;
+          }
+        }
         if (auto flat = linearLocalCarrier(operation.getRegion(), original, operation, builder)) {
           rewriter.setInsertionPoint(operation);
           auto descriptor = riscv::MemDescType::get(
@@ -3744,39 +3798,6 @@ public:
       if (operation.getLeaf().getInstruction() != "rvv.tile-store.segment" &&
           operation.getLeaf().getInstruction() != "rvv.tile-store.segment.full")
         selectTileTransfer(operation, operation.getDestination(), operation.getInput().getType(), true);
-    });
-    getOperation().walk([&](riscv::FieldOp operation) {
-      riscv_internal::FieldFacts facts = riscv_internal::fieldFacts(operation);
-      if (facts.mapping == "opaque") {
-        operation.emitError("encoded field has no complete storage mapping");
-        failed = true;
-        return;
-      }
-      auto access =
-          fieldAccess(builder, operation, operation.getResult().getType());
-      auto target = operation->getParentOfType<riscv::KernelOp>().getTarget();
-      if (access.getForm() == "indexed" && !target.getHasIndexedMemory()) {
-        operation.emitError(
-            "encoded field requires indexed memory unsupported by the target profile");
-        failed = true;
-        return;
-      }
-      operation.setAccessAttr(access);
-      operation.setLeafAttr(transferLeaf(
-          builder, "encoded-field", ("rvv.encoded." + access.getMapping()).str()));
-      if (riscv::isContiguousRecordField(operation.getResult())) {
-        llvm::SmallVector<riscv::LoadOp> readers;
-        for (auto *user : operation.getResult().getUsers())
-          if (auto read = mlir::dyn_cast<riscv::LoadOp>(user)) readers.push_back(read);
-        for (auto read : readers) {
-          rewriter.setInsertionPoint(read);
-          auto zero = mlir::arith::ConstantIndexOp::create(rewriter, read.getLoc(), 0);
-          auto view = riscv::FieldViewOp::create(rewriter, read.getLoc(), operation.getResult().getType(),
-                                                operation.getResult(), zero);
-          riscv_internal::copyOrigin(operation, view);
-          read.getRegionMutable().assign(view.getResult());
-        }
-      }
     });
     // Register gathers must see a numeric table, with its storage decode
     // already explicit, before selecting and narrowing their index carriers.
