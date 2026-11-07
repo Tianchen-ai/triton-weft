@@ -281,8 +281,48 @@ bool isFullBroadcastCondition(Value value) {
   if (auto binary = value.getDefiningOp<k::BinaryOp>())
     return binary.getKind() == "and" && isFullBroadcastCondition(binary.getLhs()) &&
         isFullBroadcastCondition(binary.getRhs());
+  if (auto reshape = value.getDefiningOp<k::ReshapeOp>())
+    return isFullBroadcastCondition(reshape.getInput());
+  if (auto select = value.getDefiningOp<k::SelectOp>())
+    return select.getTrueValue() == select.getFalseValue() &&
+        isFullBroadcastCondition(select.getCondition()) &&
+        isFullBroadcastCondition(select.getTrueValue());
   return false;
 }
+
+class FoldFullSelect : public OpRewritePattern<weft::kernel::SelectOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::SelectOp select,
+                               PatternRewriter &rewriter) const override {
+    if (!isFullBroadcastCondition(select.getCondition())) return failure();
+    // A complete coordinate assignment can already have the destination's
+    // exact type. No broadcast or validity predicate remains to materialize.
+    if (select.getTrueValue().getType() == select.getResult().getType()) {
+      rewriter.replaceOp(select, select.getTrueValue());
+      return success();
+    }
+    namespace k = weft::kernel;
+    auto input = dyn_cast<k::ValueType>(select.getTrueValue().getType());
+    auto result = dyn_cast<k::ValueType>(select.getResult().getType());
+    if (!input || !result || input.getElementType() != result.getElementType())
+      return failure();
+    SmallVector<std::pair<int64_t, int64_t>> sourceAxes, resultAxes;
+    auto collect = [](k::ValueType type, auto &axes) {
+      for (auto [extent, axis] : llvm::zip(type.getShape().asArrayRef(), type.getAxisIds().asArrayRef())) {
+        if (extent <= 0) return false;
+        if (extent != 1) axes.emplace_back(axis, extent);
+      }
+      return true;
+    };
+    if (!collect(input, sourceAxes) || !collect(result, resultAxes) ||
+        sourceAxes != resultAxes) return failure();
+    // Adding or removing singleton positional axes does not replicate payload.
+    rewriter.replaceOpWithNewOp<k::ReshapeOp>(select, result,
+        select.getTrueValue(), input.getAxisIds());
+    return success();
+  }
+};
 
 class FoldScalarProjection : public OpRewritePattern<weft::kernel::ExtractOp> {
 public:
@@ -490,7 +530,7 @@ public:
     scf::ForOp::getCanonicalizationPatterns(patterns, &getContext());
     scf::IfOp::getCanonicalizationPatterns(patterns, &getContext());
     scf::WhileOp::getCanonicalizationPatterns(patterns, &getContext());
-    patterns.add<PushCoordinateRename, FoldScalarProjection, FoldStaticSubviewOffsets,
+    patterns.add<PushCoordinateRename, FoldScalarProjection, FoldFullSelect, FoldStaticSubviewOffsets,
                  FoldIdentitySlice, FoldScalarInteger, FoldScalarIntegerCompare,
                  FoldConstantIf, NormalizeScalarSelect, NormalizeBoundedGather,
                  FoldIdentityLookup,

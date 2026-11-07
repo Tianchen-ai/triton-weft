@@ -25,6 +25,9 @@ source 的 `new/materialize` birth 在变换期间保持各自身份，不能因
 完整、静态有效域上的零坐标标量投影消去纯 broadcast/extract 往返；相同坐标的
 SSA update/extract 直接传递刚写入的标量。只穿过保持坐标顺序的重命名，不穿过
 读取、state/stage birth 或控制区域，也不将越界索引当作零坐标。
+完整坐标赋值的恒真 select 在分支 Value 已经具有结果的精确类型时直接使用该 Value；
+只增删 singleton 位置轴时保留显式 reshape。仍需重复 payload 的广播或具有真实边界
+谓词的 select 保留其坐标与有效域。
 全范围、同类型的 View slice 消去为原 View；source unroll 后的窗口偏移消费共同整数
 范围证明，只有精确的非负单点范围才转为静态 offset，动态 extent 与其它边界不变。
 展开后具有精确整数操作数的标量比较复用同一范围证明，形成标准布尔常量；其条件区域
