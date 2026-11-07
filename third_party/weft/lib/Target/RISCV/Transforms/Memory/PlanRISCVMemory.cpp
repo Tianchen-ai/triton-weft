@@ -3527,7 +3527,8 @@ public:
     // snapshot. Its remaining field axes can still have vector consumers.
     // readCrossesWrite above keeps the original saved-value contract.
     projectScalarRecordFields(getOperation(), rewriter);
-    if (mlir::failed(riscv_internal::materializeFieldReads(getOperation(), rewriter))) {
+    if (mlir::failed(riscv_internal::materializeFieldReads(getOperation(), rewriter,
+        [&](riscv::FieldOp field, mlir::Type type) { return fieldAccess(builder, field, type); }))) {
       signalPassFailure();
       return;
     }

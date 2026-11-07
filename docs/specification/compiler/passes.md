@@ -117,6 +117,12 @@ record 对齐弱于元素对齐不要求提前解码整个字段。indexed-entry
 证明选择 byte-load/reinterpret，完整记录的别名快照仍由统一 read-snapshot pass
 在原 load 时刻闭合。实际数值 field 与直接读取字段 View 的完整 load 仍保存其完整读取值。
 
+完整的一维 natural 整字节字段只因坐标改名形成数值快照时，复用同一字段访问选择器，
+生成有界 RVV `field_read`，并在消费者需要 local 表示时插入已有 layout conversion。
+该选择要求元素对齐、完整静态域、直接 encoded load 来源及无跨写入的读取证明；
+输出和 transfer scratch 一起通过寄存器预算检查。坐标改名不要求逐字节拼装，
+但非连续映射、原 stage 和必须保存的别名快照仍保留各自的有界读取程序。
+
 已选择矩阵 contraction 的字段供给先保留 Encoding 几何，交给同一 fragment materializer
 验证并建立精确字段传输。若该消费者需要普通数值 packing，后续 memory pass 再完成字段的
 字节快照；不能在消费者决定前把已可用的 packed 字段展开成完整 RVV 数组。字段写入枚举

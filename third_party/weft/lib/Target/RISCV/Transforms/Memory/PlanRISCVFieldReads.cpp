@@ -253,14 +253,16 @@ FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
 }
 }
 
-LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter &b) {
+LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter &b,
+    llvm::function_ref<riscv::AccessAttr(riscv::FieldOp, Type)> selectAccess) {
   SmallVector<riscv::FieldOp> fields;
   module.walk([&](riscv::FieldOp field) {
     fields.push_back(field);
   });
   llvm::DenseMap<std::pair<Value, StringAttr>, Value> saved;
   int64_t identity = lastLocalIdentity(module);
-  auto replaceNumericField = [&](riscv::FieldOp field, Value value) {
+  auto replaceNumericField = [&](riscv::FieldOp field, Value value,
+                                 riscv::FieldReadOp keep = {}) {
     SmallVector<riscv::FieldReadOp> readers;
     SmallVector<Value> pending{field.getResult()};
     llvm::DenseSet<Value> visited;
@@ -268,6 +270,7 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
       Value projected = pending.pop_back_val();
       if (!visited.insert(projected).second) continue;
       for (Operation *user : projected.getUsers()) {
+        if (keep && user == keep.getOperation()) continue;
         if (auto read = dyn_cast<riscv::FieldReadOp>(user)) {
           if (projected != field.getResult() || read.getIndices().empty())
             readers.push_back(read);
@@ -289,7 +292,11 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
             layoutConversion(b, actual.getLayout(), expected.getLayout()), riscv::AccessAttr(), unselectedLeaf(b));
       b.replaceOp(read, result);
     }
-    b.replaceOp(field, value);
+    if (keep)
+      field.getResult().replaceUsesWithIf(value, [&](OpOperand &use) {
+        return use.getOwner() != keep.getOperation();
+      });
+    else b.replaceOp(field, value);
   };
   for (auto field : fields) {
     // Preserve Encoding geometry until the selected contraction materializer has
@@ -417,6 +424,33 @@ LogicalResult riscv_internal::materializeFieldReads(ModuleOp module, IRRewriter 
     bool general = numericSnapshot || renamedCoordinates || numericJoined || indexedLocal || oversizedProjection || (facts.mapping == "natural" && (bits % 8 || numericUnaligned)) ||
         (owner.getShape().size() > 1 && facts.mapping == "joined");
     if (!general) continue;
+    // A whole, naturally aligned one-axis field can be captured by its normal
+    // RVV transfer, then saved with the existing local-value conversion. A
+    // positional rename alone does not require byte-by-byte assembly.
+    if (renamedCoordinates && value && value.getShape().size() == 1 &&
+        value.getShape()[0] > 0 && facts.mapping == "natural" && bits % 8 == 0 &&
+        facts.alignment >= bits / 8 && field.getOwner() == load.getResult() &&
+        !needsReadSnapshot(load)) {
+      auto readType = valuePieceType(b, value, value.getAxisIds()[0], value.getShape()[0], target,
+          value.getLayout().getValidity() != "full");
+      auto access = readType ? selectAccess(field, readType) : riscv::AccessAttr();
+      auto temporary = readType ? riscv::fieldReadTemporaryGroups(field.getResult(), readType, access, {})
+                                : std::nullopt;
+      if (readType && readType.getShape() == value.getShape() && temporary &&
+          readType.getLayout().getRegisterGroups() + *temporary <= target.getVectorRegisters()) {
+        b.setInsertionPointAfter(field);
+        auto instruction = riscv::fieldReadInstruction(field.getResult(), readType, access);
+        auto read = riscv::FieldReadOp::create(b, field.getLoc(), readType, field.getResult(), ValueRange{}, access,
+            leaf(b, "transfer", "field-read", instruction, instruction, 0, 0, *temporary, 0, "none", "exact"));
+        copyOrigin(field, read);
+        Value numeric = read.getResult();
+        if (readType != value)
+          numeric = riscv::ConvertLayoutOp::create(b, field.getLoc(), value, numeric,
+              layoutConversion(b, readType.getLayout(), value.getLayout()), riscv::AccessAttr(), unselectedLeaf(b));
+        replaceNumericField(field, numeric, read);
+        continue;
+      }
+    }
     if (owner.getShape().empty() || owner.getShape().asArrayRef().back() != owner.getElements())
       return field.emitError("field byte read requires one complete record along the encoded element axis");
     auto key = std::make_pair(field.getOwner(), field.getNameAttr());
