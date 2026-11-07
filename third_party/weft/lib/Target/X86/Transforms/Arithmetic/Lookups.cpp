@@ -3,6 +3,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SetVector.h"
@@ -11,6 +12,59 @@
 using namespace mlir;
 
 namespace {
+
+// Query the existing folders before choosing a dynamic table representation.
+// Index arithmetic is not necessarily canonicalized yet at this boundary.
+class ConstantCoordinates {
+  DenseMap<Value, Attribute> known;
+  unsigned remaining = 256;
+public:
+  Attribute get(Value value, unsigned depth = 0) {
+    if (auto found = known.find(value); found != known.end()) return found->second;
+    if (!remaining || depth > 32) return {};
+    --remaining;
+    known[value] = {};
+    Attribute result;
+    if (!matchPattern(value, m_Constant(&result))) {
+      Operation *op = value.getDefiningOp();
+      if (!op || op->getNumResults() != 1 ||
+          (op->getName().getDialectNamespace() != "arith" &&
+           !isa<vector::BroadcastOp, vector::ShapeCastOp, vector::ShuffleOp,
+                vector::ExtractOp, vector::InsertStridedSliceOp,
+                vector::ExtractStridedSliceOp>(op))) return {};
+      SmallVector<Attribute> operands;
+      for (Value operand : op->getOperands()) operands.push_back(get(operand, depth + 1));
+      SmallVector<OpFoldResult> folded;
+      if (failed(op->fold(operands, folded)) || folded.size() != 1) return {};
+      result = dyn_cast<Attribute>(folded.front());
+      if (!result)
+        if (auto replacement = dyn_cast<Value>(folded.front()))
+          result = get(replacement, depth + 1);
+    }
+    known[value] = result;
+    return result;
+  }
+};
+
+Value constantLookup(OpBuilder &b, Location loc, Value table, Value indices,
+                     int64_t entries) {
+  Attribute coordinates = ConstantCoordinates().get(indices);
+  SmallVector<int64_t> selected;
+  auto append = [&](APInt index) {
+    if (index.getActiveBits() > 63 || index.getZExtValue() >= uint64_t(entries)) return false;
+    selected.push_back(index.getZExtValue());
+    return true;
+  };
+  if (auto scalar = dyn_cast_or_null<IntegerAttr>(coordinates)) {
+    if (!append(scalar.getValue())) return {};
+    return vector::ExtractOp::create(b, loc, table, ArrayRef<int64_t>{selected.front()});
+  }
+  auto lanes = dyn_cast_or_null<DenseIntElementsAttr>(coordinates);
+  if (!lanes) return {};
+  for (APInt index : lanes.getValues<APInt>())
+    if (!append(index)) return {};
+  return vector::ShuffleOp::create(b, loc, table, table, selected);
+}
 
 Value intrinsic(ModuleOp module, OpBuilder &b, Location loc, StringRef name,
                 VectorType type, Value table, Value indices) {
@@ -230,6 +284,8 @@ Value weft::x86::registerLookup(ModuleOp module, OpBuilder &b, Location loc,
   auto tableType = dyn_cast<VectorType>(table.getType());
   if (!tableType || tableType.isScalable() || tableType.getRank() != 1) return {};
   int64_t entries = tableType.getNumElements();
+  if (Value selected = constantLookup(b, loc, table, indices, entries))
+    return selected;
   Type element = tableType.getElementType();
   unsigned bits = element.getIntOrFloatBitWidth();
   bool bytes = isa<IntegerType>(element) && bits <= 8 && entries <= 16;
