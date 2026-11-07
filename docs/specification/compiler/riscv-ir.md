@@ -467,6 +467,11 @@ canonical Level转换时保留 domain/partition/multiplicity、birth counts、ca
 和direction。Level最终成为带 `LevelAttr` 的真实 `scf.for`。ordinary `for/while/if` 仍是有序
 scalar control，不因进入RISC-V IR而获得一个编译器发明的 shaped axis。
 
+局部供给调度可将单消费者的纯整数 widening 下沉到同一 block 的消费者之前，
+使窄输入先完成读取，再集中执行宽表示计算。不得越过写入、未知 effect、嵌套区域
+或 birth；payload 读取与快照位置不变。改写后重新计算完整寄存器压力，只有峰值
+不增加且满足目标预算时才保留，不能用宽度启发式替代真实活跃值分析。
+
 数值有效性需要跨 Level 时，`weft.riscv.validity_slots` 按原 handoff slot 的升序登记
 附加的 i1 companion；其 shape/axes 必须与对应数值结果相同。原 `handoff_count`
 不变，物理结果数等于原 handoff 加 companion 数，birth 计数仍仅来自作者程序。
