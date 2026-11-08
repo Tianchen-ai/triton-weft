@@ -2263,35 +2263,6 @@ riscv::FieldOp riscv_internal::sourceField(mlir::Value value) {
   return {};
 }
 
-riscv::LoadOp riscv_internal::sourceLoad(mlir::Value value) {
-  while (mlir::Operation *definition = value.getDefiningOp()) {
-    value = stripRepresentationConversions(value);
-    definition = value.getDefiningOp();
-    if (auto load = mlir::dyn_cast_or_null<riscv::LoadOp>(definition))
-      return load;
-    if (auto extract = mlir::dyn_cast_or_null<riscv::ExtractOp>(definition)) {
-      value = extract.getInput();
-      continue;
-    }
-    if (auto pack =
-            mlir::dyn_cast_or_null<riscv::EncodedLocalBindOp>(definition)) {
-      value = pack.getInput();
-      continue;
-    }
-    if (auto pack =
-            mlir::dyn_cast_or_null<riscv::EncodedLocalPackOp>(definition)) {
-      value = pack.getInput();
-      continue;
-    }
-    if (auto materialize =
-            mlir::dyn_cast_or_null<riscv::RegisterMaterializeOp>(definition)) {
-      value = materialize.getInput();
-      continue;
-    }
-    break;
-  }
-  return {};
-}
 
 riscv::AccessAttr riscv_internal::accessOf(mlir::Value value) {
   while (mlir::Operation *definition = value.getDefiningOp()) {

@@ -607,6 +607,9 @@ borrow 条件必须覆盖该读取在原作用域内的全部可能写入，后�
 和条件地址；动态范围继续使用完整 ABI disjoint 证明及原读取点的容量保护。
 返回数值 SSA 的读取/转换结束原存储依赖，后续纯算术不因输入地址被改写而再次快照。
 通用字段字节解码也消费从保存的 Encoding Value 提取出的 record，不绕回原 View 重读。
+保存的 encoded record 经单位轴投影后，供给分析沿共同的 `isUnitAxisProjection`
+证明追踪原读取。其余轴坐标、Encoding 和快照保持不变；typed field-window
+物化继续从当前保存的 record 取数，不将任意 reshape 当作原 descriptor。
 展开前的 point 有效长度查询在 Level 展开后折叠到对应 `PhysicalPoint.active`，因此字段
 读取、尾部归约和流水 SSA 使用同一真实有效域。归约选择只检查被归约轴是否完整，
 不能因 free/output 轴有尾块就引入不必要的清零和 tail-undisturbed accumulator。
