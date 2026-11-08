@@ -37,6 +37,7 @@ public:
     IRRewriter rewriter(&getContext());
     DominanceInfo dominance(getOperation());
     eliminateCommonSubExpressions(rewriter, dominance, getOperation());
+    riscv_internal::reuseIndexedEntrySnapshots(getOperation());
     // Deduplicating a fragment initializer changes its consumer count. A
     // previously unique accumulator can no longer overwrite that shared value.
     // Rebind the physical policy and its resource charge before verification;
@@ -250,6 +251,7 @@ constexpr Entry suffix[] = {
     {PassID::LocalProjections, "layout-finalization"},
     {PassID::DeadLayouts, "layout-finalization"},
     {PassID::ConsumerLayouts, "layout-finalization"},
+    {PassID::LocalSupplies, "layout-finalization"},
     {PassID::Values, "layout-finalization"},
     {PassID::CanonicalizeLayouts, "layout-finalization"},
     {PassID::Memory, "layout-finalization"},

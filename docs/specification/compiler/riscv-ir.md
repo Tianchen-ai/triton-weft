@@ -57,6 +57,9 @@ order和不同的result shape/axis identities；layout pass必须为两端形成
 partition。只有time/lane/register/fragment/local各自的总分解一致时，terminal translation才可
 把它拼写成零拷贝binding；否则必须在此前插入显式physical conversion或把candidate判非法，
 不能由emitter调整坐标顺序。
+已证明的 singleton extract 或单元素 reduction 规范化为 reshape 时，先保留输入的
+完整 carrier partition，再以显式 layout conversion 接回原消费者布局；不能因为
+删除一个单位坐标，就把 RVV producer 的多 part 值直接改标成 scalar。
 
 issue-window 投影通过保形的轴重命名时，按位置追溯输入轴，保留相同的窗口坐标。
 已压缩为 `regular` 的索引关系仍按原完整域求值：先加入 issue 的全局 offset，

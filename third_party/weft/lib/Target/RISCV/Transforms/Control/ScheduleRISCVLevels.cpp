@@ -165,42 +165,50 @@ class ScheduleRISCVLocalSuppliesPass
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ScheduleRISCVLocalSuppliesPass)
 private:
-  static unsigned sinkIntegerWidens(ModuleOp module) {
-    SmallVector<riscv::WidenOp> conversions;
-    module.walk([&](riscv::WidenOp op) { conversions.push_back(op); });
+  static unsigned sinkRegisterSupplies(ModuleOp module) {
+    SmallVector<Operation *> supplies;
+    module.walk([&](Operation *op) {
+      if (isa<riscv::WidenOp, riscv::NarrowOp, riscv::CastOp,
+              riscv::BinaryOp, riscv::UnaryOp, riscv::ExtractOp,
+              riscv::ReshapeOp, riscv::ConvertLayoutOp,
+              riscv::RVVWidenMultiplyOp,
+              riscv::RVVWidenAddOp, riscv::RVVIndexedEntryLoadOp,
+              riscv::RVVReplicaStorageLoadOp>(op))
+        supplies.push_back(op);
+    });
     unsigned selected = 0;
-    for (auto conversion : conversions) {
-      auto kernel = conversion->getParentOfType<riscv::KernelOp>();
-      auto input = dyn_cast<riscv::ValueType>(conversion.getInput().getType());
-      auto output = dyn_cast<riscv::ValueType>(conversion.getResult().getType());
+    // Sink consumers first so their single-use suppliers can follow them.
+    // Reads remain in the same block and do not cross a write or a birth.
+    for (Operation *supply : llvm::reverse(supplies)) {
+      auto kernel = supply->getParentOfType<riscv::KernelOp>();
+      auto output = dyn_cast<riscv::ValueType>(supply->getResult(0).getType());
       if (!kernel || kernel.getResourcesMaterialized() ||
-          conversion->hasAttr("birth_id") || !input || !output ||
-          !isa<IntegerType>(input.getElementType()) ||
-          !isa<IntegerType>(output.getElementType()) ||
-          input.getLayout().getCarrier() != "rvv" ||
+          supply->hasAttr("birth_id") || !output ||
           output.getLayout().getCarrier() != "rvv" ||
-          output.getLayout().getSew() <= input.getLayout().getSew() ||
-          !conversion.getResult().hasOneUse())
+          !riscv::hasOnlyReadEffects(supply) ||
+          !supply->getResult(0).hasOneUse())
         continue;
-      Operation *user = *conversion.getResult().getUsers().begin();
-      if (user->getBlock() != conversion->getBlock() ||
-          conversion->getNextNode() == user)
+      Operation *user = *supply->getResult(0).getUsers().begin();
+      if (user->getBlock() != supply->getBlock() ||
+          supply->getNextNode() == user)
         continue;
       bool legal = true;
-      for (Operation *crossed = conversion->getNextNode(); crossed != user;
+      for (Operation *crossed = supply->getNextNode(); crossed != user;
            crossed = crossed->getNextNode())
         legal &= crossed->getNumRegions() == 0 &&
                  !crossed->hasAttr("birth_id") &&
                  riscv::hasOnlyReadEffects(crossed);
       if (!legal) continue;
       auto before = physicalRegisterPressure(kernel);
-      if (!before) continue;
-      Operation *next = conversion->getNextNode();
-      conversion->moveBefore(user);
+      auto beforeCost = registerResidenceCost(*supply->getBlock());
+      if (!before || !beforeCost) continue;
+      Operation *next = supply->getNextNode();
+      supply->moveBefore(user);
       auto after = physicalRegisterPressure(kernel);
-      if (!after || after->total() > before->total() ||
-          after->total() > kernel.getTarget().getVectorRegisters()) {
-        conversion->moveBefore(next);
+      auto afterCost = registerResidenceCost(*supply->getBlock());
+      if (!after || !afterCost || *afterCost >= *beforeCost ||
+          after->total() > before->total()) {
+        supply->moveBefore(next);
         continue;
       }
       ++selected;
@@ -351,7 +359,7 @@ public:
     return "Overlap independent same-block numeric supplies with selected contractions";
   }
   void runOnOperation() override {
-    const auto widens = sinkIntegerWidens(getOperation());
+    const auto sunk = sinkRegisterSupplies(getOperation());
     SmallVector<riscv::BinaryOp> consumers;
     SmallVector<riscv::IMEFragmentMMAOp> seeded;
     getOperation().walk([&](riscv::IMEFragmentMMAOp mma) {
@@ -428,9 +436,9 @@ public:
       ++selected;
     }
     const auto reads = scheduleReads(getOperation());
-    if (selected || reads || widens)
+    if (selected || reads || sunk)
       llvm::errs() << "weft-local-supply-schedule: selected=" << selected
-                   << " reads=" << reads << " integer-widens=" << widens << '\n';
+                   << " reads=" << reads << " sunk-register-supplies=" << sunk << '\n';
   }
 };
 } // namespace

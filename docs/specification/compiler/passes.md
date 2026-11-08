@@ -81,6 +81,8 @@ RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改�
 物理 splat 保留标量范围；masked negate 交由共同分析求原值与取负值的并集。
 分析在扩展位宽内计算取负，若结果可能跨过机器类型边界则退回完整类型域，
 不能用对 signed-min 无效的绝对值证明允许更多窄累加。
+物理 `select` 将两条数值分支交给同一整数分析求并集；reshape 只改变坐标排列，
+沿输入保留数值范围。未知分支仍返回完整类型域，不由其条件猜测更窄的区间。
 
 物理标量常量实现 MLIR `ConstantLike` 与 constant materializer。整数 cast 和比较
 通过标准 folding 接口计算相同位宽的 APInt 结果，保留符号扩展、截断回绕和比较的
@@ -244,6 +246,8 @@ ConvertWeftToRISCV
 → MaterializeRISCVLocalProjections
 → EliminateDeadRISCVLayouts
 → PropagateRISCVConsumerLayouts
+→ ScheduleRISCVLocalSupplies
+→ MaterializeRISCVValuePrograms
 → CanonicalizeRISCVLayouts
 → PlanRISCVMemory
 → SelectRISCVMemoryByteProjections
@@ -310,6 +314,16 @@ use 数量的 rematerialization；资源闭合后的清理不能替代这个位�
 完整 fragment 与其 consumer layout 在 Value program 的局部存储决策之前先闭合一次，
 避免将本可驻留的 accumulator 与 pointwise 链提前拆成数组。后续 materialization 新产生的
 fragment 仍经过相同 passes；整数 MAC 保留在访存关系确定之后选择。
+
+whole-value 物化前复用 `ScheduleRISCVLocalSupplies` 缩短同 block 的单消费者寄存器供给。
+转换、逐元素算术、已选择的读取和数值投影可移到唯一消费者之前；不跨 region、birth、
+write 或未知 effect，读取保持原存储 epoch。依消费者逆序遍历已有 SSA，逐次重算真实
+vector/fragment 峰值和共同 SSA 驻留成本，只在驻留成本下降且不增加峰值时保留移动；
+中间程序可以仍超预算，由后续资源 pass
+闭合。该过程不复制计算或读取，不改变作者 Level、数值分组或布局。
+资源查询按共享 storage identity 排除当前操作数及其别名，不把同一寄存器再次计作外围驻留。
+producer admission 使用每个操作自己执行位置的活跃值，不能将 sink 位置才产生的值
+收费到前面的操作；候选完整供给与最终资源判断继续使用共同分析。
 
 内部 RISC-V pipeline 可在这次清理、consumer propagation 与 `CanonicalizeRISCVLayouts`
 之前观察同一层 Physical IR。module 的 `weft.riscv.layout_input` 保存尚未消费的
@@ -1431,6 +1445,11 @@ part 坐标提取 lane 0；这不改变 layout propagation 对普通 singleton �
 effect 的区间；相同范围共享 SSA，连续子范围用已有 `rvv_issue_slice`，不增加更宽读取。
 子范围只缩小最外侧的有效 lane axis，并保持其余坐标与 validity。跨动态 issue、其它 memory
 节点与无法闭合的范围不由这条规则处理；完整资源分析仍核算共享后的存活区间。
+最终 physical CSE 后，同一 block 内的完整一维 indexed-entry 读取沿用该 effect
+区间证明共享原快照。source、字节偏移、stride、payload、access、leaf 和有效域必须相同；
+结果轴名不同时，以保序 reshape 连接消费者。偏移的标量 Binary 使用 MLIR 的操作等价
+判断，只忽略诊断属性和位置，保留所有语义 properties 及精确 SSA operands。
+共享不跨越写入、未知 effects 或作者 birth，之后重新计算完整资源存活区间。
 
 同一 block 内两个完整一维 natural strided window，若 field owner、Encoding、type 与坐标
 相同，步长都是 2、静态 base 相差 1，且每个 time part 覆盖相同的相邻交错区间，可以选择

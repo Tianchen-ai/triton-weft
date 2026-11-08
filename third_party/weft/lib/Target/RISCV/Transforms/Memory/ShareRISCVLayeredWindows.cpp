@@ -2263,6 +2263,72 @@ void reuseNaturalStorageWindows(mlir::IRRewriter &rewriter,
   });
 }
 
+bool sameEntryOffsets(mlir::Value lhs, mlir::Value rhs) {
+  if (lhs == rhs)
+    return true;
+  auto first = lhs.getDefiningOp<riscv::BinaryOp>();
+  auto second = rhs.getDefiningOp<riscv::BinaryOp>();
+  if (!first || !second || mlir::isa<riscv::ValueType>(lhs.getType()))
+    return false;
+  // Physical scalar arithmetic keeps its semantics in ODS properties. Source
+  // diagnostics can differ for the same address expression at two use sites.
+  return mlir::OperationEquivalence::isEquivalentTo(
+      first, second, mlir::OperationEquivalence::IgnoreLocations |
+                         mlir::OperationEquivalence::IgnoreDiscardableAttrs);
+}
+
+void reuseIndexedEntrySnapshots(mlir::IRRewriter &rewriter,
+                                mlir::ModuleOp module) {
+  module.walk([&](mlir::Block *block) {
+    llvm::SmallVector<riscv::RVVIndexedEntryLoadOp> loads, available, replaced;
+    for (mlir::Operation &operation : *block)
+      if (auto load = mlir::dyn_cast<riscv::RVVIndexedEntryLoadOp>(operation))
+        loads.push_back(load);
+    for (auto load : loads) {
+      auto type = load.getResult().getType();
+      if (type.getShape().size() != 1 || load.getResult().use_empty())
+        continue;
+      unsigned inspected = 0;
+      bool shared = false;
+      for (auto prior : llvm::reverse(available)) {
+        if (++inspected > 32)
+          break;
+        auto source = prior.getResult().getType();
+        if (load.getSource() != prior.getSource() ||
+            !sameEntryOffsets(load.getEntryOffsets(), prior.getEntryOffsets()) ||
+            load.getSourceAxis() != prior.getSourceAxis() ||
+            load.getEntryByteStride() != prior.getEntryByteStride() ||
+            load.getPayloadExtent() != prior.getPayloadExtent() ||
+            load.getAccess() != prior.getAccess() ||
+            load.getLeaf() != prior.getLeaf() ||
+            source.getElementType() != type.getElementType() ||
+            source.getShape() != type.getShape() ||
+            source.getLayout().getValidity() != type.getLayout().getValidity() ||
+            !riscv::hasIdenticalReshapeCarrier(source, type,
+                                              source.getAxisIds()) ||
+            !readRangeIsShareable(prior, load))
+          continue;
+        mlir::Value value = prior.getResult();
+        if (source != type) {
+          rewriter.setInsertionPoint(load);
+          auto renamed = riscv::ReshapeOp::create(rewriter, load.getLoc(), type,
+              value, source.getAxisIds(), mlir::DenseI64ArrayAttr());
+          riscv_internal::copyOrigin(load, renamed);
+          value = renamed.getResult();
+        }
+        load.getResult().replaceAllUsesWith(value);
+        replaced.push_back(load);
+        shared = true;
+        break;
+      }
+      if (!shared)
+        available.push_back(load);
+    }
+    for (auto load : replaced)
+      rewriter.eraseOp(load);
+  });
+}
+
 std::optional<int64_t>
 segmentPairBase(riscv::RVVReplicaStorageLoadOp load) {
   auto field = load.getField().getType();
@@ -3207,6 +3273,11 @@ public:
 };
 
 } // namespace
+
+void weft::riscv_internal::reuseIndexedEntrySnapshots(mlir::ModuleOp module) {
+  mlir::IRRewriter rewriter(module.getContext());
+  ::reuseIndexedEntrySnapshots(rewriter, module);
+}
 
 void weft::riscv_internal::materializeWholeLayeredReads(mlir::ModuleOp module) {
   mlir::IRRewriter rewriter(module.getContext());

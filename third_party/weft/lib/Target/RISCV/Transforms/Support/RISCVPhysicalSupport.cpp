@@ -2169,6 +2169,10 @@ riscv_internal::integerRange(mlir::Value value, unsigned depth) {
     else if (auto op = input.getDefiningOp<riscv::WidenOp>()) preserve(op.getInput(), Kind::Cast);
     else if (auto op = input.getDefiningOp<riscv::CastOp>()) preserve(op.getInput(), Kind::Cast);
     else if (auto op = input.getDefiningOp<riscv::NarrowOp>()) preserve(op.getInput(), op.getSaturate() ? Kind::Saturate : Kind::Cast);
+    else if (auto op = input.getDefiningOp<riscv::ReshapeOp>()) preserve(op.getInput());
+    else if (auto op = input.getDefiningOp<riscv::SelectOp>()) {
+      result.kind = Kind::Union; result.inputs = {op.getTrueValue(), op.getFalseValue()};
+    }
     else if (auto op = input.getDefiningOp<riscv::ExtractOp>()) preserve(op.getInput());
     else if (auto op = input.getDefiningOp<riscv::BinaryOp>()) {
       result.kind = analysis::integerBinaryKind(op.getKind()); result.inputs = {op.getLhs(), op.getRhs()};
