@@ -427,7 +427,7 @@ private:
     return !groups || *groups > budget;
   }
 
-  bool consumerExceedsRegisterBudget(Value source, int64_t budget) const {
+  bool consumerExceedsRegisterBudget(Value source) const {
     SmallVector<Value> pending{source};
     llvm::SmallPtrSet<void *, 8> seen;
     Value identity = riscv_internal::registerStorageIdentity(source);
@@ -438,7 +438,15 @@ private:
         // Region operands/results are not one simultaneous numeric issue.
         // Keep the existing region-aware resource owner responsible for them.
         if (user->getNumRegions()) continue;
-        if (exceedsRegisterBudget(user, budget)) return true;
+        SmallVector<Value> current(user->getOperands());
+        llvm::append_range(current, user->getResults());
+        auto outside = riscv_internal::surroundingRegisterGroups(user, current);
+        auto kernel = user->getParentOfType<riscv::KernelOp>();
+        // The producer's live set can contain a value that this consumer
+        // already owns, or a supply that dies before it. Charge this actual
+        // consumer frontier instead of applying the producer's budget again.
+        if (!outside || !kernel || exceedsRegisterBudget(user,
+                kernel.getTarget().getVectorRegisters() - *outside)) return true;
         for (Value result : user->getResults())
           if (isa<riscv::ValueType>(result.getType()) &&
               riscv_internal::registerStorageIdentity(result) == identity)
@@ -485,14 +493,15 @@ private:
     SmallVector<Value> current(op->getOperands());
     llvm::append_range(current, op->getResults());
     auto outside = riscv_internal::surroundingRegisterGroups(op, current);
-    const int64_t budget = std::max<int64_t>(1, kernel.getTarget().getVectorRegisters() - outside.value_or(0));
+    if (!outside) return true;
+    const int64_t budget = std::max<int64_t>(1, kernel.getTarget().getVectorRegisters() - *outside);
     if (dynamicLocal || dynamicNumeric || scalarTraversal || exceedsRegisterBudget(op, budget)) return true;
     for (Value result : op->getResults())
       if (auto value = dyn_cast<riscv::ValueType>(result.getType())) {
         auto scalars = riscv_internal::scalarRegisterCount(
             value, kernel.getTarget().getMarch().starts_with("rv32") ? 32 : 64);
         if (value.getLayout().getCarrier() == "scalar" && scalars && *scalars <= 32) continue;
-        if (consumerExceedsRegisterBudget(result, budget)) return true;
+        if (consumerExceedsRegisterBudget(result)) return true;
       }
     return false;
   }

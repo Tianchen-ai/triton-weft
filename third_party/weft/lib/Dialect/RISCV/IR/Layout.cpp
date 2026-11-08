@@ -832,7 +832,11 @@ std::optional<int64_t> weft::riscv::rvvRowScaleTemporaryGroups(BinaryOp op) {
   // Each atom makes narrow row products, packs pairs, then joins the two atoms.
   const int64_t scratch = std::max({*rows * productGroups + 2 * sourceGroups + atomGroups,
       (*rows / 2) * sourceGroups + 2 * atomGroups + sourceGroups, 2 * groups});
-  return (parts - 1) * (groups - released) + scratch;
+  // The construction frontier already includes completed output parts and
+  // the part being assembled. Generic resource accounting charges the entire
+  // result separately, so only its excess is a temporary requirement.
+  return std::max<int64_t>(0, (parts - 1) * (groups - released) + scratch -
+                                result.getLayout().getRegisterGroups());
 }
 
 std::optional<llvm::SmallVector<RVVLayoutSlice>> weft::riscv::scalarBroadcastRuns(ValueType input, ValueType result) {

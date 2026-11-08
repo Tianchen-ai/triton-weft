@@ -250,10 +250,14 @@ public:
         auto value = mlir::dyn_cast<riscv::ValueType>(type);
         return value && value.getLayout().getReplicaGroup() > 1;
       };
+      auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(operation);
+      const bool identicalReshape = reshape && riscv::hasIdenticalReshapeCarrier(
+          reshape.getInput().getType(), reshape.getResult().getType(), reshape.getOrder());
       if ((llvm::any_of(operation->getOperandTypes(), grouped) ||
            llvm::any_of(operation->getResultTypes(), grouped)) &&
+          !identicalReshape &&
           !mlir::isa<riscv::IMEUnpackOp, riscv::NewOp, riscv::UnaryOp,
-                     riscv::BinaryOp, riscv::FMAOp, riscv::RVVIntegerMACOp,
+                     riscv::BinaryOp, riscv::FMAOp, riscv::RVVFMAIssueOp, riscv::RVVIntegerMACOp,
                      riscv::CastOp, riscv::WidenOp, riscv::NarrowOp,
                      riscv::RVVAxisBroadcastOp, riscv::RVVSplatOp, riscv::ConvertLayoutOp,
                      riscv::SpillOp, riscv::ReloadOp, riscv::ReloadSliceOp,

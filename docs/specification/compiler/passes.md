@@ -825,6 +825,9 @@ reuse 证明，不由该窄合同猜测。
 
 在 fragment accumulator retention 与 issue grouping 之后，从已选 `ime_unpack` 提取保序
 RVV 候选；沿普通 cast、pointwise、new 与 scf.for init/iter_arg/yield 的同域 use-def 传播。
+保序、同 shape 的显式轴改名也传递候选布局：每条边保存其对应域，逐位置映射物理 factors；
+同 shape 而没有该关系的独立轴不合并。final verifier 使用共同 carrier-coordinate 证明检查
+成组 reshape，不能把转置或重分块当作无搬运的改名。
 值按 SSA identity 去重，一个 component 至多 128 个值、1024 条 use edge，越界明确报告。
 每次 pass 对一个 kernel 至多比较两个完整物理候选；不激活 generic ValueType 的 IME carrier，也不换作者树。
 供应侧可以穿过只省略单位物理轴的 rank-subdomain cast/pointwise，保持其原有 shape 与 axis，
@@ -850,6 +853,9 @@ row SSA 的广播单独物化并共享，后续 fragment pointwise 消费该已�
 明确的 local leaf，以保持其物理生成位置，不改变 canonical state birth。
 同一供应共享关系也适用于单行完整 carrier。资源闭合前，纯 `lane_repack` 与返回完全相同
 type 的逆转换可以消除；这不授权穿过已选 coordinate exchange 任意重建 producer。
+行缩放的构造前沿包含已完成的结果 parts；局部 scratch 只计超出完整结果驻留的额外需求，
+通用资源分析另行计算输入、完整结果和其它活跃值，避免重复收费。Value materialization
+检查下游 consumer 时，在该 consumer 的真实位置重建预算，不套用上游 producer 的活跃集合。
 
 单行 fragment 的有效 atom 小于一个硬件寄存器、完整 row 大于一个寄存器时，handoff
 可先以独立的小范围 slide 组成完整寄存器，再通过已验证的 `vset` 映射合并。自然 atom、

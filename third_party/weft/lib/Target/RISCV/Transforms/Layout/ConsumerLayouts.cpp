@@ -49,15 +49,48 @@ bool sameLaneDomain(mlir::Value value, riscv::ValueType anchor,
   return true;
 }
 
-std::optional<llvm::SetVector<mlir::Value>> component(riscv::IMEUnpackOp anchor,
-                                                    riscv::LayoutAttr layout) {
+struct Component {
   llvm::SetVector<mlir::Value> values;
+  llvm::DenseMap<mlir::Value, riscv::ValueType> domains;
+  llvm::DenseMap<mlir::Value, riscv::LayoutAttr> layouts;
+};
+
+bool axisRename(riscv::ReshapeOp reshape) {
+  auto input = mlir::dyn_cast<riscv::ValueType>(reshape.getInput().getType());
+  auto output = mlir::dyn_cast<riscv::ValueType>(reshape.getResult().getType());
+  return input && output && input.getShape() == output.getShape() &&
+      reshape.getOrder() == input.getAxisIds().asArrayRef();
+}
+
+riscv::LayoutAttr renameLayout(riscv::LayoutAttr layout,
+                               mlir::DenseI64ArrayAttr axes) {
+  return riscv::LayoutAttr::get(layout.getContext(), layout.getCarrier(), axes,
+      layout.getTimeFactors(), layout.getLaneFactors(), layout.getReplicaFactors(),
+      layout.getFragmentFactors(), layout.getLocalFactors(), layout.getSew(),
+      layout.getLmulEighths(), layout.getVl(), layout.getRegisterGroups(),
+      layout.getValidity(), layout.getReplicaGroup());
+}
+
+std::optional<Component> component(riscv::IMEUnpackOp anchor,
+                                   riscv::LayoutAttr layout,
+                                   mlir::IRRewriter &rewriter) {
+  Component result;
+  auto &values = result.values;
   auto type = anchor.getResult().getType();
-  auto add = [&](mlir::Value value) {
-    if (sameLaneDomain(value, type, layout))
-      values.insert(value);
+  auto target = anchor->getParentOfType<riscv::KernelOp>().getTarget();
+  bool conflict = false;
+  auto add = [&](mlir::Value value, riscv::ValueType domain, riscv::LayoutAttr reference) {
+    if (!sameLaneDomain(value, domain, reference)) return;
+    if (!values.insert(value)) {
+      auto numeric = mlir::cast<riscv::ValueType>(value.getType());
+      conflict |= projectLayout(rewriter, numeric, result.layouts.lookup(value), target) !=
+                  projectLayout(rewriter, numeric, reference, target);
+      return;
+    }
+    result.domains[value] = domain;
+    result.layouts[value] = reference;
   };
-  add(anchor.getResult());
+  add(anchor.getResult(), type, layout);
   size_t edges = 0;
   for (size_t cursor = 0; cursor < values.size(); ++cursor) {
     if (values.size() > 128) {
@@ -65,18 +98,35 @@ std::optional<llvm::SetVector<mlir::Value>> component(riscv::IMEUnpackOp anchor,
       return std::nullopt;
     }
     auto value = values[cursor];
+    auto domain = result.domains.lookup(value);
+    auto reference = result.layouts.lookup(value);
+    auto connect = [&](mlir::Value other) { add(other, domain, reference); };
     auto *producer = value.getDefiningOp();
     if (producer && pointwise(producer))
       for (auto operand : producer->getOperands())
         if (auto *definition = operand.getDefiningOp();
             (definition && (pointwise(definition) || mlir::isa<riscv::NewOp, riscv::IMEUnpackOp, mlir::scf::ForOp>(definition))) ||
             mlir::isa<mlir::BlockArgument>(operand))
-          add(operand);
+          connect(operand);
+    // A positional buffer or helper may explicitly rename the complete domain.
+    // Carry the chosen layout through that edge without equating independent
+    // axis IDs elsewhere in the kernel. Reshaping or transposing coordinates
+    // still uses an explicit conversion outside this component.
+    auto rename = [&](riscv::ReshapeOp reshape, bool forward) {
+      if (!axisRename(reshape)) return;
+      auto here = mlir::cast<riscv::ValueType>(value.getType());
+      if (here.getShape() != domain.getShape() || here.getAxisIds() != domain.getAxisIds()) return;
+      auto other = forward ? reshape.getResult() : reshape.getInput();
+      auto renamed = mlir::cast<riscv::ValueType>(other.getType());
+      add(other, renamed, renameLayout(reference, renamed.getAxisIds()));
+    };
+    if (auto reshape = mlir::dyn_cast_or_null<riscv::ReshapeOp>(producer))
+      rename(reshape, false);
     auto connectLoop = [&](mlir::scf::ForOp loop, unsigned index) {
-      add(loop.getInitArgs()[index]);
-      add(loop.getRegionIterArgs()[index]);
-      add(loop.getResult(index));
-      add(mlir::cast<mlir::scf::YieldOp>(loop.getBody()->getTerminator()).getOperand(index));
+      connect(loop.getInitArgs()[index]);
+      connect(loop.getRegionIterArgs()[index]);
+      connect(loop.getResult(index));
+      connect(mlir::cast<mlir::scf::YieldOp>(loop.getBody()->getTerminator()).getOperand(index));
     };
     if (auto argument = mlir::dyn_cast<mlir::BlockArgument>(value)) {
       auto loop = mlir::dyn_cast<mlir::scf::ForOp>(argument.getOwner()->getParentOp());
@@ -92,7 +142,9 @@ std::optional<llvm::SetVector<mlir::Value>> component(riscv::IMEUnpackOp anchor,
       }
       auto *user = use.getOwner();
       if (pointwise(user))
-        add(user->getResult(0));
+        connect(user->getResult(0));
+      if (auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(user))
+        rename(reshape, true);
       if (auto loop = mlir::dyn_cast<mlir::scf::ForOp>(user); loop && use.getOperandNumber() >= 3)
         connectLoop(loop, use.getOperandNumber() - 3);
       if (auto yield = mlir::dyn_cast<mlir::scf::YieldOp>(user))
@@ -100,7 +152,7 @@ std::optional<llvm::SetVector<mlir::Value>> component(riscv::IMEUnpackOp anchor,
           connectLoop(loop, use.getOperandNumber());
     }
   }
-  return values;
+  return conflict ? std::nullopt : std::optional<Component>(std::move(result));
 }
 
 mlir::FailureOr<mlir::Value> convert(mlir::Value value, riscv::ValueType type,
@@ -143,18 +195,19 @@ mlir::FailureOr<mlir::Value> convert(mlir::Value value, riscv::ValueType type,
 
 bool rewriteComponent(riscv::IMEUnpackOp anchor, riscv::LayoutAttr layout,
                       mlir::IRRewriter &rewriter) {
-  auto found = component(anchor, layout);
+  auto found = component(anchor, layout, rewriter);
   if (!found) return false;
-  auto &values = *found;
+  auto &values = found->values;
   auto target = anchor->getParentOfType<riscv::KernelOp>().getTarget();
   llvm::DenseMap<mlir::Value, riscv::ValueType> before;
   llvm::SmallPtrSet<mlir::Operation *, 32> changed;
   for (mlir::Value value : values) {
     if (auto *definition = value.getDefiningOp(); definition &&
-        !pointwise(definition) && !mlir::isa<riscv::NewOp, riscv::IMEUnpackOp, mlir::scf::ForOp>(definition))
+        !pointwise(definition) && !mlir::isa<riscv::NewOp, riscv::IMEUnpackOp,
+                                          riscv::ReshapeOp, mlir::scf::ForOp>(definition))
       return false;
     auto old = mlir::cast<riscv::ValueType>(value.getType());
-    auto required = projectLayout(rewriter, old, layout, target);
+    auto required = projectLayout(rewriter, old, found->layouts.lookup(value), target);
     if (!required || !riscv::supportsRVVLayout(target, required))
       return false;
     before[value] = old;
@@ -209,19 +262,8 @@ bool rewriteComponent(riscv::IMEUnpackOp anchor, riscv::LayoutAttr layout,
       auto type = mlir::dyn_cast<riscv::ValueType>(operand.get().getType());
       if (!type)
         continue;
-      if (auto runs = riscv::scalarBroadcastRuns(type, result);
-          runs && llvm::any_of(*runs, [](auto run) { return run.resultOffset != 0; })) {
-        rewriter.setInsertionPoint(op);
-        const int64_t lanes = *riscv::rvvLaneCount(result);
-        auto broadcast = riscv::RVVAxisBroadcastOp::create(rewriter, op->getLoc(), result, operand.get(),
-            leaf(rewriter, "rvv", "axis-broadcast", "rvv.axis-broadcast.scalar-runs",
-                 "rvv.axis-broadcast.scalar-runs", 0, result.getLayout().getRegisterGroups(),
-                 (result.getLayout().getLmulEighths() + 7) / 8, 0, "none", "exact", {1, lanes}));
-        copyOrigin(op, broadcast);
-        operand.set(broadcast.getResult());
-        continue;
-      }
       auto required = projectLayout(rewriter, type, result.getLayout(), target);
+      bool rowScale = false;
       if (auto binary = mlir::dyn_cast<riscv::BinaryOp>(op);
           binary && binary.getKind() == "mul" && operand.getOperandNumber() == 0 &&
           result.getElementType().isF32() && result.getLayout().getReplicaGroup() == 2 &&
@@ -234,7 +276,20 @@ bool rewriteComponent(riscv::IMEUnpackOp anchor, riscv::LayoutAttr layout,
           required = riscv::LayoutAttr::get(rewriter.getContext(), "scalar", type.getAxisIds(),
               one, one, integers(rewriter, {result.getLayout().getLaneFactors()[0]}), one, one,
               32, 0, 1, 0, result.getLayout().getValidity());
+          rowScale = true;
         }
+      }
+      if (auto runs = riscv::scalarBroadcastRuns(type, result);
+          !rowScale && runs && llvm::any_of(*runs, [](auto run) { return run.resultOffset != 0; })) {
+        rewriter.setInsertionPoint(op);
+        const int64_t lanes = *riscv::rvvLaneCount(result);
+        auto broadcast = riscv::RVVAxisBroadcastOp::create(rewriter, op->getLoc(), result, operand.get(),
+            leaf(rewriter, "rvv", "axis-broadcast", "rvv.axis-broadcast.scalar-runs",
+                 "rvv.axis-broadcast.scalar-runs", 0, result.getLayout().getRegisterGroups(),
+                 (result.getLayout().getLmulEighths() + 7) / 8, 0, "none", "exact", {1, lanes}));
+        copyOrigin(op, broadcast);
+        operand.set(broadcast.getResult());
+        continue;
       }
       if (!required)
         return false;
