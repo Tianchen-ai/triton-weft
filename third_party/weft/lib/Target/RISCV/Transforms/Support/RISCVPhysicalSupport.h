@@ -201,7 +201,7 @@ mlir::Value stripRepresentationConversions(
     mlir::Value value,
     llvm::SmallVectorImpl<riscv::ConvertLayoutOp> *conversions = nullptr);
 riscv::FieldOp sourceField(mlir::Value value);
-riscv::LoadOp sourceLoad(mlir::Value value);
+using riscv::sourceLoad;
 bool needsReadSnapshot(riscv::LoadOp load);
 riscv::AccessAttr accessOf(mlir::Value value);
 riscv::PhysicalPointOp originPoint(mlir::Value value, int64_t axis);

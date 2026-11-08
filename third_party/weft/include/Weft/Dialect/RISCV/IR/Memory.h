@@ -37,6 +37,9 @@ bool hasContiguousDenseStorage(MemDescType memory);
 bool isContiguousRecordField(mlir::Value field);
 std::optional<int64_t> contiguousLocalElements(mlir::Value memory);
 bool isStorageMetadataUse(mlir::OpOperand &use);
+// Original read through coordinate-preserving projections and representations.
+// This query retains snapshot identity; it does not authorize a repeated read.
+LoadOp sourceLoad(mlir::Value value);
 
 // Storage provenance, not permission to replay a numeric producer. A register
 // value has no storage origins; an unresolved addressable value is unknown.

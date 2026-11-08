@@ -635,34 +635,6 @@ FieldOp sourceField(mlir::Value value) {
   return {};
 }
 
-LoadOp sourceLoad(mlir::Value value) {
-  while (mlir::Operation *definition = value.getDefiningOp()) {
-    if (auto load = mlir::dyn_cast<LoadOp>(definition))
-      return load;
-    if (auto conversion = mlir::dyn_cast<ConvertLayoutOp>(definition)) {
-      value = conversion.getInput();
-      continue;
-    }
-    if (auto materialize = mlir::dyn_cast<RegisterMaterializeOp>(definition)) {
-      value = materialize.getInput();
-      continue;
-    }
-    if (auto extract = mlir::dyn_cast<ExtractOp>(definition)) {
-      value = extract.getInput();
-      continue;
-    }
-    if (auto pack = mlir::dyn_cast<EncodedLocalBindOp>(definition)) {
-      value = pack.getInput();
-      continue;
-    }
-    if (auto pack = mlir::dyn_cast<EncodedLocalPackOp>(definition)) {
-      value = pack.getInput();
-      continue;
-    }
-    break;
-  }
-  return {};
-}
 
 mlir::Value sourcePoint(mlir::Value value, int64_t axis) {
   llvm::SmallVector<mlir::Value> worklist{value};
@@ -9106,7 +9078,7 @@ mlir::LogicalResult RVVSegmentPairLoadOp::verify() {
 
 mlir::LogicalResult RVVRecordStorageLoadOp::verify() {
   auto sourceField = getField().getDefiningOp<FieldOp>();
-  auto sourceLoad = sourceField ? ::sourceLoad(sourceField.getOwner()) : LoadOp();
+  auto sourceLoad = sourceField ? weft::riscv::sourceLoad(sourceField.getOwner()) : LoadOp();
   auto sourceSlice =
       sourceLoad ? sourceLoad.getRegion().getDefiningOp<SliceOp>() : SliceOp();
   RecordCohortType cohort = getCohort().getType();

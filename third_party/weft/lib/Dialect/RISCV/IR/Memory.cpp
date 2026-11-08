@@ -7,6 +7,7 @@
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "Weft/Dialect/Kernel/IR/StrideABI.h"
+#include "Weft/Dialect/Kernel/IR/ShapeBindings.h"
 #include "Verification.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -21,6 +22,53 @@
 
 using namespace mlir;
 using namespace weft::riscv;
+
+LoadOp weft::riscv::sourceLoad(Value value) {
+  while (Operation *definition = value.getDefiningOp()) {
+    if (auto load = dyn_cast<LoadOp>(definition)) return load;
+    if (auto conversion = dyn_cast<ConvertLayoutOp>(definition)) {
+      auto input = dyn_cast<ValueType>(conversion.getInput().getType());
+      auto result = dyn_cast<ValueType>(conversion.getResult().getType());
+      auto effect = conversion.getConversion().getEffect();
+      if (!input || !result || input.getShape() != result.getShape() ||
+          input.getAxisIds() != result.getAxisIds() ||
+          (effect != "pure" && effect != "read")) break;
+      value = conversion.getInput();
+      continue;
+    }
+    if (auto materialize = dyn_cast<RegisterMaterializeOp>(definition)) {
+      value = materialize.getInput();
+      continue;
+    }
+    if (auto extract = dyn_cast<ExtractOp>(definition)) {
+      value = extract.getInput();
+      continue;
+    }
+    if (auto reshape = dyn_cast<ReshapeOp>(definition)) {
+      auto input = reshape.getInput().getType();
+      auto result = reshape.getResult().getType();
+      if (isa<weft::kernel::EncodingType>(input.getElementType()) &&
+          input.getElementType() == result.getElementType() &&
+          !reshape.getPartOrderAttr() &&
+          llvm::equal(reshape.getOrder(), input.getAxisIds().asArrayRef()) &&
+          weft::kernel::isUnitAxisProjection(input.getShape(), input.getAxisIds(),
+              result.getShape(), result.getAxisIds(), reshape.getOrder())) {
+        value = reshape.getInput();
+        continue;
+      }
+    }
+    if (auto pack = dyn_cast<EncodedLocalBindOp>(definition)) {
+      value = pack.getInput();
+      continue;
+    }
+    if (auto pack = dyn_cast<EncodedLocalPackOp>(definition)) {
+      value = pack.getInput();
+      continue;
+    }
+    break;
+  }
+  return {};
+}
 
 bool weft::riscv::hasContiguousDenseStorage(MemDescType memory) {
   if (!memory || memory.getShape().empty() || memory.getElements() != 1 ||
