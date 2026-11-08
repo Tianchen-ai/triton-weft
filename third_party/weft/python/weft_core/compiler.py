@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import ctypes as c
-from functools import cache
+import hashlib
 import json
 import os
-from pathlib import Path
 import weakref
+from functools import cache
+from pathlib import Path
 
 
 class CompilationError(RuntimeError):
@@ -81,7 +82,20 @@ def identity():
     path = Path(library()._name).resolve()
     stat = path.stat()
     return {"version": __version__, "compiler_abi": 1, "canonical_schema": 1,
-            "build": {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}}
+            "build": {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns},
+            "python_support": _python_support_identity()}
+
+
+@cache
+def _python_support_identity():
+    root = Path(__file__).parent
+    result = {}
+    for path in sorted(root.rglob("*.py")):
+        stat = path.stat()
+        result[str(path.relative_to(root))] = {
+            "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+        }
+    return hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
 
 
 def _take(pointer):
@@ -208,7 +222,7 @@ def extension_catalog():
 
 
 def x86_target_capabilities(march, abi, vlen_bits):
-    return target_info("x86_target_capabilities", dict(march=march, abi=abi, vlen_bits=vlen_bits))
+    return target_info("x86_target_capabilities", {"march": march, "abi": abi, "vlen_bits": vlen_bits})
 
 
 def target_capabilities(options):

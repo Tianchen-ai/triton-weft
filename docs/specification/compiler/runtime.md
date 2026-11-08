@@ -117,6 +117,8 @@ RISC-V 的 `backend_options.native_loop_alignment` 取 `0、2、4、8、16、32�
 默认 `32`；`0` 将循环放置交给原生工具链。显式 `-falign-loops` / `-fno-align-loops`
 也选择 `0`，与同时指定的非零 backend 对齐冲突时拒绝，避免两处配置互相覆盖。
 只使用 Triton cache，通过 TRITON_CACHE_DIR 选择目录，不建立第二套 Weft 缓存。
+共享 SDK 的 Python 支持代码也以相对路径、size 和 mtime 纳入编译身份，避免 launcher
+或产物编译逻辑更新后仍复用旧原生产物。安装包在进程中保持不可变，身份查询可复用。
 开发测量的 cache、dump、native 产物均由 Bench 配置在其输出目录。
 
 ## 导出与加载
