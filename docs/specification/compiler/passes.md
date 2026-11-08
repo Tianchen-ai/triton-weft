@@ -636,6 +636,9 @@ LMUL，composite pass 显式把较小 operand 扩展到两者中较大的合法 
 lane/time 分解，自由轴继续占用独立 replica，不计入被归约域。跨 replica/time 的 tuple
 转换若同时改变 lane 窗口或寄存器类型，布局 pass 必须选择完整坐标映射的 `lane_repack`；
 terminal 不能仅重用原向量变量来表示另一种 LMUL。
+两侧的自由轴集合可以不同，且可共享 batch 轴。共同分解按 reduction axis identity
+逐轴建立，不能因总 VL 或 stream 数相同就认定 entry/payload 坐标相同；转换仍须满足
+各自完整域的寄存器合法性，不将超额 replica 当作合法驻留。
 
 pointwise、state 与 control handoff 的要求不一致时，pass 插入真实 `convert_layout`；
 `for/if/while` 的 carried/result types 同时被改写。无法保持 logical axes 或无合法 LMUL 时
@@ -657,6 +660,10 @@ byte offset 与元素 offset 在这里相同；字段必须自然、byte-aligned
 indexed-entry 的 source 必须是实际可寻址的字段或 local payload。由纯计算产生的
 scalar tuple 保持数值提取；不能仅因索引具有连续 payload 形状，就将其当作内存地址。
 后续 typed extract/layout conversion 负责它的寄存器供应，不改变读取快照或作者的计算位置。
+二维 local payload 可保留非单例 row 轴：memory pass 将其已有 allocation 绑定为 dense
+descriptor，按明确 row stride 与每个 result part 的完整 time/replica 坐标读取。row 轴在
+单次 payload issue 内必须不变；entry-major table 与 retained-row storage 由 source-axis
+位置及 descriptor geometry 区分，不能在 emission 时遗漏 row 地址或重新读取原 encoded 输入。
 
 读取 `MemDescType`、Encoding field mapping 和 value layout，为每条 memory edge写入
 `AccessAttr` 与 transfer leaf。dense access 得到 unit/strided/indexed；encoded field 得到

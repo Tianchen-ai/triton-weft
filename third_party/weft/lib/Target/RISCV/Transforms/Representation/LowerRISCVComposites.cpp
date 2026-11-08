@@ -1779,6 +1779,14 @@ private:
           physicalResultType = fusedFreeAxisReduce.getResult().getType();
           laneResultType = {};
         }
+        auto reductionOrder = [&](riscv::ValueType type) {
+          llvm::SmallVector<int64_t> axes;
+          if (type)
+            for (int64_t axis : type.getAxisIds().asArrayRef())
+              if (llvm::is_contained(physicalReductionAxes, axis))
+                axes.push_back(axis);
+          return axes;
+        };
         // A complete integer contraction has one issue domain. Reconcile its
         // numeric operands at the use edge, preserving storage/index producer
         // layouts. Moving reduced replicas to time must cover every coordinate;
@@ -1786,44 +1794,62 @@ private:
         // Surviving scalar free axes instead retain their own replica factors.
         if ((!laneResultType || laneResultType.getLayout().getCarrier() == "scalar") &&
             physicalReductionAxes.size() > 1 && lhsType && rhsType &&
-            lhsType.getShape() == rhsType.getShape() && lhsType.getAxisIds() == rhsType.getAxisIds() &&
+            reductionOrder(lhsType) == reductionOrder(rhsType) &&
             lhsType.getLayout().getCarrier() == "rvv" && rhsType.getLayout().getCarrier() == "rvv" &&
             lhsType.getLayout().getValidity() == "full" && rhsType.getLayout().getValidity() == "full" &&
             lhsType.getLayout().getSew() == rhsType.getLayout().getSew() &&
             llvm::all_of(lhsType.getAxisIds().asArrayRef(), [&](int64_t axis) {
               return llvm::is_contained(physicalReductionAxes, axis) ||
                   (laneResultType && llvm::is_contained(laneResultType.getAxisIds().asArrayRef(), axis));
+            }) && llvm::all_of(rhsType.getAxisIds().asArrayRef(), [&](int64_t axis) {
+              return llvm::is_contained(physicalReductionAxes, axis) ||
+                  (laneResultType && llvm::is_contained(laneResultType.getAxisIds().asArrayRef(), axis));
             })) {
-          llvm::SmallVector<int64_t> lanes, time, replicas, ones(lhsType.getShape().size(), 1);
           bool complete = lhsType.getLayout().getReplicaGroup() == 1 && rhsType.getLayout().getReplicaGroup() == 1;
-          for (size_t i = 0; i < lhsType.getShape().size(); ++i) {
-            const bool reduced = llvm::is_contained(physicalReductionAxes, lhsType.getAxisIds()[i]);
-            const int64_t lane = reduced ? std::gcd(lhsType.getLayout().getLaneFactors()[i],
-                                                   rhsType.getLayout().getLaneFactors()[i]) : 1;
-            const int64_t extent = lhsType.getShape()[i];
-            complete &= lane > 0 && extent > 0 && extent % lane == 0 &&
-                lhsType.getLayout().getFragmentFactors()[i] == 1 && rhsType.getLayout().getFragmentFactors()[i] == 1 &&
-                lhsType.getLayout().getLocalFactors()[i] == 1 && rhsType.getLayout().getLocalFactors()[i] == 1;
-            lanes.push_back(lane);
-            time.push_back(reduced && lane > 0 ? extent / lane : 1);
-            replicas.push_back(reduced ? 1 : extent);
+          llvm::DenseMap<int64_t, int64_t> reductionLanes;
+          for (int64_t axis : physicalReductionAxes) {
+            auto left = axisPosition(lhsType, axis);
+            auto right = axisPosition(rhsType, axis);
+            if (!left || !right || lhsType.getShape()[*left] != rhsType.getShape()[*right]) {
+              complete = false;
+              break;
+            }
+            reductionLanes[axis] = std::gcd(lhsType.getLayout().getLaneFactors()[*left],
+                                           rhsType.getLayout().getLaneFactors()[*right]);
           }
-          const int64_t vl = riscv_internal::staticProduct(lanes).value_or(-1);
-          riscv::LayoutAttr common;
-          for (int64_t lmul : target.getLegalLMULEighths().asArrayRef()) {
-            if (!complete || vl <= 0 ||
-                !llvm::is_contained(target.getLegalLMULEighths().asArrayRef(), 2 * lmul)) continue;
-            auto candidate = riscv::LayoutAttr::get(rewriter.getContext(), "rvv", lhsType.getAxisIds(),
+          auto commonType = [&](riscv::ValueType input) -> riscv::ValueType {
+            llvm::SmallVector<int64_t> lanes, time, replicas, ones(input.getShape().size(), 1);
+            for (size_t i = 0; i < input.getShape().size(); ++i) {
+              const int64_t axis = input.getAxisIds()[i];
+              const bool reduced = llvm::is_contained(physicalReductionAxes, axis);
+              const int64_t lane = reduced ? reductionLanes.lookup(axis) : 1;
+              const int64_t extent = input.getShape()[i];
+              if (!complete || lane <= 0 || extent <= 0 || extent % lane ||
+                  input.getLayout().getFragmentFactors()[i] != 1 ||
+                  input.getLayout().getLocalFactors()[i] != 1)
+                return {};
+              lanes.push_back(lane);
+              time.push_back(reduced ? extent / lane : 1);
+              replicas.push_back(reduced ? 1 : extent);
+            }
+            const int64_t vl = riscv_internal::staticProduct(lanes).value_or(-1);
+            for (int64_t lmul : target.getLegalLMULEighths().asArrayRef()) {
+              if (vl <= 0 ||
+                  !llvm::is_contained(target.getLegalLMULEighths().asArrayRef(), 2 * lmul)) continue;
+              auto candidate = riscv::LayoutAttr::get(rewriter.getContext(), "rvv", input.getAxisIds(),
                 riscv_internal::integers(rewriter, time), riscv_internal::integers(rewriter, lanes),
                 riscv_internal::integers(rewriter, replicas), riscv_internal::integers(rewriter, ones),
-                riscv_internal::integers(rewriter, ones), lhsType.getLayout().getSew(), lmul, vl,
+                riscv_internal::integers(rewriter, ones), input.getLayout().getSew(), lmul, vl,
                 product(riscv_internal::integers(rewriter, replicas)) *
                     std::max<int64_t>(1, (lmul + 7) / 8), "full");
-            if (riscv::supportsRVVLayout(target, candidate)) { common = candidate; break; }
-          }
-          if (common) {
-            auto left = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(lhsType, common));
-            auto right = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(rhsType, common));
+              if (riscv::supportsRVVLayout(target, candidate))
+                return mlir::cast<riscv::ValueType>(riscv_internal::withLayout(input, candidate));
+            }
+            return {};
+          };
+          auto left = commonType(lhsType);
+          auto right = commonType(rhsType);
+          if (left && right) {
             if (riscv::rvvLayoutRepackSlices(lhsType, left) && riscv::rvvLayoutRepackSlices(rhsType, right)) {
               auto convert = [&](mlir::Value &value, riscv::ValueType &type, riscv::ValueType next) {
                 if (type == next) return;

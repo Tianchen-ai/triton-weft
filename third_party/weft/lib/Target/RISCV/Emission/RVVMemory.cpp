@@ -323,6 +323,8 @@ mlir::LogicalResult Emitter::compileRVVIndexedEntryLoad(
   const std::string resultSuffix = vectorSuffix(operation.getResult());
   const int64_t parts = vectorPartCount(operation.getResult());
   const int64_t streams = streamPartCount(operation.getResult());
+  auto descriptor = mlir::dyn_cast<riscv::MemDescType>(operation.getSource().getType());
+  auto resultCoordinates = riscv::RegisterCoordinates::get(operation.getResult().getType().getLayout());
   llvm::SmallVector<int64_t, 4> registerAxes =
       registerAxesFor(operation.getResult());
   Binding result;
@@ -342,6 +344,30 @@ mlir::LogicalResult Emitter::compileRVVIndexedEntryLoad(
     std::string byteBase;
     if (descriptorByteBase) {
       byteBase = *descriptorByteBase;
+      if (descriptor && descriptor.getAxisIds().asArrayRef().back() == operation.getSourceAxis() &&
+          descriptor.getAxisIds().size() > 1) {
+        auto coordinates = resultCoordinates ? resultCoordinates->logical(part) : std::nullopt;
+        if (!coordinates)
+          return fail(operation, "indexed entry row has no verified part coordinates");
+        llvm::SmallVector<std::pair<int64_t, std::string>> offsets;
+        std::string linear = "0";
+        for (auto [position, axis] : llvm::enumerate(descriptor.getAxisIds().asArrayRef())) {
+          if (axis == operation.getSourceAxis()) continue;
+          auto found = llvm::find(operation.getResult().getType().getAxisIds().asArrayRef(), axis);
+          if (found == operation.getResult().getType().getAxisIds().asArrayRef().end())
+            return fail(operation, "indexed entry row is absent from its result");
+          auto coordinate = std::to_string((*coordinates)[found - operation.getResult().getType().getAxisIds().asArrayRef().begin()]);
+          offsets.emplace_back(axis, coordinate);
+          if (source.kind == Binding::Kind::Memory)
+            linear += " + " + coordinate + " * (" + source.memory.strides[position] + ")";
+        }
+        auto address = source.kind == Binding::Kind::Slice
+            ? denseAddress(source.slice, offsets)
+            : std::optional<std::string>(source.memory.name + " + (" + linear + ")");
+        if (!address)
+          return fail(operation, "indexed entry row lost its descriptor address");
+        byteBase = "((const uint8_t *)(" + *address + "))";
+      }
     } else {
       auto coordinates = registerCoordinates(operation.getResult(), part / streams);
       auto sourceType =

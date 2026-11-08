@@ -591,6 +591,12 @@ public:
       }
       if (auto entry =
               mlir::dyn_cast<riscv::RVVIndexedEntryLoadOp>(operation)) {
+        if (!mlir::isa<riscv::MemDescType>(entry.getSource().getType()) &&
+            !riscv_internal::sourceField(entry.getSource())) {
+          entry.emitError(
+              "final indexed-entry source requires an explicit descriptor or encoded field projection");
+          failed = true;
+        }
         const int64_t availableAlignment =
             riscv_internal::indexedEntryAlignment(entry.getSource(),
                 entry.getEntryOffsets(), entry.getEntryByteStride());
