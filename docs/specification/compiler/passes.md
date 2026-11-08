@@ -55,6 +55,10 @@ pointwise 与 MMA 累加器复用实现，不因匿名局部轴而先 unpack 两
 即使普通位置轴获得了新名字。分析将当前轴映射回原 lookup 轴，使相同 contraction
 可以共同处理表项坐标和 payload；改变大小的后缀不凭轴名推定对应，动态前缀仍要求
 原身份。选择后的真实 gather、conversion 与资源继续由同一物理管线验证。
+索引的 EEW 比结果 SEW 更宽、不能覆盖消费者的整片 lane 域时，普通 lookup/gather
+沿索引已有的合法 issue 分解生成结果，再以显式 conversion 接回消费者布局。
+已证明的整表项供给仍优先保留 entry/payload 关系；完整索引的保值 unsigned
+扩宽不打断该证明。任何实际索引 EMUL 都必须属于目标的合法域。
 每个 kernel 唯一的 root domain 是结构锚点；即使普通 Tensor 程序没有子 Level，
 它也不作为无使用的纯数值删除。目标转换消费该锚点，不产生运行时工作。
 完整、静态有效域上的零坐标标量投影消去纯 broadcast/extract 往返；相同坐标的
@@ -464,6 +468,9 @@ encoded Record capture 明确传递原读取的指针、byte strides、origins �
 取得实际 extent；不能要求源码为完整轴另写一个 Level。源区间和输入值的轴、shape、
 Encoding 及原读取关系由 verifier 核对。pack 的 payload 继续消费已保存的输入值；
 descriptor 只提供范围，不引入一次新读取或改变 stage 的 birth/handoff。
+局部 pack 判断归约轴供给时，穿过同一程序的纯、无区域字段解码与转换链，
+继续追踪原快照身份。按 record 内 lane 归约的消费者保留每条记录连续的字节，
+不能因 payload 经过中心化算术就被误选为面向输出轴的 byte interleave。
 可写 capture 只有在独立 captures 和全部真实访存都被证明不重叠时才标记 `restrict`。
 同一 allocation 上的不同指针参数不按同源关系合并；未知地址或 effects 阻止该限定。
 final verifier 重算同一证明，terminal 只拼写已冻结的限定。

@@ -2049,6 +2049,16 @@ riscv_internal::analyzeIndexedEntryRelation(
     return std::nullopt;
 
   mlir::Value indexValue = stripRepresentationConversions(fullIndices);
+  // A lookup may widen the complete index after constructing entry*stride
+  // plus payload. Follow only value-preserving conversions, retaining the
+  // original typed arithmetic (including any earlier finite-width wrap).
+  for (unsigned depth = 0; depth != 8; ++depth) {
+    auto input = exactIntegerCoordinateInput(indexValue);
+    if (!input) break;
+    auto integer = mlir::dyn_cast<mlir::IntegerType>(logicalElement(input.getType()));
+    if (integer && integer.isSigned()) break;
+    indexValue = stripRepresentationConversions(input);
+  }
   auto add = indexValue.getDefiningOp<riscv::BinaryOp>();
   if (!add || add.getKind() != "add")
     return std::nullopt;

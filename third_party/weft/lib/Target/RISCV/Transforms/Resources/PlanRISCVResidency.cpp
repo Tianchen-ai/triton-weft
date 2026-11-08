@@ -159,19 +159,33 @@ planEncodedLocalPack(mlir::Builder &builder,
     auto implementation = dot->template getAttrOfType<riscv::ImplementationAttr>("implementation");
     if (!implementation || implementation.getFamily() != "widen-dot" ||
         !llvm::is_contained(dot.getOver(), recordAxis)) return;
-    for (mlir::Value operand : {dot.getLhs(), dot.getRhs()}) {
-      auto field = riscv_internal::sourceField(operand);
-      if (!field) continue;
-      mlir::Value owner = field.getOwner();
-      for (unsigned depth = 0; depth < 32; ++depth) {
-        if (owner == materialize.getResult()) {
-          reductionLaneConsumer = true;
-          break;
+    llvm::SmallVector<mlir::Value> operands{dot.getLhs(), dot.getRhs()};
+    llvm::DenseSet<mlir::Value> inspected;
+    while (!operands.empty()) {
+      mlir::Value operand = operands.pop_back_val();
+      if (!inspected.insert(operand).second) continue;
+      if (auto field = riscv_internal::sourceField(operand)) {
+        mlir::Value owner = field.getOwner();
+        for (unsigned depth = 0; depth < 32; ++depth) {
+          if (owner == materialize.getResult()) {
+            reductionLaneConsumer = true;
+            break;
+          }
+          if (auto extract = owner.getDefiningOp<riscv::ExtractOp>()) owner = extract.getInput();
+          else if (auto convert = owner.getDefiningOp<riscv::ConvertLayoutOp>()) owner = convert.getInput();
+          else break;
         }
-        if (auto extract = owner.getDefiningOp<riscv::ExtractOp>()) owner = extract.getInput();
-        else if (auto convert = owner.getDefiningOp<riscv::ConvertLayoutOp>()) owner = convert.getInput();
-        else break;
+        continue;
       }
+      // Field decoding and exact casts remain part of the same payload
+      // supply. Inspect pure, regionless use-def edges so a centered bit or
+      // nibble expression cannot hide its reduction-lane storage requirement.
+      auto *producer = operand.getDefiningOp();
+      if (!producer || producer->getNumRegions() ||
+          !mlir::isMemoryEffectFree(producer)) continue;
+      for (mlir::Value input : producer->getOperands())
+        if (mlir::isa<riscv::ValueType>(input.getType()))
+          operands.push_back(input);
     }
   };
   materialize->getParentOfType<riscv::KernelOp>().walk([&](mlir::Operation *operation) {

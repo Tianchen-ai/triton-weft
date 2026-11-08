@@ -2122,6 +2122,54 @@ riscv::LayoutAttr registerGatherSourceLayout(mlir::Builder &builder,
       (resultLayout.getLmulEighths() + 7) / 8, "full");
 }
 
+riscv::LayoutAttr projectIndexedResult(mlir::OpBuilder &builder,
+                                      mlir::Operation *operation,
+                                      mlir::Value index,
+                                      riscv::ValueType &result,
+                                      riscv::TargetAttr target) {
+  auto indexType = mlir::dyn_cast<riscv::ValueType>(index.getType());
+  if (!indexType || indexType.getLayout().getCarrier() != "rvv" ||
+      result.getLayout().getCarrier() != "rvv" ||
+      indexType.getShape() != result.getShape() ||
+      indexType.getAxisIds() != result.getAxisIds())
+    return {};
+  // Index EEW can exceed data SEW. A legal index issue is still a legal
+  // lookup program even when the consumer's wider data issue would require
+  // an index EMUL above the architectural limit. Preserve the index's
+  // coordinate partition and explicitly repack the result for its consumer.
+  auto joint = riscv_internal::projectLayout(
+      builder, result, indexType.getLayout(), target);
+  auto required = joint ? riscv_internal::projectLayout(
+                              builder, indexType, joint, target)
+                        : riscv::LayoutAttr();
+  if (!joint || !required || joint.getCarrier() != "rvv" ||
+      required.getCarrier() != "rvv")
+    return {};
+  int64_t indexWidth = joint.getLmulEighths() * required.getSew();
+  if (indexWidth % joint.getSew() != 0 ||
+      !llvm::is_contained(target.getLegalLMULEighths().asArrayRef(),
+                         indexWidth / joint.getSew()))
+    return {};
+  required = withRegisterWidth(builder, required, indexWidth / joint.getSew());
+  if (!riscv::supportsRVVLayout(target, joint) ||
+      !riscv::supportsRVVLayout(target, required))
+    return {};
+  auto consumerType = result;
+  result = mlir::cast<riscv::ValueType>(
+      riscv_internal::withLayout(result, joint));
+  operation->getResult(0).setType(result);
+  mlir::OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointAfter(operation);
+  auto conversion = riscv::ConvertLayoutOp::create(builder,
+      operation->getLoc(), consumerType, operation->getResult(0),
+      riscv_internal::layoutConversion(builder, joint, consumerType.getLayout()),
+      riscv::AccessAttr(), riscv_internal::unselectedLeaf(builder));
+  riscv_internal::copyOrigin(operation, conversion);
+  operation->getResult(0).replaceAllUsesExcept(conversion.getResult(),
+                                             conversion.getOperation());
+  return required;
+}
+
 class PropagateRISCVLayoutsPass
     : public mlir::PassWrapper<PropagateRISCVLayoutsPass,
                                mlir::OperationPass<mlir::ModuleOp>> {
@@ -3768,6 +3816,12 @@ private:
               riscv_internal::analyzeIndexedEntryRelation(
                   sourceValue, result, {}, {}))
             continue;
+          if (mlir::isa<riscv::LookupOp>(operation) &&
+              operand.getOperandNumber() == 1)
+            required = projectIndexedResult(builder, operation, sourceValue,
+                                            result, kernel.getTarget());
+        }
+        if (!required) {
           operation->emitError()
               << "no legal target layout projects pointwise result "
               << result << " to operand " << operandType;
@@ -3973,6 +4027,10 @@ private:
             indexWidth /= result.getLayout().getSew();
             if (llvm::is_contained(kernel.getTarget().getLegalLMULEighths().asArrayRef(), indexWidth))
               required = withRegisterWidth(builder, required, indexWidth);
+            else
+              required = {};
+          } else {
+            required = {};
           }
         }
         if (!required) {
@@ -3995,6 +4053,10 @@ private:
             if (relation && relation->stride == 1 && relation->repeat > 1)
               continue;
           }
+          required = projectIndexedResult(builder, extract, operand.get(),
+                                          result, kernel.getTarget());
+        }
+        if (!required) {
           extract.emitError(
               "no legal target layout projects the gather result mapping to its index");
           signalPassFailure();
