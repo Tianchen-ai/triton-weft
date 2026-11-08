@@ -98,10 +98,8 @@ void triton_weft_bind_parallel(triton_parallel_runner executor) {{
   atomic_store_explicit(&parallel_executor, executor, memory_order_release);
 }}
 static inline void {instance}(void (*entry)(void), const struct launch_arguments *decoded,
-                            size_t grid0, size_t grid1, size_t grid2, size_t linear) {{
-  const size_t pid0 = linear % grid0;
-  const size_t pid1 = (linear / grid0) % grid1;
-  const size_t pid2 = linear / (grid0 * grid1);
+                            size_t grid0, size_t grid1, size_t grid2,
+                            size_t pid0, size_t pid1, size_t pid2) {{
   {invocation}
 }}
 struct launch_job {{
@@ -111,8 +109,17 @@ struct launch_job {{
 }};
 static void launch_range(void *opaque, size_t begin, size_t end) {{
   const struct launch_job *job = (const struct launch_job *)opaque;
-  for (size_t i = begin; i < end; ++i)
-    {instance}(job->entry, job->decoded, job->grid0, job->grid1, job->grid2, i);
+  size_t pid0 = begin % job->grid0;
+  const size_t row = begin / job->grid0;
+  size_t pid1 = row % job->grid1, pid2 = row / job->grid1;
+  for (size_t i = begin; i < end; ++i) {{
+    {instance}(job->entry, job->decoded, job->grid0, job->grid1, job->grid2,
+               pid0, pid1, pid2);
+    if (++pid0 == job->grid0) {{
+      pid0 = 0;
+      if (++pid1 == job->grid1) {{ pid1 = 0; ++pid2; }}
+    }}
+  }}
 }}
 int triton_weft_grid(void (*entry)(void), void *const *arguments,
                     size_t grid0, size_t grid1, size_t grid2, int threads,
@@ -124,10 +131,14 @@ int triton_weft_grid(void (*entry)(void), void *const *arguments,
   struct launch_arguments decoded;
   {' '.join(declarations)}
   if (threads == 0) threads = omp_get_max_threads();
+  struct launch_job job = {{entry, &decoded, grid0, grid1, grid2}};
   if (count == 1 || threads == 1) {{
     int status = check(scope, error, error_size);
     if (status) return status;
-    for (size_t i = 0; i < count; ++i) {instance}(entry, &decoded, grid0, grid1, grid2, i);
+    if (count == 1)
+      {instance}(entry, &decoded, grid0, grid1, grid2, 0, 0, 0);
+    else
+      launch_range(&job, 0, count);
     return 0;
   }}
   triton_parallel_runner executor = atomic_load_explicit(&parallel_executor, memory_order_acquire);
@@ -138,7 +149,6 @@ int triton_weft_grid(void (*entry)(void), void *const *arguments,
     }}
     return 5;
   }}
-  struct launch_job job = {{entry, &decoded, grid0, grid1, grid2}};
   return executor(count, threads, scope, check, &job, launch_range, error, error_size);
 }}
 '''

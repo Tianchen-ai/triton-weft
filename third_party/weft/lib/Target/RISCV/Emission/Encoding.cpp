@@ -730,6 +730,17 @@ mlir::LogicalResult Emitter::compileExtract(riscv::ExtractOp operation) {
       binding.field.shape.assign(resultType.getShape().asArrayRef().begin(),
                                  resultType.getShape().asArrayRef().end());
     fieldProjections[operation.getResult()] = binding.field;
+    if (instructionOf(operation.getOperation()) == "rvv.extract.unit" &&
+        !mlir::isa<riscv::ValueType>(operation.getResult().getType())) {
+      auto loaded = materializeNumeric(operation.getResult(), std::move(binding));
+      if (mlir::failed(loaded))
+        return mlir::failure();
+      if (loaded->kind != Binding::Kind::Scalar)
+        return fail(operation,
+                    "unit field extract lost its selected scalar read");
+      bindings[operation.getResult()] = std::move(*loaded);
+      return mlir::success();
+    }
     bindings[operation.getResult()] = std::move(binding);
     return mlir::success();
   }
