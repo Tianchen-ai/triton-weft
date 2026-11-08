@@ -48,20 +48,24 @@ public:
         [&](riscv::EncodedLocalPackOp operation) { packs.push_back(operation); });
 
     for (riscv::EncodedLocalPackOp operation : packs) {
-      auto rowPoint = operation.getRowPoint().getDefiningOp<riscv::PhysicalPointOp>();
-      auto recordPoint =
-          operation.getRecordPoint().getDefiningOp<riscv::PhysicalPointOp>();
       riscv::LocalPackPlanAttr plan = operation.getPlan();
-      if (!rowPoint || !recordPoint) {
+      auto axes = operation.getSourceRegion().getType().getAxisIds().asArrayRef();
+      auto rowAxis = llvm::find(axes, plan.getRowAxis());
+      auto recordAxis = llvm::find(axes, plan.getRecordAxis());
+      if (rowAxis == axes.end() || recordAxis == axes.end()) {
         operation.emitError(
-            "encoded local pack program requires explicit physical row and record points");
+            "encoded local pack program lost its source descriptor axes");
         failed = true;
         continue;
       }
 
       rewriter.setInsertionPoint(operation);
+      auto rowExtent = riscv::ExtentOp::create(rewriter, operation.getLoc(),
+          rewriter.getIndexType(), operation.getSourceRegion(), rowAxis - axes.begin());
+      auto recordExtent = riscv::ExtentOp::create(rewriter, operation.getLoc(),
+          rewriter.getIndexType(), operation.getSourceRegion(), recordAxis - axes.begin());
       auto guard = riscv::IndexMultipleGuardOp::create(rewriter,
-          operation.getLoc(), recordPoint.getActive(), plan.getRecordElements(),
+          operation.getLoc(), recordExtent.getResult(), plan.getRecordElements(),
           riscv_internal::leaf(rewriter, "scalar", "index-guard",
                                "scalar.index-multiple-guard",
                                "scalar.index-multiple-guard", 0, 0, 0));
@@ -81,9 +85,9 @@ public:
           mlir::arith::ConstantIndexOp::create(rewriter,
               operation.getLoc(), plan.getRecordBytes());
       mlir::Value rowGroups = mlir::arith::CeilDivUIOp::create(rewriter,
-          operation.getLoc(), rowPoint.getActive(), rowsPerGroup);
+          operation.getLoc(), rowExtent.getResult(), rowsPerGroup);
       mlir::Value blockCount = mlir::arith::DivUIOp::create(rewriter,
-          operation.getLoc(), recordPoint.getActive(), elementsPerRecord);
+          operation.getLoc(), recordExtent.getResult(), elementsPerRecord);
 
       auto rowLoop = mlir::scf::ForOp::create(rewriter,
           operation.getLoc(), zero, rowGroups, one);
@@ -94,7 +98,7 @@ public:
       mlir::Value rowBase = mlir::arith::MulIOp::create(rewriter,
           operation.getLoc(), rowLoop.getInductionVar(), rowsPerGroup);
       mlir::Value rowsRemaining = mlir::arith::SubIOp::create(rewriter,
-          operation.getLoc(), rowPoint.getActive(), rowBase);
+          operation.getLoc(), rowExtent.getResult(), rowBase);
       mlir::Value transferVL = mlir::arith::MinUIOp::create(rewriter,
           operation.getLoc(), rowsRemaining, rowsPerGroup);
 

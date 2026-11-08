@@ -723,34 +723,9 @@ private:
             mlir::dyn_cast<riscv::ValueType>(operation.getResult().getType());
         if (auto plan = operation.getLocalPackPlanAttr()) {
           auto load = riscv_internal::sourceLoad(operation.getInput());
-          auto slice = load ? load.getRegion().getDefiningOp<riscv::SliceOp>()
-                            : riscv::SliceOp();
-          mlir::Value rowPoint;
-          mlir::Value recordPoint;
-          size_t cursor = 0;
-          if (slice) {
-            auto descriptor = slice.getResult().getType();
-            for (auto [dimension, selectorAttribute] :
-                 llvm::enumerate(slice.getSelectors())) {
-              llvm::StringRef selector =
-                  mlir::cast<mlir::StringAttr>(selectorAttribute).getValue();
-              if (selector == "all")
-                continue;
-              if (cursor >= slice.getIndices().size())
-                break;
-              mlir::Value coordinate = slice.getIndices()[cursor++];
-              if (selector != "domain")
-                continue;
-              const int64_t axis = descriptor.getAxisIds()[dimension];
-              if (axis == plan.getRowAxis())
-                rowPoint = coordinate;
-              if (axis == plan.getRecordAxis())
-                recordPoint = coordinate;
-            }
-          }
-          if (!input || !result || !load || !slice || !rowPoint || !recordPoint) {
+          if (!input || !result || !load) {
             operation.emitError(
-                "encoded local pack requires one load-backed two-axis materialization");
+                "encoded local pack requires one load-backed materialization");
             failed = true;
             continue;
           }
@@ -795,7 +770,7 @@ private:
           }
           auto packed = riscv::EncodedLocalPackOp::create(rewriter,
               operation.getLoc(), result, operation.getInput(),
-              allocation.getResult(), rowPoint, recordPoint, plan,
+              allocation.getResult(), load.getRegion(), plan,
               transferLayout,
               riscv_internal::leaf(
                   rewriter, "transfer", "local-pack",

@@ -1728,8 +1728,7 @@ def WeftRISCV_EncodedLocalPackOp
     : WeftRISCV_Op<"encoded_local_pack"> {
   let arguments = (ins Arg<WeftRISCV_ValueType, "", [MemRead]>:$input,
                        Arg<WeftRISCV_LocalType, "", [MemWrite]>:$storage,
-                       WeftRISCV_PointType:$row_point,
-                       WeftRISCV_PointType:$record_point,
+                       WeftRISCV_MemDescType:$source_region,
                        WeftRISCV_LocalPackPlanAttr:$plan,
                        WeftRISCV_LayoutAttr:$transfer_layout,
                        WeftRISCV_LeafAttr:$leaf);

@@ -155,8 +155,8 @@ planEncodedLocalPack(mlir::Builder &builder,
   // record at a time. Preserve contiguous bytes within each saved record;
   // output-lane grouped operations instead benefit from byte-plane cohorts.
   bool reductionLaneConsumer = false;
-  materialize->getParentOfType<riscv::KernelOp>().walk([&](riscv::DotOp dot) {
-    auto implementation = dot->getAttrOfType<riscv::ImplementationAttr>("implementation");
+  auto inspectContraction = [&](auto dot) {
+    auto implementation = dot->template getAttrOfType<riscv::ImplementationAttr>("implementation");
     if (!implementation || implementation.getFamily() != "widen-dot" ||
         !llvm::is_contained(dot.getOver(), recordAxis)) return;
     for (mlir::Value operand : {dot.getLhs(), dot.getRhs()}) {
@@ -173,6 +173,14 @@ planEncodedLocalPack(mlir::Builder &builder,
         else break;
       }
     }
+  };
+  materialize->getParentOfType<riscv::KernelOp>().walk([&](mlir::Operation *operation) {
+    if (auto dot = mlir::dyn_cast<riscv::DotOp>(operation))
+      inspectContraction(dot);
+    else if (auto dot = mlir::dyn_cast<riscv::ContractOp>(operation))
+      inspectContraction(dot);
+    else if (auto dot = mlir::dyn_cast<riscv::OuterContractOp>(operation))
+      inspectContraction(dot);
   });
   if (reductionLaneConsumer) interleaveRows = 1;
 
