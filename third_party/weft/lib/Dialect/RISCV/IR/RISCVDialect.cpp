@@ -6161,8 +6161,21 @@ mlir::LogicalResult EncodedLocalPackOp::verify() {
   LocalPackPlanAttr plan = getPlan();
   LayoutAttr transfer = getTransferLayout();
   auto encoding = mlir::dyn_cast<kernel::EncodingType>(input.getElementType());
-  auto row = getRowPoint().getType().getDomain();
-  auto record = getRecordPoint().getType().getDomain();
+  auto source = getSourceRegion().getType();
+  auto sourceLoadOp = sourceLoad(getInput());
+  bool sourceDomain = sourceLoadOp &&
+      sourceLoadOp.getRegion() == getSourceRegion() &&
+      source.getEncoding() == input.getElementType();
+  for (auto [axis, extent] : llvm::zip(source.getAxisIds().asArrayRef(),
+                                     source.getShape().asArrayRef())) {
+    auto position = llvm::find(input.getAxisIds().asArrayRef(), axis);
+    sourceDomain &= position == input.getAxisIds().asArrayRef().end()
+        ? extent == 1
+        : extent == input.getShape()[position - input.getAxisIds().asArrayRef().begin()];
+  }
+  sourceDomain &= llvm::all_of(input.getAxisIds().asArrayRef(), [&](int64_t axis) {
+    return llvm::is_contained(source.getAxisIds().asArrayRef(), axis);
+  });
   auto rowPosition = llvm::find(result.getAxisIds().asArrayRef(), plan.getRowAxis());
   auto recordPosition =
       llvm::find(result.getAxisIds().asArrayRef(), plan.getRecordAxis());
@@ -6229,8 +6242,7 @@ mlir::LogicalResult EncodedLocalPackOp::verify() {
       storage.getAxisIds() != result.getAxisIds() ||
       storage.getSizeBytes() != plan.getLocalBytes() ||
       !expectedLocalBytes || *expectedLocalBytes != plan.getLocalBytes() ||
-      row.getAxisId() != plan.getRowAxis() ||
-      record.getAxisId() != plan.getRecordAxis() ||
+      !sourceDomain ||
       !rowExtent || !recordExtent || *rowExtent % plan.getInterleaveRows() ||
       *recordExtent % plan.getRecordElements() ||
       !getStorage().getDefiningOp<LocalAllocOp>() ||

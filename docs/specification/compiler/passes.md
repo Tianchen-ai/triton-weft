@@ -428,6 +428,10 @@ terminal 以 Clang 23 的 `fmaximum_num` / `fminimum_num` builtin 拼写该已�
 优化私有函数的传参，不因结果恰好是标量而选择另一套调用约定。
 encoded Record capture 明确传递原读取的指针、byte strides、origins 与 interleave 坐标，
 不能在 helper 中重新读取源 View 代替快照。返回的存储 alias 由共同来源分析追踪。
+局部 encoded pack 的活动范围来自该原读取的完整 source descriptor，并按计划的逻辑轴
+取得实际 extent；不能要求源码为完整轴另写一个 Level。源区间和输入值的轴、shape、
+Encoding 及原读取关系由 verifier 核对。pack 的 payload 继续消费已保存的输入值；
+descriptor 只提供范围，不引入一次新读取或改变 stage 的 birth/handoff。
 可写 capture 只有在独立 captures 和全部真实访存都被证明不重叠时才标记 `restrict`。
 同一 allocation 上的不同指针参数不按同源关系合并；未知地址或 effects 阻止该限定。
 final verifier 重算同一证明，terminal 只拼写已冻结的限定。
