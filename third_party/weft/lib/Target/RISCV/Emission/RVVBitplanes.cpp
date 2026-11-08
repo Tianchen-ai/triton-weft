@@ -420,8 +420,9 @@ Emitter::compileRVVBitmaskDecode(riscv::RVVBitmaskDecodeOp operation) {
 
 mlir::LogicalResult Emitter::compileRVVSignedBitmaskReduce(
     riscv::RVVSignedBitmaskReduceOp operation) {
-  if (instructionOf(operation.getOperation()) !=
-      "rvv.signed-bitmask-reduce.i8-i16")
+  const auto instruction = instructionOf(operation.getOperation());
+  if (instruction != "rvv.signed-bitmask-reduce.i8-i16" &&
+      instruction != "rvv.signed-bitmask-reduce.complement")
     return fail(operation,
                 "RVV signed-bitmask reduction has no exact selected leaf");
   Binding data = bindings.lookup(operation.getData());
@@ -447,6 +448,27 @@ mlir::LogicalResult Emitter::compileRVVSignedBitmaskReduce(
   std::string zero = fresh("signed_bitmask_zero");
   line("vint16m1_t " + zero +
        " = __riscv_vmv_v_x_i16m1(0, 1);");
+  if (instruction == "rvv.signed-bitmask-reduce.complement") {
+    std::string inverted = fresh("signed_bitmask_inverted");
+    line(vectorType(operation.getData()) + " " + inverted + " = __riscv_vnot_v_" +
+         suffix + "(" + data.parts.front() + ", " + vl + ");");
+    std::string signedValue = fresh("signed_bitmask_value");
+    line(vectorType(operation.getData()) + " " + signedValue + " = __riscv_vmerge_vvm_" +
+         suffix + "(" + inverted + ", " + data.parts.front() + ", " + mask.parts.front() +
+         ", " + vl + ");");
+    std::string total = fresh("signed_bitmask_total");
+    line("vint16m1_t " + total + " = __riscv_vwredsum_vs_" + suffix +
+         "_i16m1_tu(" + zero + ", " + signedValue + ", " + zero + ", " + vl + ");");
+    std::string negativeCount = fresh("signed_bitmask_negative_count");
+    line("const size_t " + negativeCount + " = (size_t)(" + vl +
+         ") - __riscv_vcpop_m_b" + std::to_string(maskBits) + "(" + mask.parts.front() +
+         ", " + vl + ");");
+    Binding result;
+    result.kind = Binding::Kind::Scalar;
+    result.scalar = "((int32_t)__riscv_vmv_x_s_i16m1_i16(" + total + ") + (int32_t)" + negativeCount + ")";
+    bindings[operation.getResult()] = std::move(result);
+    return mlir::success();
+  }
   std::string total = fresh("signed_bitmask_total");
   line("vint16m1_t " + total + " = __riscv_vwredsum_vs_" + suffix +
        "_i16m1_tu(" + zero + ", " + data.parts.front() + ", " + zero +
