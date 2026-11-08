@@ -11,6 +11,11 @@
 using namespace mlir;
 using namespace weft::riscv;
 
+mlir::StringAttr weft::riscv::conversionRounding(mlir::Operation *operation) {
+  auto rounding = operation->getAttrOfType<StringAttr>("rounding");
+  return rounding && rounding.getValue() != "none" ? rounding : StringAttr();
+}
+
 bool weft::riscv::hasCompleteReductionDomain(RVVWidenDotOp operation) {
   auto extents = operation.getActiveExtents();
   unsigned offset = 0;

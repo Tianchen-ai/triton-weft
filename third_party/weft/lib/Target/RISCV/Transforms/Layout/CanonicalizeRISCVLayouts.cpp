@@ -25,6 +25,21 @@ bool rematerializable(mlir::Operation *operation) {
          operation->getNumResults() == 1;
 }
 
+bool rematerializableCoordinate(mlir::Value value) {
+  // Positional axes can reach a consumer through a signedness or width cast.
+  // Those exact coordinate conversions do not turn a cheap iota into a
+  // shared numerical payload that must be extracted from a vector register.
+  // Keep each conversion in the rebuilt chain; the common integer proof only
+  // permits following it when its complete value range is preserved.
+  for (unsigned depth = 0; depth != 8; ++depth) {
+    if (value.getDefiningOp<riscv::IotaOp>()) return true;
+    auto input = riscv_internal::exactIntegerCoordinateInput(value);
+    if (!input) return false;
+    value = input;
+  }
+  return false;
+}
+
 bool isPureRepresentationConversion(riscv::ConvertLayoutOp conversion) {
   return conversion.getConversion().getEffect() == "pure";
 }
@@ -126,7 +141,7 @@ bool canReprojectIndex(mlir::Value value, riscv::LayoutAttr required,
     return true;
   mlir::Operation *producer = value.getDefiningOp();
   if (!producer || !rematerializable(producer) ||
-      (!value.hasOneUse() && !mlir::isa<riscv::IotaOp>(producer)))
+      (!value.hasOneUse() && !rematerializableCoordinate(value)))
     return false;
   for (mlir::Value operand : producer->getOperands()) {
     auto operandType = mlir::dyn_cast<riscv::ValueType>(operand.getType());
@@ -787,7 +802,7 @@ public:
         }
         if (!producer || !rematerializable(producer) ||
             (!conversion.getInput().hasOneUse() &&
-             !mlir::isa<riscv::IotaOp>(producer)))
+             !rematerializableCoordinate(conversion.getInput())))
           continue;
         auto targetType = conversion.getResult().getType();
         auto targetValue = mlir::cast<riscv::ValueType>(targetType);

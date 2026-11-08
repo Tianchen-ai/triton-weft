@@ -23,6 +23,11 @@ source 的 `new/materialize` birth 在变换期间保持各自身份，不能因
 规则坐标供给通过共同整数范围证明穿过数值不变的 cast/widen/narrow，不能穿过可能回绕
 或饱和的转换。相同 shape 的坐标重命名按位置映射；完整 row-major affine ordinal 的
 split/merge 重新计算结果轴 stride。其它 mixed-radix 表达保持未证明，不能只按轴名重构。
+同一 iota 经已证明保值的整数转换供给多个物理布局时，各消费者可以在自己的布局中
+重建这条纯坐标链，并保留原转换；共享整数转换不要求先生成向量坐标再逐项提取。
+这项有界重物化不穿过数值 payload、读取快照或 state/stage 的 birth。
+整数 cast 物理化为 narrow 时，`rounding="none"` 表示没有浮点舍入；指令选择与发射
+消费同一查询，保留整数截断和有限位宽，不经 double 或浮点取整函数中转。
 已能证明规则 Encoding 窗口的传输在 dense value realization 之前物理化；
 其坐标只参与地址选择，失去使用后清除，不能先独立生成一份数值索引数组再尝试恢复供给。
 精确整数 mul/add 在 fragment 物化后、dense 数值程序展开前使用同一 MAC 选择器闭合，

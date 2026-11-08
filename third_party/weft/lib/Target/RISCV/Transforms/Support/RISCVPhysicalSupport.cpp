@@ -1,4 +1,5 @@
 #include "Transforms/Support/RISCVPhysicalSupport.h"
+#include "Weft/Dialect/RISCV/IR/Numerics.h"
 #include "Weft/Dialect/Kernel/IR/TypeQueries.h"
 #include "Weft/Analysis/StorageBytes.h"
 #include "Weft/Dialect/Kernel/IR/ShapeBindings.h"
@@ -1536,7 +1537,7 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
           (mlir::isa<mlir::Float8E4M3FNType>(source) ? "f8e4m3fn-to-f32" : "f8e5m2-to-f32");
     }
     if (source.isBF16() != target.isBF16()) {
-      auto rounding = operation->getAttrOfType<mlir::StringAttr>("rounding");
+      auto rounding = riscv::conversionRounding(operation);
       auto saturate = operation->getAttrOfType<mlir::BoolAttr>("saturate");
       if ((!source.isF32() && !target.isF32()) ||
           (rounding && rounding.getValue() != "rne") ||
@@ -1547,7 +1548,7 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
                              ? "rvv." : "scalar.") +
              (source.isBF16() ? "bf16-to-f32" : "f32-to-bf16-rne");
     }
-    auto rounding = operation->getAttrOfType<mlir::StringAttr>("rounding");
+    auto rounding = riscv::conversionRounding(operation);
     auto saturate = operation->getAttrOfType<mlir::BoolAttr>("saturate");
     if (carrierOf(operation->getResult(0).getType()) != "rvv") {
       auto integer = mlir::dyn_cast<mlir::IntegerType>(target);
