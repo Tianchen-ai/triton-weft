@@ -260,6 +260,42 @@ public:
   }
 };
 
+class FoldDescriptorExtent : public OpRewritePattern<weft::kernel::ExtentOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::ExtentOp extent,
+                               PatternRewriter &rewriter) const override {
+    namespace k = weft::kernel;
+    Value base = extent.getBase();
+    const unsigned axis = extent.getAxis();
+    if (auto subview = base.getDefiningOp<k::SubviewOp>()) {
+      int64_t size = subview.getExtents()[axis];
+      if (size >= 0) {
+        rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(extent, size);
+      } else {
+        unsigned dynamic = 0;
+        for (int64_t offset : subview.getOffsets()) dynamic += offset == -1;
+        for (unsigned i = 0; i < axis; ++i) dynamic += subview.getExtents()[i] == -1;
+        rewriter.replaceOp(extent, subview.getDynamicBounds()[dynamic]);
+      }
+      return success();
+    }
+    if (auto bind = base.getDefiningOp<k::BindViewOp>()) {
+      rewriter.replaceOp(extent, bind.getExtents()[axis]);
+      return success();
+    }
+    // A View carries its exact declared extent. A Level slice instead carries
+    // a nominal capacity; retain its query until the active domain is known.
+    if (auto view = dyn_cast<k::ViewType>(base.getType())) {
+      int64_t size = view.getShape()[axis];
+      if (size < 0) return failure();
+      rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(extent, size);
+      return success();
+    }
+    return failure();
+  }
+};
+
 bool isZeroIndex(Value value) {
   if (auto literal = value.getDefiningOp<arith::ConstantOp>()) {
     auto integer = dyn_cast<IntegerAttr>(literal.getValue());
@@ -550,6 +586,7 @@ public:
     scf::IfOp::getCanonicalizationPatterns(patterns, &getContext());
     scf::WhileOp::getCanonicalizationPatterns(patterns, &getContext());
     patterns.add<PushCoordinateRename, FoldScalarProjection, FoldFullSelect, FoldStaticSubviewOffsets,
+                 FoldDescriptorExtent,
                  FoldIdentitySlice, FoldScalarInteger, FoldScalarIntegerCompare,
                  FoldConstantIf, NormalizeScalarSelect, NormalizeBoundedGather,
                  FoldIdentityLookup,
