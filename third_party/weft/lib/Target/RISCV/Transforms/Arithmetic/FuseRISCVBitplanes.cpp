@@ -700,6 +700,8 @@ public:
       auto dataType =
           mlir::cast<riscv::ValueType>(relation->data.getType());
       const int64_t dataGroups = dataType.getLayout().getRegisterGroups();
+      const int64_t operandGroups = dataGroups +
+          relation->mask.getResult().getType().getLayout().getRegisterGroups();
       const int64_t temporaryGroups = 3;
       const bool tail = dataType.getLayout().getValidity() == "tail";
       auto maskLeaf = relation->mask.getLeaf();
@@ -719,7 +721,7 @@ public:
           riscv_internal::leaf(
               rewriter, "rvv", "signed-bitmask-reduce",
               "rvv.signed-bitmask-reduce.i8-i16",
-              "rvv.signed-bitmask-reduce.i8-i16", dataGroups, 0,
+              "rvv.signed-bitmask-reduce.i8-i16", operandGroups, 0,
               temporaryGroups, 0, "none", tail ? "agnostic" : "exact",
               {relation->reductionAxis, relation->extent}));
       riscv_internal::copyOrigin(dot, reduction);

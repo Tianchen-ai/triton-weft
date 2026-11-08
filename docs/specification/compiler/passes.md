@@ -1468,6 +1468,14 @@ nested planner 的最大 issue window 若不能闭合资源，可以沿同一物
 窗口缩到一个元素时，带轴坐标仍保留其轴；memory pass 必须沿已支持的仿射表达式
 物化无轴标量地址基值，不能把单元素 shaped value 直接冒充 scalar。
 
+原窗口轴也可以由独立 register replicas 承载，要求其 time/lane factor 均为一、
+fragment/local factor 均为一。planner 沿相同完整逻辑域枚举可整除的 replica 窗口，
+通过既有 layout conversion 将所选窗口的 replicas 合入 lane carrier，并核算 widened
+product、reduction 与 scale 的完整资源。单 issue 覆盖原 shape/axes 时直接消费已有 SSA
+供给，不重放 producer closure；多个 issue 只投影已选读取与纯计算。row-major reshape
+仅在所投影坐标的完整前缀相同、后缀体积相同时允许该投影。singleton RVV issue 保留
+已选 carrier，普通 singleton 的默认 scalar 规则不能覆盖这个物理决定。
+
 需要 partial-repack 的 layout、nested 或 add-tree plan 还必须保存已选 repack leaf，包含
 addressable carrier 与临时资源；无需 repack 的位置使用显式空项。materializer 核验并消费
 该 leaf，不重新选择 `split`/`slice` 或载体宽度。

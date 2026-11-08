@@ -6801,10 +6801,14 @@ mlir::LogicalResult RVVSignedBitmaskReduceOp::verify() {
           extent ||
       (validity != "full" && validity != "tail") ||
       getLeaf().getTemporaryGroups() != 3 ||
+      getLeaf().getOperandGroups() != data.getLayout().getRegisterGroups() +
+          mask.getLayout().getRegisterGroups() ||
+      getLeaf().getResultGroups() != 0 || getLeaf().getFragmentGroups() != 0 ||
+      getLeaf().getLocalBytes() != 0 ||
       !exactLeaf(getLeaf(), "rvv", "signed-bitmask-reduce",
                  "rvv.signed-bitmask-reduce.i8-i16", "none", tail))
     return emitOpError(
-        "RVV signed-bitmask reduction requires one legal signed-i8 lane value, one materialized logical-u1 mask in the same exact lane geometry, a proven i16-safe reduction extent, and the exact selected leaf with its seed and two i16 reduction carriers");
+        "RVV signed-bitmask reduction requires signed-i8 data and a matching u1 mask, an i16-safe extent, and the exact selected leaf with both operands, its seed and two i16 reduction carriers");
   return mlir::success();
 }
 
@@ -7463,12 +7467,22 @@ mlir::LogicalResult RVVWidenDotOp::verify() {
             source.getLayout().getTimeFactors()[position];
         const int64_t sourceLanes =
             source.getLayout().getLaneFactors()[position];
+        const int64_t sourceReplicas =
+            source.getLayout().getReplicaFactors()[position];
         const int64_t streams = nestedPartialPlan.getIssueStreams();
         const int64_t window = nestedPartialPlan.getWindowExtent();
-        if (sourceTime <= 0 || sourceLanes <= 0 || streams <= 0 || window <= 0 ||
-            sourceTime > std::numeric_limits<int64_t>::max() / sourceLanes ||
-            streams > std::numeric_limits<int64_t>::max() / window ||
-            sourceTime * sourceLanes != streams * window ||
+        const int64_t sourceFactors[] = {sourceTime, sourceLanes, sourceReplicas};
+        const int64_t issueFactors[] = {streams, window};
+        auto sourceCount = checkedPositiveProduct(sourceFactors);
+        auto issueCount = checkedPositiveProduct(issueFactors);
+        // Replica windows partition the same complete free-coordinate domain.
+        // The selected issue carrier may coalesce those replicas into lanes.
+        const bool replicaWindow = sourceReplicas > 1;
+        if (!sourceCount || !issueCount || sourceCount != issueCount ||
+            source.getLayout().getFragmentFactors()[position] != 1 ||
+            source.getLayout().getLocalFactors()[position] != 1 ||
+            (replicaWindow && (sourceTime != 1 || sourceLanes != 1 ||
+                               sourceReplicas % window)) ||
             issue.getElementType() != source.getElementType() ||
             issue.getAxisIds() != source.getAxisIds() ||
             issue.getShape().size() != source.getShape().size() ||

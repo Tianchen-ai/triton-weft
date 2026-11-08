@@ -1629,12 +1629,20 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
   mlir::Value cloned;
   if (auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(definition)) {
     auto inputType = mlir::dyn_cast<riscv::ValueType>(reshape.getInput().getType());
-    if (!inputType || inputType.getShape() != sourceType.getShape() ||
+    if (!inputType || inputType.getShape().size() <= *position ||
+        !llvm::equal(inputType.getShape().asArrayRef().take_front(*position + 1),
+                     sourceType.getShape().asArrayRef().take_front(*position + 1)) ||
         reshape.getOrder() != inputType.getAxisIds().asArrayRef())
       return mlir::failure();
-    // A shape-preserving rename has the same positional coordinates. Project
-    // its source on the corresponding axis before restoring the public names;
-    // forwarding the complete input would keep every issue resident.
+    // A row-major reshape can split the suffix after this coordinate. The
+    // complete prefix and suffix volume must agree, so slicing commutes with
+    // that reshape and retains the existing snapshot and read position.
+    auto inputSuffix = checkedProduct(
+        inputType.getShape().asArrayRef().drop_front(*position + 1));
+    auto outputSuffix = checkedProduct(
+        sourceType.getShape().asArrayRef().drop_front(*position + 1));
+    if (!inputSuffix || inputSuffix != outputSuffix)
+      return mlir::failure();
     auto input = cloneIssueWindow(
         reshape.getInput(), inputType.getAxisIds()[*position], windowExtent,
         windowIndex, target, rewriter, clones);
@@ -3886,6 +3894,20 @@ std::optional<riscv::NestedPartialPlanAttr> planNestedPartialCarrier(
   auto issueRhs = issueWindowType(builder, kernel.getTarget(),
                                   dot.getRhs().getType(), windowAxis,
                                   windowExtent);
+  auto coalesceWindowReplicas = [&](riscv::ValueType source) {
+    auto position = source ? axisPosition(source, windowAxis)
+                           : std::optional<size_t>();
+    if (!position || source.getLayout().getReplicaFactors()[*position] == 1)
+      return source;
+    auto lanes = checkedProduct(source.getLayout().getLaneFactors().asArrayRef());
+    int64_t required = 0;
+    if (!lanes || !checkedScale(*lanes, windowExtent, required))
+      return riscv::ValueType();
+    return coalescePartialOperand(builder, source, {windowAxis}, required,
+                                  kernel.getTarget()).value_or(riscv::ValueType());
+  };
+  issueLhs = coalesceWindowReplicas(issueLhs);
+  issueRhs = coalesceWindowReplicas(issueRhs);
   // A multi-output contraction can amortize one complete reduction carrier
   // across its output replicas.  For a scalar result the existing nested
   // topology is already closed; widening it here would rewrite unrelated

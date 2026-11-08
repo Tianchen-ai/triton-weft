@@ -176,6 +176,18 @@ public:
       if (auto found = nestedScaledReductions.find(dot.getOperation());
           found != nestedScaledReductions.end()) {
         auto match = matchReplicaScaledDotReduction(found->second);
+        auto issueCount = [](riscv::ValueType type, size_t position) {
+          auto layout = type.getLayout();
+          if (layout.getFragmentFactors()[position] != 1 ||
+              layout.getLocalFactors()[position] != 1 ||
+              (layout.getReplicaFactors()[position] > 1 &&
+               (layout.getTimeFactors()[position] != 1 ||
+                layout.getLaneFactors()[position] != 1)))
+            return int64_t{0};
+          return checkedProduct({layout.getTimeFactors()[position],
+                                 layout.getReplicaFactors()[position]})
+              .value_or(0);
+        };
         int64_t windowAxis = 0;
         if (match)
           for (int64_t axis : match->reducedAxes) {
@@ -186,9 +198,9 @@ public:
             if (!candidateLhs || !candidateRhs || !candidateResult)
               continue;
             const int64_t lhsAxisTime =
-                dot.getLhs().getType().getLayout().getTimeFactors()[*candidateLhs];
+                issueCount(dot.getLhs().getType(), *candidateLhs);
             const int64_t rhsAxisTime =
-                dot.getRhs().getType().getLayout().getTimeFactors()[*candidateRhs];
+                issueCount(dot.getRhs().getType(), *candidateRhs);
             const int64_t lhsAxisLane =
                 dot.getLhs().getType().getLayout().getLaneFactors()[*candidateLhs];
             const int64_t rhsAxisLane =
@@ -209,17 +221,9 @@ public:
         auto resultPosition = result ? axisPosition(result, windowAxis)
                                      : std::optional<size_t>();
         const int64_t lhsTime = lhsPosition
-                                    ? dot.getLhs()
-                                          .getType()
-                                          .getLayout()
-                                          .getTimeFactors()[*lhsPosition]
-                                    : 0;
+            ? issueCount(dot.getLhs().getType(), *lhsPosition) : 0;
         const int64_t rhsTime = rhsPosition
-                                    ? dot.getRhs()
-                                          .getType()
-                                          .getLayout()
-                                          .getTimeFactors()[*rhsPosition]
-                                    : 0;
+            ? issueCount(dot.getRhs().getType(), *rhsPosition) : 0;
         const int64_t lhsWindow = lhsPosition
                                       ? dot.getLhs()
                                             .getType()
@@ -262,7 +266,10 @@ public:
               hasGappedIndexedWindowRoot(dot.getLhs(), windowAxis) ||
               hasGappedIndexedWindowRoot(dot.getRhs(), windowAxis);
           int64_t plannedStreams = 0;
-          int64_t plannedWindow = issueOnlyWindow ? 1 : lhsWindow;
+          const bool replicaWindow =
+              dot.getLhs().getType().getLayout().getReplicaFactors()[*lhsPosition] > 1;
+          int64_t plannedWindow = issueOnlyWindow ? 1
+              : replicaWindow ? logicalExtent : lhsWindow;
           // The widest input representation can exceed the full-product or
           // reduced-slot budget even when smaller issue windows are legal.
           // Prefer fewer issues; only consider exact power-of-two partitions
