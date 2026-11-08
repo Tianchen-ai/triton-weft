@@ -3243,6 +3243,21 @@ mlir::LogicalResult materializeLocalEntrySources(mlir::ModuleOp module,
         value.getShape().empty() || value.getShape().size() > 2 ||
         !riscv_internal::hasOwnedLocalStorage(entry.getSource()))
       return;
+    // A local field snapshot may retain a real row coordinate. Bind that
+    // storage directly; indexed-entry geometry keeps the row outside each
+    // payload issue, just as it does for the original encoded field.
+    if (value.getShape().size() == 2 &&
+        value.getAxisIds()[1] == entry.getSourceAxis() && value.getShape()[0] > 1) {
+      rewriter.setInsertionPoint(entry);
+      auto view = riscv_internal::localView(rewriter, entry.getSource(), entry);
+      if (mlir::failed(view)) {
+        entry.emitError("indexed local row source has no owned descriptor binding");
+        failed = true;
+        return;
+      }
+      entry.getSourceMutable().assign(*view);
+      return;
+    }
     llvm::SmallVector<int64_t> units;
     int64_t sourceAxis = 0;
     for (auto [axis, extent] : llvm::zip(value.getAxisIds().asArrayRef(), value.getShape().asArrayRef())) {

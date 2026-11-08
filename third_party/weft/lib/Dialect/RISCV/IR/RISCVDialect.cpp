@@ -5008,12 +5008,18 @@ mlir::LogicalResult RVVIndexedEntryLoadOp::verify() {
                         payloadElementBytes
             ? descriptor.getStrides()[0] * payloadElementBytes
             : 0;
-    if (sourcePosition != 0 || descriptor.getShape()[1] != getPayloadExtent() ||
-        descriptorEntryBytes != getEntryByteStride() ||
-        descriptor.getStrides()[1] != 1)
+    if (sourcePosition == 0) {
+      if (descriptor.getShape()[1] != getPayloadExtent() ||
+          descriptorEntryBytes != getEntryByteStride() ||
+          descriptor.getStrides()[1] != 1)
+        return emitOpError(
+            "indexed entry table must be contiguous entry-major payload storage");
+      sourcePayloadPosition = 1;
+    } else if (sourcePosition != 1 || descriptor.getStrides()[1] != 1 ||
+               descriptor.getStrides()[0] < descriptor.getShape()[1]) {
       return emitOpError(
-          "indexed entry table must be contiguous entry-major payload storage");
-    sourcePayloadPosition = 1;
+          "indexed entry rows require unit-stride payload and disjoint row storage");
+    }
   }
 
   llvm::SmallVector<int64_t> entryAxes;
@@ -5036,6 +5042,12 @@ mlir::LogicalResult RVVIndexedEntryLoadOp::verify() {
     expectedShape.push_back(sourceShape[position]);
   }
   const size_t retainedSourceAxes = expectedAxes.size();
+  for (size_t position = 0; position < retainedSourceAxes; ++position)
+    if (result.getLayout().getLaneFactors()[position] != 1 ||
+        result.getLayout().getFragmentFactors()[position] != 1 ||
+        result.getLayout().getLocalFactors()[position] != 1)
+      return emitOpError(
+          "indexed entry retained source axes must be constant within each payload issue");
   for (auto [axis, extent] : llvm::zip(entryAxes, entryShape)) {
     if (llvm::is_contained(expectedAxes, axis) || axis == getPayloadAxis())
       return emitOpError(
