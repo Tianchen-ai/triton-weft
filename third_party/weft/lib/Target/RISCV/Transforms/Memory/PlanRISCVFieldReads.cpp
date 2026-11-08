@@ -131,7 +131,11 @@ FailureOr<Value> readField(IRRewriter &b, riscv::FieldOp field, Value region,
   SmallVector<Value> activeExtents;
   if (encodedValue) {
     auto extents = riscv_internal::activeNumericExtents(b, region);
-    if (failed(extents)) return field.emitError("saved field projection requires its original active record coordinates"), failure();
+    if (failed(extents)) {
+      field.emitError("saved field projection requires its original active record coordinates; source=")
+          << region;
+      return failure();
+    }
     activeExtents = *extents;
   }
   auto u8 = IntegerType::get(b.getContext(), 8, IntegerType::Unsigned);
