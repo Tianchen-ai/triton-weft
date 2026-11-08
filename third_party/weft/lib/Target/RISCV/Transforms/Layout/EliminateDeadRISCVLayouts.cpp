@@ -19,6 +19,12 @@ bool eliminateOneDeadSCFForIterArgSet(mlir::ModuleOp module) {
   mlir::scf::ForOp loop;
   llvm::SmallVector<unsigned> deadIndices;
   module.walk([&](mlir::scf::ForOp candidate) {
+    // Level result slots preserve the author's handoff identity, including
+    // coordinates that have become constant. Validity companions are tied to
+    // those source slots too; layout DCE does not own either signature.
+    if (candidate->hasAttr("weft.riscv.level") ||
+        candidate->hasAttr("weft.riscv.validity_slots"))
+      return mlir::WalkResult::advance();
     for (auto [index, iterArg, result] : llvm::enumerate(
              candidate.getRegionIterArgs(), candidate.getResults())) {
       if (iterArg.use_empty() && result.use_empty())

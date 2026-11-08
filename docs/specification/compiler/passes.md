@@ -62,6 +62,8 @@ SSA update/extract 直接传递刚写入的标量。只穿过保持坐标顺序�
 范围证明，只有精确的非负单点范围才转为静态 offset，动态 extent 与其它边界不变。
 View 的固定 extent 及 subview 的显式范围在共同规范化中还原为常量或该次动态 SSA；
 bind_view 的查询消费其原 extent operand。Level slice 的容量不能替代当前有效范围。
+布局 DCE 只修剪无 handoff 合同的生成循环；源 Level 的结果槽及其 validity companion
+保留所属 pass 定义的签名，不能因坐标成为常量而删除源 handoff 身份。
 展开后具有精确整数操作数的标量比较复用同一范围证明，形成标准布尔常量；其条件区域
 只内联被选择的分支。动态条件、浮点比较和作者 state/stage 的归属保持原合同。
 RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改变数值范围，
