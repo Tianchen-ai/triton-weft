@@ -101,6 +101,9 @@ partial source-lane 候选按正式 repack leaf 的临时资源评估输入／�
 
 表示转换的可选反向物化必须保持宽度转换指令的 EMUL/LMUL 比例。活动 lane 数相同
 不证明寄存器容量兼容；未满足机器位宽关系时保留原来合法的显式 conversion。
+窄结果的首选 lane 窗口若要求宽输入超出目标最大合法 LMUL，宽度转换沿原输入的
+issue 分解选择合法结果 EMUL，再以显式 layout conversion 接回已经选定的消费者
+布局。逻辑 shape、轴、截断／舍入合同不变，不以非法宽输入或隐式拆片交给 emitter。
 
 `Analysis/PhysicalDependence` 与 x86 共用 SCF 的精确静态迭代数，包括空域、非单位步长和
 有符号/无符号比较。RISC-V 的循环不变量读取据此证明循环确实执行；未知边界不获得默认次数。

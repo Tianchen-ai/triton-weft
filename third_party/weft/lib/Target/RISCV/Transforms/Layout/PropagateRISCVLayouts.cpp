@@ -3712,6 +3712,42 @@ private:
                 : riscv_internal::projectLayout(builder, operandType,
                                                 result.getLayout(),
                                                 kernel.getTarget());
+        if (!required &&
+            mlir::isa<riscv::CastOp, riscv::NarrowOp>(operation) &&
+            operandType.getLayout().getCarrier() == "rvv" &&
+            result.getLayout().getCarrier() == "rvv" &&
+            operandType.getLayout().getSew() > result.getLayout().getSew() &&
+            operandType.getShape() == result.getShape() &&
+            operandType.getAxisIds() == result.getAxisIds()) {
+          // A narrow result can otherwise request more lanes than its wider
+          // input can represent at the largest legal LMUL. Keep the input's
+          // logical issue partition and select the corresponding result EMUL.
+          // This changes only the representation of this conversion.
+          auto joint = riscv_internal::projectLayout(
+              builder, result, operandType.getLayout(), kernel.getTarget());
+          auto inputLayout = joint ? riscv_internal::projectLayout(
+              builder, operandType, joint, kernel.getTarget())
+                                   : riscv::LayoutAttr();
+          if (joint && inputLayout &&
+              riscv::supportsRVVLayout(kernel.getTarget(), joint) &&
+              riscv::supportsRVVLayout(kernel.getTarget(), inputLayout)) {
+            auto consumerType = result;
+            result = mlir::cast<riscv::ValueType>(
+                riscv_internal::withLayout(result, joint));
+            operation->getResult(0).setType(result);
+            mlir::OpBuilder::InsertionGuard guard(builder);
+            builder.setInsertionPointAfter(operation);
+            auto conversion = riscv::ConvertLayoutOp::create(builder,
+                operation->getLoc(), consumerType, operation->getResult(0),
+                riscv_internal::layoutConversion(builder, joint,
+                                                 consumerType.getLayout()),
+                riscv::AccessAttr(), riscv_internal::unselectedLeaf(builder));
+            riscv_internal::copyOrigin(operation, conversion);
+            operation->getResult(0).replaceAllUsesExcept(
+                conversion.getResult(), conversion.getOperation());
+            required = inputLayout;
+          }
+        }
         if (mlir::isa<riscv::LookupOp>(operation) && operand.getOperandNumber() == 1 &&
             required && required.getCarrier() == "rvv" && result.getLayout().getCarrier() == "rvv") {
           // Indexed memory fixes index EMUL from the data LMUL and index EEW.
