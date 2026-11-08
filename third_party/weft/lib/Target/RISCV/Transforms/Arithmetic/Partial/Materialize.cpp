@@ -601,12 +601,10 @@ public:
                                          riscv::ValueType planned)
           -> mlir::FailureOr<mlir::Value> {
         auto sourceType = mlir::dyn_cast<riscv::ValueType>(source.getType());
-        // One issue with an output cohort already consumes the operand's
-        // complete logical domain.  Keep that SSA supply and let the explicit
-        // layout edge below move its output replicas into the planned carrier;
-        // cloning its internal storage windows would project coordinates that
-        // are not being iterated.
-        if (streams == 1 && outputReplicas > 1 && sourceType &&
+        // One complete issue consumes this existing SSA domain. The explicit
+        // layout edge moves its replicas into the planned carrier; replaying
+        // the producer closure would duplicate reads and coordinate work.
+        if (streams == 1 && sourceType &&
             sourceType.getShape() == planned.getShape() &&
             sourceType.getAxisIds() == planned.getAxisIds())
           return source;

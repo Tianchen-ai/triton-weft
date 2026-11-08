@@ -29,7 +29,9 @@ bool isShaped(mlir::Type type) {
 
 bool isTrivialShaped(mlir::Type type) {
   auto value = mlir::dyn_cast<riscv::ValueType>(type);
-  return value && llvm::all_of(value.getShape().asArrayRef(),
+  return value && (value.getLayout().getCarrier() == "unassigned" ||
+                   value.getLayout().getCarrier() == "scalar") &&
+         llvm::all_of(value.getShape().asArrayRef(),
                                [](int64_t extent) { return extent == 1; });
 }
 

@@ -137,6 +137,12 @@ mlir::FailureOr<std::string> Emitter::axisBroadcastPart(
     else
       line(index + " = __riscv_vadd_vv_" + indexSuffix + "(" + index + ", " + coordinate + ", " + vl + ");");
   }
+  if (index.empty()) {
+    // Unit source axes have coordinate zero in every destination lane.
+    index = fresh("broadcast_index");
+    line(indexType + " " + index + " = __riscv_vmv_v_x_" + indexSuffix +
+         "(0, " + vl + ");");
+  }
   if (inputType.getLayout().getReplicaGroup() > 1) {
     const int64_t resultTileLanes = physicalLanes(resultValue) / resultType.getLayout().getReplicaGroup();
     const int64_t sourceTileLanes = physicalLanes(inputValue) / inputType.getLayout().getReplicaGroup();
@@ -149,10 +155,6 @@ mlir::FailureOr<std::string> Emitter::axisBroadcastPart(
     line(index + " = __riscv_vadd_vv_" + indexSuffix + "(" + index +
          (multiplyByPowerOfTwo ? ", __riscv_vsll_vx_" : ", __riscv_vmul_vx_") + indexSuffix +
          "(" + outer + ", " + std::to_string(multiplyByPowerOfTwo ? log2(sourceTileLanes) : sourceTileLanes) + ", " + vl + "), " + vl + ");");
-  }
-  if (index.empty()) {
-    (void)fail(operation, "axis broadcast has no source lane coordinate");
-    return mlir::failure();
   }
   auto broadcast = fresh("axis_broadcast");
   line(vectorType(resultValue) + " " + broadcast + (narrowIndex ? " = __riscv_vrgatherei16_vv_" : " = __riscv_vrgather_vv_") +
