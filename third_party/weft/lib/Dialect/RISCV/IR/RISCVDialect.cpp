@@ -6772,6 +6772,10 @@ mlir::LogicalResult RVVSignedBitmaskReduceOp::verify() {
   const int64_t extent = hasAxis ? data.getShape()[axisPosition] : 0;
   llvm::StringRef validity = data.getLayout().getValidity();
   llvm::StringRef tail = validity == "tail" ? "agnostic" : "exact";
+  llvm::StringRef instruction = getLeaf().getInstruction();
+  const bool complement = instruction == "rvv.signed-bitmask-reduce.complement";
+  const bool selected = instruction == "rvv.signed-bitmask-reduce.i8-i16" ||
+      (complement && data.getLayout().getLmulEighths() <= 8);
   bool onlyReductionAxisIsStreamed = hasAxis;
   if (onlyReductionAxisIsStreamed)
     for (size_t index = 0; index < data.getShape().size(); ++index)
@@ -6796,15 +6800,15 @@ mlir::LogicalResult RVVSignedBitmaskReduceOp::verify() {
               data.getLayout().getLaneFactors()[axisPosition] !=
           extent ||
       (validity != "full" && validity != "tail") ||
-      getLeaf().getTemporaryGroups() != 3 ||
+      !selected || getLeaf().getTemporaryGroups() != 3 ||
       getLeaf().getOperandGroups() != data.getLayout().getRegisterGroups() +
           mask.getLayout().getRegisterGroups() ||
       getLeaf().getResultGroups() != 0 || getLeaf().getFragmentGroups() != 0 ||
       getLeaf().getLocalBytes() != 0 ||
       !exactLeaf(getLeaf(), "rvv", "signed-bitmask-reduce",
-                 "rvv.signed-bitmask-reduce.i8-i16", "none", tail))
+                 instruction, "none", tail))
     return emitOpError(
-        "RVV signed-bitmask reduction requires signed-i8 data and a matching u1 mask, an i16-safe extent, and the exact selected leaf with both operands, its seed and two i16 reduction carriers");
+        "RVV signed-bitmask reduction requires signed-i8 data, a matching u1 mask, an i16-safe extent and an exact leaf with three temporary register groups; complement supply requires at most one byte register group");
   return mlir::success();
 }
 

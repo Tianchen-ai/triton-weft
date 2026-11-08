@@ -704,6 +704,13 @@ public:
           relation->mask.getResult().getType().getLayout().getRegisterGroups();
       const int64_t temporaryGroups = 3;
       const bool tail = dataType.getLayout().getValidity() == "tail";
+      // A one-register byte carrier can replace the second horizontal
+      // reduction by a complemented payload and a predicate population count.
+      // Unlike byte negation, ~x followed by the scalar +1 correction also
+      // represents the signed minimum exactly.
+      llvm::StringRef instruction = dataType.getLayout().getLmulEighths() <= 8
+          ? "rvv.signed-bitmask-reduce.complement"
+          : "rvv.signed-bitmask-reduce.i8-i16";
       auto maskLeaf = relation->mask.getLeaf();
       relation->mask->setAttr(
           "leaf", riscv_internal::leaf(
@@ -720,8 +727,7 @@ public:
           relation->mask.getResult(), relation->reductionAxis,
           riscv_internal::leaf(
               rewriter, "rvv", "signed-bitmask-reduce",
-              "rvv.signed-bitmask-reduce.i8-i16",
-              "rvv.signed-bitmask-reduce.i8-i16", operandGroups, 0,
+              instruction, instruction, operandGroups, 0,
               temporaryGroups, 0, "none", tail ? "agnostic" : "exact",
               {relation->reductionAxis, relation->extent}));
       riscv_internal::copyOrigin(dot, reduction);

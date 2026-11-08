@@ -499,6 +499,11 @@ lifetime。mask 不通过普通 yield 或未标识的 block argument 逃逸，�
 在 I8 中取负。所选 leaf 显式计入一个 seed 与两个 I16 reduction carrier，不物化
 完整的 widened 符号向量。两次归约均保留 seed 作为 VL=0 时的 destination，empty
 active tail 返回零。它不扩大读取范围或改变原整数归约边界。
+单 byte 寄存器组的窗口也可选择 `rvv.signed-bitmask-reduce.complement`：
+mask 为假时使用 `~x`，为真时使用原 I8 值，对完整 active payload 作一次保留 seed 的
+I8→I16 归约，再以 I32 加上 `active_lanes - popcount(mask)`。由于 `-x = ~x + 1`，
+合法的 -128 不会在 I8 中取负，空 tail 仍为零。两个 byte 临时 carrier 与一个 I16 seed
+占三组临时寄存器；较宽 carrier 使用原两归约形式。pass 明确选定 leaf，emitter 只拼写该序列。
 
 pipeline参数只有在改写成真实 guard、prologue、steady-state、epilogue与buffer-version carry后
 才算实现。未消费 `ScheduleAttr` 或只有一个 depth 字段的module不能进入emission。
