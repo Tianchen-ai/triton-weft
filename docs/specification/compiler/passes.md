@@ -1494,6 +1494,19 @@ product、reduction 与 scale 的完整资源。单 issue 覆盖原 shape/axes �
 仅在所投影坐标的完整前缀相同、后缀体积相同时允许该投影。singleton RVV issue 保留
 已选 carrier，普通 singleton 的默认 scalar 规则不能覆盖这个物理决定。
 
+nested 的完整 product carrier 同样合并归约轴上的 time 因子；标量最终结果不免除
+这项要求。所选类型必须能容纳全部 reduction streams，materializer 用显式 layout
+conversion 形成该类型；不能只计算第一个 stream。非法 carrier 在查询轴或资源前
+退出当前有限候选，继续既有窗口枚举。
+issue-window 的纯数值投影覆盖 compare/select，分别保留原 predicate 与各分支的
+同一坐标窗口。单个完整 issue 的 assemble 沿原数值 producer 投影；已经选择的
+一维 full-valid issue slice 则通过显式 numeric lookup 投影已有快照，不重放原读取。
+lookup 的原值、坐标与结果共同进入后续布局、访存和资源验证。
+
+encoded local packing 的 bind 保持原输入的逻辑域与读取快照；active-extent 分析
+沿其 input 继承真实有效边界。后续字段投影不能以本地 allocation 的容量代替
+这些边界，也不能因为物理 interleave 已闭合而丢失原 record 坐标。
+
 需要 partial-repack 的 layout、nested 或 add-tree plan 还必须保存已选 repack leaf，包含
 addressable carrier 与临时资源；无需 repack 的位置使用显式空项。materializer 核验并消费
 该 leaf，不重新选择 `split`/`slice` 或载体宽度。

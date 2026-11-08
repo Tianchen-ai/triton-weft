@@ -168,7 +168,8 @@ public:
         result.push_back(b.createOrFold<arith::SelectOp>(loc, complete, bound, zero));
       }
     } else if (isa<riscv::FieldReadOp, riscv::ConvertLayoutOp,
-                   riscv::RegisterMaterializeOp, riscv::MaterializeOp>(op)) {
+                   riscv::RegisterMaterializeOp, riscv::MaterializeOp,
+                   riscv::EncodedLocalBindOp>(op)) {
       auto extents = get(op->getOperand(0));
       if (failed(extents)) return failure();
       result = *extents;

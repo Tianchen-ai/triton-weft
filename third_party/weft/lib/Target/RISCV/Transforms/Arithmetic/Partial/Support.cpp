@@ -1627,7 +1627,71 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
   }
 
   mlir::Value cloned;
-  if (auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(definition)) {
+  if (mlir::isa<riscv::RVVIssueSliceOp>(definition) &&
+      sourceType.getShape().size() == 1 &&
+      sourceType.getShape()[0] <= std::numeric_limits<uint32_t>::max() &&
+      sourceType.getLayout().getValidity() == "full") {
+    // A prior issue slice already owns its numeric snapshot. Select a smaller
+    // logical window from that value; replaying its producer would lose the
+    // original part/lane mapping and could repeat a storage read.
+    int64_t indexLMUL = 0;
+    for (int64_t legal : target.getLegalLMULEighths().asArrayRef())
+      if (legal * target.getVlenBits() >= windowExtent * 32 * 8 &&
+          (indexLMUL == 0 || legal < indexLMUL))
+        indexLMUL = legal;
+    if (!indexLMUL)
+      return mlir::failure();
+    auto element = mlir::IntegerType::get(rewriter.getContext(), 32,
+                                          mlir::IntegerType::Unsigned);
+    auto layout = riscv::LayoutAttr::get(
+        rewriter.getContext(), "rvv", resultType.getAxisIds(),
+        rewriter.getDenseI64ArrayAttr({1}),
+        rewriter.getDenseI64ArrayAttr({windowExtent}),
+        rewriter.getDenseI64ArrayAttr({1}),
+        rewriter.getDenseI64ArrayAttr({1}),
+        rewriter.getDenseI64ArrayAttr({1}), 32, indexLMUL, windowExtent,
+        std::max<int64_t>(1, (indexLMUL + 7) / 8), "full");
+    auto indexType = riscv::ValueType::get(
+        rewriter.getContext(), element, resultType.getShape(),
+        resultType.getAxisIds(), layout);
+    auto local = riscv::IotaOp::create(rewriter, definition->getLoc(), indexType,
+        0, windowExtent, riscv_internal::unselectedLeaf(rewriter));
+    auto width = mlir::arith::ConstantIndexOp::create(
+        rewriter, definition->getLoc(), windowExtent);
+    auto offset = mlir::arith::MulIOp::create(
+        rewriter, definition->getLoc(), windowIndex, width.getResult());
+    auto typedOffset = riscv::CastOp::create(rewriter, definition->getLoc(),
+        element, offset.getResult(), riscv_internal::unselectedLeaf(rewriter));
+    auto indices = riscv::BinaryOp::create(rewriter, definition->getLoc(),
+        indexType, local.getResult(), typedOffset.getResult(), "add",
+        riscv_internal::unselectedLeaf(rewriter));
+    cloned = riscv::LookupOp::create(rewriter, definition->getLoc(), resultType,
+        value, indices.getResult(), "in_bounds",
+        riscv_internal::unassignedAccess(rewriter),
+        riscv_internal::unselectedLeaf(rewriter));
+  } else if (auto assembled = mlir::dyn_cast<riscv::RVVAssembleValueOp>(definition);
+      assembled && assembled.getPieces().size() == 1 &&
+      assembled.getPieces().front().getType() == sourceType) {
+    // A single complete issue is the same numeric snapshot. Project its
+    // actual producer instead of treating the tuple handoff as a new read.
+    auto piece = cloneOperand(assembled.getPieces().front());
+    if (mlir::failed(piece)) return mlir::failure();
+    return remember(*piece);
+  } else if (auto select = mlir::dyn_cast<riscv::SelectOp>(definition)) {
+    auto condition = cloneOperand(select.getCondition());
+    auto whenTrue = cloneOperand(select.getTrueValue());
+    auto whenFalse = cloneOperand(select.getFalseValue());
+    if (mlir::failed(condition) || mlir::failed(whenTrue) || mlir::failed(whenFalse))
+      return mlir::failure();
+    cloned = riscv::SelectOp::create(rewriter, select.getLoc(), resultType,
+        *condition, *whenTrue, *whenFalse, riscv_internal::unselectedLeaf(rewriter));
+  } else if (auto compare = mlir::dyn_cast<riscv::CompareOp>(definition)) {
+    auto lhs = cloneOperand(compare.getLhs());
+    auto rhs = cloneOperand(compare.getRhs());
+    if (mlir::failed(lhs) || mlir::failed(rhs)) return mlir::failure();
+    cloned = riscv::CompareOp::create(rewriter, compare.getLoc(), resultType,
+        *lhs, *rhs, compare.getPredicate(), riscv_internal::unselectedLeaf(rewriter));
+  } else if (auto reshape = mlir::dyn_cast<riscv::ReshapeOp>(definition)) {
     auto inputType = mlir::dyn_cast<riscv::ValueType>(reshape.getInput().getType());
     if (!inputType || inputType.getShape().size() <= *position ||
         !llvm::equal(inputType.getShape().asArrayRef().take_front(*position + 1),
@@ -3908,14 +3972,14 @@ std::optional<riscv::NestedPartialPlanAttr> planNestedPartialCarrier(
   };
   issueLhs = coalesceWindowReplicas(issueLhs);
   issueRhs = coalesceWindowReplicas(issueRhs);
-  // A multi-output contraction can amortize one complete reduction carrier
-  // across its output replicas.  For a scalar result the existing nested
-  // topology is already closed; widening it here would rewrite unrelated
-  // index/storage producers without reducing consumer work.
-  if (terminalOutputCohort) {
-    issueLhs = coalesceReductionTime(issueLhs);
-    issueRhs = coalesceReductionTime(issueRhs);
-  }
+  // This topology consumes a complete product for each scale window. Fold
+  // every reduction-time axis into that product even for a scalar final
+  // result; a time-carried operand does not satisfy this topology's contract.
+  // The materializer supplies an explicit layout conversion after projection.
+  issueLhs = coalesceReductionTime(issueLhs);
+  issueRhs = coalesceReductionTime(issueRhs);
+  if (!issueLhs || !issueRhs)
+    return std::nullopt;
   auto issueScale = issueWindowType(builder, kernel.getTarget(), scaleType,
                                     windowAxis, windowExtent);
   auto scaleReplicaType =
@@ -3960,8 +4024,7 @@ std::optional<riscv::NestedPartialPlanAttr> planNestedPartialCarrier(
     partialSlots *= *lhsExtent;
   }
   int64_t reductionLanes = dot.getReductionLanes();
-  if (terminalOutputCohort &&
-      !checkedScale(reductionLanes, dot.getReductionStreams(), reductionLanes))
+  if (!checkedScale(reductionLanes, dot.getReductionStreams(), reductionLanes))
     return std::nullopt;
   int64_t sourceLanes = 0;
   if (!checkedScale(reductionLanes, partialSlots, sourceLanes))
