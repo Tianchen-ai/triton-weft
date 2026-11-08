@@ -34,6 +34,8 @@ source projection、access 和 result layout；terminal 不在 pure `time_to_lan
 field/extract 的存储投影绑定独立保留；数值物化不能覆盖它，再让另一个显式 Read op
 根据偶然的 binding kind 决定是否读取。projection map 只保存对应 IR 的地址/坐标描述，
 不共享已发射的 load/decode，也不决定 layout 或资源。
+已选 `rvv.extract.unit` 的标量字段提取在该 operation 处完成读取并建立 scalar 绑定，
+包括 helper 中从 stage 快照提取的 metadata；后续 splat、select 和算术只使用该 SSA 值。
 
 已选 `vv.broadcast` binary 的单个 op 内允许保留上一个 source part 的局部 gather，坐标公式
 与独立 axis-broadcast 相同；不得越过 op 边界缓存它。`lane_repack` 只按两端 type 已确定的
