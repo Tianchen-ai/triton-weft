@@ -74,6 +74,11 @@ mlir::FailureOr<mlir::Value> memoryContains(mlir::IRRewriter &builder,
 // Time may occur on any axis, independently of the lane axis.
 bool isCompleteLocalRead(riscv::ConvertLayoutOp conversion);
 
+// Reload a completed private snapshot through an ordinary register carrier,
+// then explicitly repack when its consumer groups register replicas.
+mlir::FailureOr<mlir::Value> reloadLocalValue(mlir::IRRewriter &builder,
+    mlir::Value source, riscv::ValueType expected, mlir::Operation *anchor);
+
 // A layout's local capacity on an external descriptor load has not allocated
 // or populated private storage. Consumers still prove read-epoch/alias motion.
 riscv::LoadOp deferredLocalCapacityRead(riscv::ConvertLayoutOp conversion);

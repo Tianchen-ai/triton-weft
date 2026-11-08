@@ -225,6 +225,7 @@ ConvertWeftToRISCV
 → LowerRISCVComposites
 → RetainRISCVFragmentAccumulators
 → PropagateRISCVConsumerLayouts
+→ ScheduleRISCVLocalSupplies
 → MaterializeRISCVValuePrograms
 → MaterializeRISCVPrograms
 → VectorizeRISCVRecordLoops
@@ -324,6 +325,11 @@ vector/fragment 峰值和共同 SSA 驻留成本，只在驻留成本下降且�
 资源查询按共享 storage identity 排除当前操作数及其别名，不把同一寄存器再次计作外围驻留。
 producer admission 使用每个操作自己执行位置的活跃值，不能将 sink 位置才产生的值
 收费到前面的操作；候选完整供给与最终资源判断继续使用共同分析。
+
+完整私有快照恢复到 replica-grouped 寄存器消费者时，先恢复未分组的普通 RVV
+carrier，再通过显式 `lane_repack` 恢复分组；完整坐标映射、VL、LMUL 与临时寄存器
+经过同一 layout/repack 查询验证。dense producer 和 ordinary Value materializer
+共用这个 reload 实现；不能直接将 local load 标记成分组寄存器表示。
 
 内部 RISC-V pipeline 可在这次清理、consumer propagation 与 `CanonicalizeRISCVLayouts`
 之前观察同一层 Physical IR。module 的 `weft.riscv.layout_input` 保存尚未消费的

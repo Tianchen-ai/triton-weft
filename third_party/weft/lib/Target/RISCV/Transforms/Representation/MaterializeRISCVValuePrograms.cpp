@@ -119,7 +119,7 @@ public:
           auto replacement = riscv::ReshapeOp::create(b, reshape.getLoc(),
               localType(old), source, reshape.getOrderAttr(), DenseI64ArrayAttr());
           riscv_internal::copyOrigin(reshape, replacement);
-          replace(reshape, replacement);
+          if (failed(replace(reshape, replacement))) return failure();
         }
         continue;
       }
@@ -220,12 +220,12 @@ public:
           // rearrangements of a snapshot can use its existing local carrier.
           if (conversion.getConversion().getEffect() == "pure") {
             b.setInsertionPoint(conversion);
-            replace(conversion, source);
+            if (failed(replace(conversion, source))) return failure();
           } else if (needsProgram(op) || type.getLayout().getCarrier() == "local") {
             b.setInsertionPoint(op);
             auto copied = copyLocal(source, type, op);
             if (failed(copied)) return failure();
-            replace(op, *copied);
+            if (failed(replace(op, *copied))) return failure();
           }
         }
         continue;
@@ -241,7 +241,7 @@ public:
         if (failed(memory)) return failure();
         auto copied = copyView(*memory, type, op);
         if (failed(copied)) return failure();
-        replace(op, *copied);
+        if (failed(replace(op, *copied))) return failure();
         continue;
       }
       if (auto load = dyn_cast<riscv::LoadOp>(op)) {
@@ -261,7 +261,7 @@ public:
           continue;
         auto copied = copyView(load.getRegion(), type, op);
         if (failed(copied)) return failure();
-        replace(op, *copied);
+        if (failed(replace(op, *copied))) return failure();
       } else if (pointwise(op) || isa<riscv::LookupOp>(op)) {
         if (failed(riscv_internal::materializeDenseValueProgram(op))) return failure();
       }
@@ -622,8 +622,7 @@ private:
           riscv_internal::copyOrigin(op, ordered.getDefiningOp());
           return store(ordered, *output, outputType, coordinates, resultPiece, op);
         }, true))) return op.emitError("local transpose has no bounded physical transfer program");
-    replace(op, *destination);
-    return success();
+    return replace(op, *destination);
   }
 
   LogicalResult pointerMemory(Operation *op) {
@@ -686,7 +685,7 @@ private:
           if (stride) write->setAttr("element_stride", stride);
           return success();
         }, false, {}, {{axis, width}}))) return failure();
-    if (reading) replace(op, storage);
+    if (reading) return replace(op, storage);
     else b.eraseOp(op);
     return success();
   }
@@ -889,7 +888,7 @@ private:
     }
     for (auto [producer, storage] : completed) {
       b.setInsertionPoint(producer);
-      replace(producer, storage);
+      if (failed(replace(producer, storage))) return failure();
     }
     return success();
   }
@@ -1044,8 +1043,7 @@ private:
       return store(loaded, *output, type, coordinates, piece, op);
     };
     if (failed(emit(0, zero))) return failure();
-    replace(op, *destination);
-    return success();
+    return replace(op, *destination);
   }
 
   LogicalResult extraction(riscv::ExtractOp op, Value source) {
@@ -1203,21 +1201,26 @@ private:
           }
           return success();
         }))) return op.emitError("whole-value extraction has no bounded source projection");
-    replace(op, *destination);
-    return success();
+    return replace(op, *destination);
   }
 
-  void replace(Operation *op, Value source) {
+  LogicalResult replace(Operation *op, Value source) {
     auto expected = cast<riscv::ValueType>(op->getResult(0).getType());
     Value replacement = source;
     if (source.getType() != expected) {
       auto actual = cast<riscv::ValueType>(source.getType());
-      auto bridge = riscv::ConvertLayoutOp::create(b, op->getLoc(), expected, source,
-          riscv_internal::layoutConversion(b, actual.getLayout(), expected.getLayout()),
-          riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
-      replacement = bridge;
+      if (actual.getLayout().getCarrier() == "local" && expected.getLayout().getCarrier() != "local") {
+        auto restored = riscv_internal::reloadLocalValue(b, source, expected, op);
+        if (failed(restored)) return failure();
+        replacement = *restored;
+      } else {
+        replacement = riscv::ConvertLayoutOp::create(b, op->getLoc(), expected, source,
+            riscv_internal::layoutConversion(b, actual.getLayout(), expected.getLayout()),
+            riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
+      }
     }
     b.replaceOp(op, replacement);
+    return success();
   }
 };
 

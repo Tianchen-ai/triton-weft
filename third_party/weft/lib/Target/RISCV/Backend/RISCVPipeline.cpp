@@ -222,6 +222,7 @@ constexpr Entry prefix[] = {
     // and stores their separate intermediate values.
     {PassID::IntegerMACs, "program-materialization"},
     {PassID::ConsumerLayouts, "program-materialization"},
+    {PassID::LocalSupplies, "program-materialization"},
     {PassID::Values, "program-materialization"},
     {PassID::Programs, "program-materialization"},
     {PassID::RecordLoops, "program-materialization"},

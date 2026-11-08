@@ -379,6 +379,42 @@ FailureOr<Value> riscv_internal::localView(IRRewriter &b, Value source,
   return view.getResult();
 }
 
+FailureOr<Value> riscv_internal::reloadLocalValue(IRRewriter &b, Value source,
+    riscv::ValueType expected, Operation *anchor) {
+  auto actual = cast<riscv::ValueType>(source.getType());
+  auto loaded = expected;
+  if (actual.getLayout().getCarrier() != "local" || expected.getLayout().getCarrier() == "local" ||
+      actual.getElementType() != expected.getElementType() || actual.getShape() != expected.getShape() ||
+      actual.getAxisIds() != expected.getAxisIds())
+    return anchor->emitError("private snapshot reload requires the same numerical domain"), failure();
+  auto target = anchor->getParentOfType<riscv::KernelOp>().getTarget();
+  if (expected.getLayout().getReplicaGroup() > 1) {
+    auto layout = expected.getLayout();
+    const int64_t group = layout.getReplicaGroup();
+    auto plain = riscv::LayoutAttr::get(b.getContext(), "rvv", expected.getAxisIds(),
+        layout.getTimeFactors(), layout.getLaneFactors(), layout.getReplicaFactors(),
+        layout.getFragmentFactors(), layout.getLocalFactors(), layout.getSew(),
+        layout.getLmulEighths() / group, layout.getVl() / group,
+        layout.getRegisterGroups(), layout.getValidity());
+    loaded = cast<riscv::ValueType>(withLayout(expected, plain));
+    if (!riscv::supportsRVVLayout(target, plain) || !riscv::rvvLayoutRepackSlices(loaded, expected))
+      return anchor->emitError("private snapshot reload has no ordered grouped register conversion"), failure();
+  }
+  auto read = riscv::ConvertLayoutOp::create(b, anchor->getLoc(), loaded, source,
+      layoutConversion(b, actual.getLayout(), loaded.getLayout()),
+      riscv::AccessAttr(), unselectedLeaf(b));
+  copyOrigin(anchor, read);
+  Value result = read;
+  if (loaded != expected) {
+    auto grouped = riscv::ConvertLayoutOp::create(b, anchor->getLoc(), expected, result,
+        conversion(b, "lane_repack", "pure", riscv::rvvLayoutRepackTemporaryGroups(target, loaded, expected)),
+        riscv::AccessAttr(), unselectedLeaf(b));
+    copyOrigin(anchor, grouped);
+    result = grouped;
+  }
+  return result;
+}
+
 Value riscv_internal::completeLocalSlice(IRRewriter &b, Value view) {
   auto base = cast<riscv::MemDescType>(view.getType());
   auto region = riscv::MemDescType::get(b.getContext(), base.getEncoding(),
