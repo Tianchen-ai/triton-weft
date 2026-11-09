@@ -7,6 +7,8 @@ Emission 将验证后的物理决定翻译成目标工具链输入。
 
 RVV 操作翻译为 typed intrinsic，已选扩展操作可使用 typed local assembly。
 布局、active length、conversion、局部 packing、流水版本和资源决定均已物化。
+共同 RISC-V C 工具链默认关闭额外的 scalar SLP packing。显式 RVV packet 保持原状，
+scalar replica 沿用选定表示；实际编译参数保存在 native build metadata 中。
 Clang 23 按指定 ISA、ABI 与 VLEN 编译生成的 C。
 
 先查看 `asm["riscvir"]`，再查看 `asm["c"]`。
