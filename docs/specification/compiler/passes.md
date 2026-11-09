@@ -10,6 +10,9 @@ module 外的 assignment 表，也不构成新的 IR 层。
 坐标的 reshape 可以推入逐元素纯操作和 gather 的索引；字段 owner、读取快照、
 state/stage、归约与控制边界不被重命名或越过。SCF 的 carry/条件化简复用匹配 SDK
 的 region-branch patterns，无使用的纯操作由 MLIR 的区域 DCE 清除，随后重建查询。
+helper 的未观察返回值在同一工作列表中从全部返回路径和内部签名移除，再由相同的
+SCF patterns 清理只为这些返回值存在的 carry。保留 noinline 边界、内存 effects 和
+实际使用的结果，避免把前端临时局部值错误暴露为原生跨函数数组返回。
 SCF 化简产生的标量 `arith.select` 归一化为同操作数的 Canonical select，保留布尔条件、
 分支值和结果类型；不能让上游合法化简产生后续 verifier 不接受的 operation。
 展开和轴关系闭合后复用 MLIR CSE，合并支配范围内相同的索引和纯数值表达式；
@@ -38,6 +41,10 @@ RISC-V 导入直接一维、至少 8 位整数 encoded payload field 的 `lookup
 供给边，由同一访存规划选择连续、strided 或 segment 读取。Canonical gather 的
 规范化不能强迫字段先变成完整私有数组，再逐标量查表。已经计算出的普通数值表
 仍采用原快照 lookup；别名写入检查及原读取 epoch 不变。
+多轴数值 tile 的各个 gather 坐标若逐轴精确覆盖完整 `[0, extent)`，则消去为显式
+坐标 reshape，复用同一范围与 row-major 证明。whole-byte Encoding 元数据仍引用原
+field 与 record 快照；sub-byte payload 的供给投影继续留给目标访存规划，不将其
+错误规范化成普通数值表。
 fragment accumulator 的局部整数 pointwise 可穿过同 shape、行主序不变的轴改名：先在
 原 fragment 坐标上计算，再在数值出口恢复目标轴。该变换要求单消费者、同 block 和
 精确匹配的操作数坐标，不跨越显式 birth。兼容的整数 partial 因此仍由已有 fragment
@@ -520,8 +527,11 @@ Canonical domain、遍历顺序与 runtime 维度不变；无法证明时保留�
 写入一个 `ImplementationAttr`：scalar、RVV 或 IME 的局部结构 family。它不选择 memory
 form。没有合法局部结构时当前 module 失败。
 
-对已经物化、尚未资源冻结的局部 target op，也可选择合同等价的基本操作：逐轴同形、
+对已经物化、尚未资源冻结的局部 target op，也可选择合同等价的基本操作：坐标映射、
 有效域一致的 byte 乘积，其 i16 编译期整数零初值可由一个 widening multiply 替代。
+独立的输出 replica 轴可以复用同一输入 part；实际 lane 不能隐式广播或置换。
+partial materializer 对既有和新生成的链使用同一零初值规则，避免在后续数值物化时
+为共享零 seed 建立完整私有数组。每个乘积仍由严格的坐标与目标布局 verifier 检查。
 独立乘积及累加链的首项使用同一规则，后续 accumulate 和最终 reduction 不变。
 signedness 来自 typed operands，继承完整 carrier、坐标及尾部，不重选 partial plan；
 显式 active-length 的 undisturbed partial 和更宽 partial 不适用。
@@ -1220,6 +1230,8 @@ producer graph 与 issue 资源查询。来自外层作用域的 local-read brid
 容量不能扩大目标尾块的写入范围。控制边界先从外向内闭合词法逃逸，使每条边都指向真实
 私有 slot，再从内向外按并行赋值的读写依赖安排复制；有环或未证明的别名关系先保存一个来源，重复来源
 共享该快照。互换、扇出以及边界之后仍需观察的旧值不能因 SSA 名称不同而被覆盖。
+local ownership 的有界 SSA 查询在入队时按 Value identity 去重，保留 512 个不同值
+的上限；多 carry 的环路和扇出不会因为重复发现同一 alias 而触发假超限。
 
 私有对象间的完整复制可在覆盖范围为无重叠矩形、source 独占且死亡、所有 destination
 读取晚于复制、size/alignment/owner/lifetime 相容时，转为 `local_reuse`。删除已证明多余的
@@ -1232,6 +1244,10 @@ copy traversal，destination 的 stage identity 保留。部分初始化、gathe
 共同寄存器 liveness 按 storage identity 合并表示别名，沿全部 use 计算区间，以事件扫描求
 驻留量。选择与最终 resource closure 消费同一事实；子 region 的峰值在父 live set 下计算，
 互斥 region 不相加。估计不能覆盖最后的 leaf 临时量、完整资源或数值合法性检查。
+单次 issue 的驻留查询同时处理普通整数 MAC 与 widened partial accumulate 的破坏性
+目标约束。只有 accumulator 为最后一次寄存器观察、且结果类型与其一致时，输入与结果
+共用一个目标寄存器组；仍有其他观察者时分别计费。该判断由数值物化与局部选择共同
+消费，避免将合法的闭合 partial 零初值错误物化为私有数组后丢失其链身份。
 
 在 `scf.if` 处终止的数值按各 arm 的真实最后 use 借入子 block。若该 arm 只把它交给一个
 loop init，可将其驻留移交给 loop carry；另一 arm 的语法 use 不会使原值永久与 carry 共存。
@@ -1358,9 +1374,13 @@ LICM 将循环内的不变量移出其原循环，并闭合仍被子循环消费
 
 ### `HoistRISCVLoopInvariants`
 
-循环不变的纯坐标和数值表达式通过 MLIR 的 LICM 工具外提。已物化的 splat、
-轴广播、select 和 reshape 同样参与，要求完整有效域，不能借用循环内的尾部范围。
+循环不变的纯坐标和数值表达式通过 MLIR 的 LICM 工具外提。已选择并核算共享工作的
+`rvv.splat.shared`、轴广播、select 和 reshape 同样参与，要求完整有效域，不能借用
+循环内的尾部范围。普通 splat 仍可能是未闭合 dense graph 的坐标供给；在消费区域内
+保留它，不为外提一次广播而引入跨区域的坐标快照和私有数组。
 每次移动先用共同 SSA 活跃区间分析评估实际放置，只在既有寄存器预算内延长驻留；
+尚未闭合的原始峰值不能提高这项预算，否则多个不相关坐标会一同跨循环驻留，
+迫使后续物化建立额外私有数组。
 后续正式资源闭合仍核验完整结果。外提不复制计算、不移动 stage birth 或读取快照。
 
 ### `ScheduleRISCVLevels` 与 `PipelineRISCVLevels`

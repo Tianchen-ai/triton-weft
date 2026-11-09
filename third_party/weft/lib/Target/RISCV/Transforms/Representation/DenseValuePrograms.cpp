@@ -778,10 +778,30 @@ private:
         Value right = mapping.lookupOrDefault(op->getOperand(1));
         if (type.getLayout().getCarrier() == "scalar") {
           auto widen = [&](Value input) -> Value {
-            auto cast = riscv::CastOp::create(b, op->getLoc(), type, input,
+            auto source = cast<riscv::ValueType>(input.getType());
+            auto widened = riscv::ValueType::get(b.getContext(), type.getElementType(),
+                source.getShape(), source.getAxisIds(), riscv_internal::scalarLayout(
+                    b, type.getElementType(), source.getShape().asArrayRef(), source.getAxisIds().asArrayRef()));
+            Value converted = riscv::CastOp::create(b, op->getLoc(), widened, input,
                 riscv_internal::unselectedLeaf(b));
-            riscv_internal::copyOrigin(op, cast);
-            return cast;
+            riscv_internal::copyOrigin(op, converted.getDefiningOp());
+            SmallVector<int64_t> shape, order;
+            for (int64_t axis : type.getAxisIds().asArrayRef()) {
+              auto found = llvm::find(source.getAxisIds().asArrayRef(), axis);
+              if (found == source.getAxisIds().asArrayRef().end()) shape.push_back(1);
+              else {
+                shape.push_back(source.getShape()[found - source.getAxisIds().asArrayRef().begin()]);
+                order.push_back(axis);
+              }
+            }
+            auto aligned = riscv::ValueType::get(b.getContext(), type.getElementType(),
+                b.getDenseI64ArrayAttr(shape), type.getAxisIds(), riscv_internal::scalarLayout(
+                    b, type.getElementType(), shape, type.getAxisIds().asArrayRef()));
+            if (aligned == widened) return converted;
+            auto reshaped = riscv::ReshapeOp::create(b, op->getLoc(), aligned, converted,
+                b.getDenseI64ArrayAttr(order), DenseI64ArrayAttr());
+            riscv_internal::copyOrigin(op, reshaped);
+            return reshaped;
           };
           result = riscv::BinaryOp::create(b, op->getLoc(), type,
               widen(left), widen(right), isa<riscv::RVVWidenMultiplyOp>(op) ? "mul" : "add",

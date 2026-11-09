@@ -116,8 +116,6 @@ public:
         auto kernel = operation->getParentOfType<weft::riscv::KernelOp>();
         if (!kernel) return false;
         mlir::Operation *control = loop.getOperation();
-        auto before = weft::riscv_internal::registerPeak(*control->getBlock());
-        if (!before) return false;
         // Extending a vector's lifetime over the complete loop can make all
         // independently named coordinate tiles live together. Evaluate that
         // actual placement before LICM turns a legal per-consumer graph into
@@ -127,8 +125,7 @@ public:
         operation->moveBefore(control);
         auto after = weft::riscv_internal::registerPeak(*control->getBlock());
         operation->moveBefore(next);
-        return after && after->total() <=
-            std::max<int64_t>(before->total(), kernel.getTarget().getVectorRegisters());
+        return after && after->total() <= kernel.getTarget().getVectorRegisters();
       };
       auto regions = loop.getLoopRegions();
       mlir::moveLoopInvariantCode(
@@ -151,6 +148,15 @@ public:
             if (auto conversion =
                     mlir::dyn_cast<weft::riscv::ConvertLayoutOp>(operation))
               return conversion.getConversion().getEffect() == "pure";
+            if (auto splat = mlir::dyn_cast<weft::riscv::RVVSplatOp>(operation)) {
+              // A shared packet has already been selected and costed across
+              // its consumers. Ordinary splats can still be coordinate
+              // supplies in an unfinished dense graph: hoisting them opens
+              // that graph's region boundary and can introduce private-array
+              // snapshots instead of saving a machine broadcast.
+              if (splat.getLeaf().getInstruction() != "rvv.splat.shared")
+                return false;
+            }
             if (mlir::isa<weft::riscv::SelectOp, weft::riscv::ReshapeOp,
                           weft::riscv::RVVSplatOp,
                           weft::riscv::RVVAxisBroadcastOp>(operation))

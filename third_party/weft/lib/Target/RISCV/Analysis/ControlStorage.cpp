@@ -57,29 +57,32 @@ public:
       if (auto staged = dyn_cast<riscv::MaterializeOp>(birth)) numericalBirth = true;
       if (!numericalBirth || birth->getNumResults() != 1 || !localNumeric(birth->getResult(0).getType()) ||
           riscv::storageAliasesRemainInScope(birth->getResult(0), birth->getBlock())) return;
-      SmallVector<Value> pending{birth->getResult(0)};
-      llvm::DenseSet<Value> visited;
+      SmallVector<Value> pending;
+      llvm::DenseSet<Value> scheduled;
+      auto enqueue = [&](Value value) {
+        if (scheduled.insert(value).second) pending.push_back(value);
+      };
+      enqueue(birth->getResult(0));
       for (unsigned cursor = 0; cursor < pending.size(); ++cursor) {
-        if (cursor >= 512) {
+        if (pending.size() > 512) {
           birth->emitError("local control ownership exceeds the bounded SSA query");
           unsupported = true;
           break;
         }
         Value value = pending[cursor];
-        if (!visited.insert(value).second) continue;
         for (OpOperand &use : value.getUses()) {
           Operation *user = use.getOwner();
           if (isa<scf::YieldOp, scf::ConditionOp, riscv::YieldOp>(user)) {
             Operation *control = user->getParentOp();
             if (isa<scf::ForOp, scf::WhileOp, scf::IfOp, riscv::LoopOp>(control)) {
               selected.insert(control);
-              for (Value result : control->getResults()) if (localNumeric(result.getType())) pending.push_back(result);
+              for (Value result : control->getResults()) if (localNumeric(result.getType())) enqueue(result);
               continue;
             }
           }
           SmallVector<Value> aliases;
           riscv::appendStorageAliases(use, aliases);
-          llvm::append_range(pending, aliases);
+          for (Value alias : aliases) enqueue(alias);
           if (!aliases.empty() || !user->hasTrait<OpTrait::IsTerminator>()) continue;
           birth->emitError("local numerical representation has an unsupported non-control escape");
           unsupported = true;

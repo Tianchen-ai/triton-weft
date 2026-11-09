@@ -45,11 +45,15 @@ std::optional<int64_t> riscv_internal::operationRegisterGroups(Operation *operat
     return groups && add(*groups);
   };
   for (Value value : operation->getOperands()) if (!account(value)) return std::nullopt;
-  auto mac = dyn_cast<riscv::RVVIntegerMACOp>(operation);
+  Value accumulator;
+  if (auto mac = dyn_cast<riscv::RVVIntegerMACOp>(operation))
+    accumulator = mac.getAccumulator();
+  else if (auto mac = dyn_cast<riscv::RVVWidenAccumulateOp>(operation))
+    accumulator = mac.getAccumulator();
   // vmacc/vwmacc update their accumulator operand. Its final SSA use does
   // not require a second destination bank during this individual issue.
-  bool tiedAccumulator = mac && riscv::hasUniqueRegisterUse(mac.getAccumulator()) &&
-      mac.getAccumulator().getType() == mac.getResult().getType();
+  bool tiedAccumulator = accumulator && riscv::hasUniqueRegisterUse(accumulator) &&
+      accumulator.getType() == operation->getResult(0).getType();
   bool ordinaryDestination = false;
   if (auto binary = dyn_cast<riscv::BinaryOp>(operation))
     ordinaryDestination = llvm::is_contained(

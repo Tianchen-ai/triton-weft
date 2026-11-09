@@ -20,7 +20,8 @@ bool riscv_internal::isDensePointwise(Operation *op) {
   // cannot replace the selected chain with a scalarized numeric snapshot.
   if (auto product = dyn_cast<riscv::RVVWidenMultiplyOp>(op))
     if (llvm::any_of(product.getResult().getUsers(), [](Operation *user) {
-          return isa<riscv::RVVFinalizeWidenDotOp>(user);
+          return isa<riscv::RVVWidenAccumulateOp, riscv::RVVPartialCaptureOp,
+                     riscv::RVVPartialCollectOp, riscv::RVVFinalizeWidenDotOp>(user);
         }))
       return false;
   return isa<riscv::UnaryOp, riscv::BinaryOp, riscv::CompareOp,
