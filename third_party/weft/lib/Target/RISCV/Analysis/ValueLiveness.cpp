@@ -2,7 +2,10 @@
 #include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Utils/Utils.h"
+#include "mlir/IR/OwningOpRef.h"
 #include "llvm/ADT/DenseSet.h"
 #include <limits>
 
@@ -320,11 +323,29 @@ std::optional<int64_t> riscv_internal::registerResidenceCost(Block &block) {
 
 std::optional<int64_t> riscv_internal::nativeUnrollRegisterGroups(Operation *operation, int64_t copies) {
   auto loop = dyn_cast<scf::ForOp>(operation);
-  if (!loop || copies < 1) return std::nullopt;
-  auto analysis = BlockRegisterLiveness::get(*loop.getBody());
+  if (!loop || !llvm::is_contained(ArrayRef<int64_t>{1, 2, 4}, copies)) return std::nullopt;
+  SmallVector<Value> transferred;
+  for (Value initial : loop.getInitArgs())
+    if (transfersIntoRegion(loop, initial)) transferred.push_back(initial);
+  auto resident = surroundingRegisterGroups(loop, transferred);
+  if (!resident) return std::nullopt;
+  // Native unrolling repeats the SSA body, not all its live values at once.
+  // Reuse SCF's expansion to preserve carry and last-use edges. The detached
+  // copy is analysis only; the selected physical program remains unchanged.
+  OwningOpRef<scf::ForOp> expanded(cast<scf::ForOp>(loop->clone()));
+  generateUnrolledLoop(
+      expanded->getBody(), expanded->getInductionVar(), copies,
+      [&](unsigned iteration, Value iv, OpBuilder builder) -> Value {
+        if (!iteration) return iv;
+        Value index = arith::ConstantIndexOp::create(builder, loop.getLoc(), iteration);
+        Value offset = arith::MulIOp::create(builder, loop.getLoc(), index, expanded->getStep());
+        return arith::AddIOp::create(builder, loop.getLoc(), iv, offset);
+      },
+      [](unsigned, Operation *, OpBuilder) {}, expanded->getRegionIterArgs(),
+      expanded->getBody()->getTerminator()->getOperands());
+  auto analysis = BlockRegisterLiveness::get(*expanded->getBody());
   auto body = analysis ? analysis->peak(true) : std::nullopt;
-  auto resident = surroundingRegisterGroups(loop);
-  if (!body || !resident || body->total() > (std::numeric_limits<int64_t>::max() - *resident) / copies)
+  if (!body || body->total() > std::numeric_limits<int64_t>::max() - *resident)
     return std::nullopt;
-  return *resident + copies * body->total();
+  return *resident + body->total();
 }

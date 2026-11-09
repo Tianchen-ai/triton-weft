@@ -65,8 +65,8 @@ std::optional<RegisterPeak> registerPeak(mlir::Block &block);
 // Representation aliases retain the same storage interval.
 std::optional<int64_t> registerResidenceCost(mlir::Block &block);
 
-// Repeated issue bodies share values defined outside the loop. Account for
-// those captures once, rather than multiplying the unrelated kernel peak.
+// Expand one finite 1/2/4-copy issue body with SCF in a detached analysis copy.
+// Carries and last uses retain their SSA edges; outer captures stay resident once.
 std::optional<int64_t> nativeUnrollRegisterGroups(mlir::Operation *loop, int64_t copies);
 
 // Complete operands/results plus selected scratch of one physical operation.
