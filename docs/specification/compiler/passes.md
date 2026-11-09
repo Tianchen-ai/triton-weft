@@ -640,6 +640,9 @@ load 到每个 consumer 都处于同一 read epoch，包括重复子区域中 co
 
 Encoded stage 同样遵守原读取快照。连续完整 record 区域可以具有多个轴和动态行长；
 `LocalSize`、allocation 和原 load 的 snapshot edge 明确保存实际字节数及所有权。
+reduction-lane 消费者要求连续 record 时，逐 record 的原始布局无需 interleave。若共享
+存储分析证明全部观察处于原 read epoch，则保留 staged descriptor，不为同一字节布局
+增加一次 allocation 和整块复制；存在干扰写入时仍在原读取点形成完整快照。
 对完整 ABI 内存区间的 `storage_disjoint` 检查可以证明当前调用没有干扰写入：此时
 同一个 physical load 借用原 descriptor；否则在原读取点复制完整 record 区域。
 这个选择不专门化调用地址、不改变参数的 alias 合同，也不生成另一份 kernel。
@@ -1570,6 +1573,9 @@ replica；不能因展开时的 SSA 拼写不同而重选 topology。
 多个独立输出 replica 的 Level-scaled partial 保留一个向量合并结果，再做最终标量提取，
 避免每条 scale 链分别提取后在标量端重建同宽加法。已有 add-tree pass 仍可在向量内部
 缩短 MAC 依赖链；整数宽度、各项 scale、原浮点更新边界与完整资源核算保持不变。
+单消费者、同 shape/元素类型/replica 排列的 scalar positional reshape 只重命名 dot
+结果的坐标。partial 匹配穿过这条已证明的表示边，按 dot 的原坐标投影操作数，并按
+原 carry 坐标消费 scale；生成最终 carry 后删除已替代的 rename，不改变作者的状态轴。
 
 nested scale 与 indexed operand 共用具体 field 供应时，planner 保留表示转换路线，
 不能仅因 replica 数较多就选择会重新读取字段的 scalar rematerialization。deferred scale

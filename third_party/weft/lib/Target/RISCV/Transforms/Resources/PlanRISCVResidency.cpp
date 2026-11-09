@@ -196,7 +196,15 @@ planEncodedLocalPack(mlir::Builder &builder,
     else if (auto dot = mlir::dyn_cast<riscv::OuterContractOp>(operation))
       inspectContraction(dot);
   });
-  if (reductionLaneConsumer) interleaveRows = 1;
+  if (reductionLaneConsumer) {
+    // A record-contiguous pack has the source's existing byte arrangement.
+    // When every observation stays in the original read epoch, retaining the
+    // staged descriptor performs the same reads without a copy and allocation.
+    // Interfering writes still require the complete snapshot below.
+    if (!riscv_internal::needsReadSnapshot(load))
+      return std::nullopt;
+    interleaveRows = 1;
+  }
 
   auto representedExtent = [&](size_t axis) -> std::optional<int64_t> {
     int64_t extent = 1;

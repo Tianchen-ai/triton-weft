@@ -3201,8 +3201,33 @@ matchScaledPartialContribution(mlir::Value value) {
     auto multiply = contribution.getDefiningOp<riscv::BinaryOp>();
     if (!multiply || multiply.getKind() != "mul")
       return std::nullopt;
-    auto lhsDot = multiply.getLhs().getDefiningOp<riscv::RVVWidenDotOp>();
-    auto rhsDot = multiply.getRhs().getDefiningOp<riscv::RVVWidenDotOp>();
+    auto dotThroughRenames = [](mlir::Value value,
+                               llvm::SmallVectorImpl<riscv::ReshapeOp> &renames) {
+      while (auto reshape = value.getDefiningOp<riscv::ReshapeOp>()) {
+        auto before = mlir::dyn_cast<riscv::ValueType>(reshape.getInput().getType());
+        auto after = reshape.getResult().getType();
+        if (!before || !reshape.getResult().hasOneUse() ||
+            before.getShape() != after.getShape() ||
+            before.getElementType() != after.getElementType() ||
+            !llvm::equal(reshape.getOrder(), before.getAxisIds().asArrayRef()))
+          break;
+        auto input = riscv::RegisterCoordinates::get(before.getLayout());
+        auto output = riscv::RegisterCoordinates::get(after.getLayout());
+        if (!input || !output || before.getLayout().getCarrier() != "scalar" ||
+            after.getLayout().getCarrier() != "scalar" ||
+            before.getLayout().getValidity() != "full" ||
+            after.getLayout().getValidity() != "full" ||
+            !llvm::equal(input->extents(), output->extents()) ||
+            before.getLayout().getReplicaFactors() != after.getLayout().getReplicaFactors())
+          break;
+        renames.push_back(reshape);
+        value = reshape.getInput();
+      }
+      return value.getDefiningOp<riscv::RVVWidenDotOp>();
+    };
+    llvm::SmallVector<riscv::ReshapeOp> lhsRenames, rhsRenames;
+    auto lhsDot = dotThroughRenames(multiply.getLhs(), lhsRenames);
+    auto rhsDot = dotThroughRenames(multiply.getRhs(), rhsRenames);
     if (static_cast<bool>(lhsDot) == static_cast<bool>(rhsDot))
       return std::nullopt;
     riscv::RVVWidenDotOp dot = lhsDot ? lhsDot : rhsDot;
@@ -3231,7 +3256,8 @@ matchScaledPartialContribution(mlir::Value value) {
         dot.getPartialUnroll() <= 1 || dot.getOver().size() != 1 ||
         !dot.getResult().hasOneUse() || !multiply.getResult().hasOneUse())
       return std::nullopt;
-    return ScaledPartialContribution{dot, multiply, add, scale, previous};
+    return ScaledPartialContribution{dot, multiply, add, scale, previous,
+                                    lhsDot ? std::move(lhsRenames) : std::move(rhsRenames)};
   };
 
   auto lhs = matchSide(add.getLhs(), add.getRhs());
