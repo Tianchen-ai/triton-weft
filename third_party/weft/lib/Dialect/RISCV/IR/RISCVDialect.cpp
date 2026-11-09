@@ -10227,7 +10227,7 @@ mlir::LogicalResult RVVPartialReduceOp::verify() {
         !lanes || *lanes <= 0 || inputPartial.getShape().size() != 1 ||
         inputPartial.getShape()[0] != *lanes ||
         inputPartial.getLayout().getValidity() != "full" ||
-        getLeaf().getTemporaryGroups() != 1 ||
+        getLeaf().getTemporaryGroups() != 1 + result.getResourceGroups() ||
         input.getResourceGroups() + result.getResourceGroups() + 1 >
             kernel.getTarget().getVectorRegisters())
       return emitOpError("shared reduction seed requires full i16 slots within the target register budget");

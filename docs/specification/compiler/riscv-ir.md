@@ -456,6 +456,8 @@ FMA，双 f16 存储可使用显式 widening FMA。普通 free-axis FMA 只消�
 并固定一次输入 VTYPE。每个 slot 仍独立归约为原来的 I32 singleton，不合并作者
 partial 或 scale 支路。该 leaf 要求非空的完整 lane 域，输入、全部结果和一组 seed
 共同满足目标寄存器预算；尾部和单 slot 继续使用原有 reduction 合同。
+该组的输出不可与尚未消费的输入重叠；issue 临时组数同时计入 seed 和全部
+early-clobber 结果，不能只比较 operation 前后的两个活跃集合而漏掉交接峰值。
 
 source auto 绑定同时实例化控制 SSA、Value/View shape 和公共 ABI 中对应的 shape symbol。
 其中固定后的 extent 可以用于物理合法性证明；没有绑定的动态 shape 仍沿 ABI 输入。
