@@ -624,10 +624,11 @@ void selectSharedReductionSeeds(mlir::ModuleOp module) {
     // One local group uses one seed and one VTYPE setting. A terminal asm
     // sequence keeps that selected resource contract intact through Clang;
     // independent intrinsic calls can duplicate both for every slot.
+    // Early-clobber outputs coexist with every input at the instruction issue.
     auto old = reduce.getLeaf();
     reduce.setLeafAttr(riscv_internal::leaf(builder, "rvv", "partial-reduce",
         "rvv.partial-reduce.widen.shared-seed", "rvv.partial-reduce.widen.shared-seed",
-        old.getOperandGroups(), old.getResultGroups(), 1, old.getFragmentGroups(),
+        old.getOperandGroups(), old.getResultGroups(), 1 + old.getResultGroups(), old.getFragmentGroups(),
         "none", "exact", old.getParameters().asArrayRef(), old.getLocalBytes()));
   });
 }
