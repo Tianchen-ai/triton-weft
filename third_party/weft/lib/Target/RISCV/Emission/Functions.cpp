@@ -8,6 +8,13 @@ mlir::LogicalResult Emitter::compileHelper(riscv::HelperOp op) {
   if (!abi || abi.getValue() != "selected-parts") return fail(op, "helper has no closed native ABI");
   auto restricted = op->getAttrOfType<mlir::DenseI64ArrayAttr>("native_restrict_captures");
   if (!restricted) return fail(op, "helper has no closed pointer alias contract");
+  std::string attributes = "always_inline";
+  if (op.getNoinline()) {
+    auto alignment = op->getAttrOfType<mlir::IntegerAttr>("native_entry_alignment");
+    if (!alignment || !alignment.getType().isInteger(64))
+      return fail(op, "native helper has no selected code alignment");
+    attributes = "noinline, aligned(" + std::to_string(alignment.getInt()) + ")";
+  }
   std::string body;
   llvm::raw_string_ostream stream(body);
   Emitter function(module, kernel, stream);
@@ -133,7 +140,8 @@ mlir::LogicalResult Emitter::compileHelper(riscv::HelperOp op) {
   if (mlir::failed(function.compileBlock(op.getBody().front(), {}))) return mlir::failure();
   nextName = function.nextName;
   helperDefinitions += function.helperDefinitions;
-  helperDefinitions += std::string(op.getNoinline() ? "static __attribute__((noinline)) void " : "static inline __attribute__((always_inline)) void ") +
+  helperDefinitions += std::string(op.getNoinline() ? "static " : "static inline ") +
+      "__attribute__((" + attributes + ")) void " +
       name + "(" + llvm::join(declarations, ", ") + ") {\n" + body + "}\n";
   line(name + "(" + llvm::join(arguments, ", ") + ");");
   return mlir::success();

@@ -718,8 +718,9 @@ mlir::LogicalResult Emitter::compileLookup(riscv::LookupOp operation) {
 mlir::LogicalResult
 Emitter::compileRVVStorageWindow(riscv::RVVStorageWindowOp operation) {
   llvm::StringRef instruction = instructionOf(operation.getOperation());
+  const bool stridedLayer = instruction == "rvv.storage-window.layered.strided";
   if (instruction != "rvv.storage-window.natural" &&
-      instruction != "rvv.storage-window.layered")
+      instruction != "rvv.storage-window.layered" && !stridedLayer)
     return fail(operation, "RVV storage window has no exact selected leaf");
   Binding field = bindings.lookup(operation.getField());
   Binding point = bindings.lookup(operation.getOrigin());
@@ -924,7 +925,17 @@ Emitter::compileRVVStorageWindow(riscv::RVVStorageWindowOp operation) {
         ") * " + std::to_string(plan.getShiftStep()) + ")";
     const std::string vl = partVL(operation.getResult(), part);
     std::string raw = fresh("layered_window_raw");
-    if (owner.interleaveRows > 1) {
+    if (stridedLayer) {
+      auto parameters = operation.getLeaf().getParameters().asArrayRef();
+      if (parameters.size() != 1 || parameters[0] != owner.interleaveRows ||
+          storage->access.getFieldChunkBytes() != 1)
+        return fail(operation, "strided layered window has no selected byte-plane stride");
+      Binding selectedOwner = owner;
+      selectedOwner.recordPointer = record;
+      line(type + " " + raw + " = __riscv_vlse8_v_" + suffix +
+           "((const uint8_t *)" + fieldStorageAddress(selectedOwner, *storage, byte, rowOffset) +
+           ", " + std::to_string(parameters[0]) + ", " + vl + ");");
+    } else if (owner.interleaveRows > 1) {
       // A saved encoded record may use byte-plane interleaving across a
       // free output axis. Its reduction window still follows one record;
       // translate logical byte positions through the selected field chunks.

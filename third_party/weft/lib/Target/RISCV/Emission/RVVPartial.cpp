@@ -582,8 +582,14 @@ Emitter::compileRVVPartialReduce(riscv::RVVPartialReduceOp operation) {
     if (consumed) {
       const std::string lmul = lmulSpelling(inputPartial.getLayout().getLmulEighths());
       for (size_t slot = 0; slot < input.parts.size(); ++slot) {
-        std::string scalar = "__riscv_vreinterpret_v_i16" + lmul + "_i32" + lmul + "(" + consumedSlots[slot] + ")";
-        if (lmul != "m1") scalar = "__riscv_vget_v_i32" + lmul + "_i32m1(" + scalar + ", 0)";
+        std::string scalar;
+        if (inputPartial.getLayout().getLmulEighths() < 8) {
+          scalar = "__riscv_vreinterpret_v_i16m1_i32m1(__riscv_vlmul_ext_v_i16" +
+              lmul + "_i16m1(" + consumedSlots[slot] + "))";
+        } else {
+          scalar = "__riscv_vreinterpret_v_i16" + lmul + "_i32" + lmul + "(" + consumedSlots[slot] + ")";
+          if (lmul != "m1") scalar = "__riscv_vget_v_i32" + lmul + "_i32m1(" + scalar + ", 0)";
+        }
         line("vint32m1_t " + result.parts[slot] + " = " + scalar + ";");
       }
     }

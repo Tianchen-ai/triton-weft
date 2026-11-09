@@ -8442,9 +8442,12 @@ mlir::LogicalResult RVVStorageWindowOp::verify() {
   llvm::StringRef mapping = getAccess().getMapping();
   llvm::StringRef validity = result.getLayout().getValidity();
   llvm::StringRef tail = validity == "tail" ? "agnostic" : "exact";
+  const bool stridedLayer = getLeaf().getInstruction() ==
+      "rvv.storage-window.layered.strided";
   llvm::StringRef instruction =
-      mapping == "grouped_layered" ? "rvv.storage-window.layered"
-                                    : "rvv.storage-window.natural";
+      mapping == "grouped_layered"
+          ? (stridedLayer ? "rvv.storage-window.layered.strided" : "rvv.storage-window.layered")
+          : "rvv.storage-window.natural";
   if (!sourceField || !memory ||
       !sameStorageGeometry(getAccess(), sourceField.getAccess()) ||
       !getLogicalOffset().getType().isIndex() || axis <= 0 || pointAxis != axis ||
@@ -8472,6 +8475,18 @@ mlir::LogicalResult RVVStorageWindowOp::verify() {
            << (sourceField ? sourceField.getAccess() : AccessAttr())
            << ", point-tail=" << pointDomain.getTail() << ", leaf=" << getLeaf()
            << ", plan=" << plan;
+  if (stridedLayer) {
+    int64_t rows = localPackInterleaveRows(sourceField.getOwner());
+    if (rows <= 0) rows = memory.getInterleaveRows();
+    if (rows <= 0)
+      rows = derivedInterleaveRows(sourceField,
+          mlir::dyn_cast<kernel::EncodingType>(memory.getEncoding()));
+    auto parameters = getLeaf().getParameters().asArrayRef();
+    if (mapping != "grouped_layered" || getAccess().getFieldChunkBytes() != 1 ||
+        sourceField.getAccess().getFieldChunkBytes() != 1 ||
+        rows <= 1 || parameters.size() != 1 || parameters[0] != rows)
+      return emitOpError("strided layered window requires byte interleaving with its exact physical stride");
+  }
   const size_t fieldPosition = static_cast<size_t>(
       fieldAxis - field.getAxisIds().asArrayRef().begin());
   const size_t resultPosition = static_cast<size_t>(
@@ -10230,8 +10245,7 @@ mlir::LogicalResult RVVPartialReduceOp::verify() {
         !lanes || *lanes <= 0 || inputPartial.getShape().size() != 1 ||
         inputPartial.getShape()[0] != *lanes ||
         inputPartial.getLayout().getValidity() != "full" ||
-        (consumed && (!getInput().hasOneUse() ||
-                      inputPartial.getLayout().getLmulEighths() < 8)) ||
+        (consumed && (!getInput().hasOneUse() || *lanes < 2)) ||
         getLeaf().getTemporaryGroups() != scratch ||
         input.getResourceGroups() + scratch >
             kernel.getTarget().getVectorRegisters())

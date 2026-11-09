@@ -88,6 +88,11 @@ payload 的 LMUL 还须在实际 32/64-bit storage SEW 下合法。较宽 VLEN �
 
 ## 3. Memory 与 local storage
 
+layered 字段的记录内窗口若来自单字节 chunk 的跨记录交错存储，逐 lane 字节地址是
+固定 record-interleave 步长。final leaf 以 `rvv.storage-window.layered.strided`
+保存该步长，并核对原字段、局部 pack 和窗口的完整几何；terminal 直接生成 strided
+byte load，不构造向量除法和 gather 索引。跨多字节 chunk 的窗口继续使用分段索引合同。
+
 `MemDescType` 保存 pinned Encoding、shape/axes、static stride/origin facts、alignment、alias、
 effect、layout identity与record geometry。kernel入口随后用 `memory_view` 的 SSA operands明确
 给出每个动态 extent、stride和origin；ABI descriptor不能绕过这个 view。
@@ -229,6 +234,11 @@ natural field 的有效对齐由 record/base alignment、field byte offset 与�
 由该 leaf按 byte载入并机械重解释为已经选定的RVV value；terminal emitter不能自行把`vle32`
 降级成 byte load。final verifier拒绝任何超过Encoding与offset事实的alignment声明，以及任何
 在不足对齐上仍选择element-width vector load的physical edge。
+已选 `interleaved_natural` replica storage load 对每个 byte plane 分别读取后组装 word，
+同样属于显式 byte-load 合同；其自身 verifier 核对 field、窗口、坐标和位宽。
+byte-interleaved record 的 natural 字段沿记录内逻辑轴读取时，memory pass 显式选择
+跨记录数的 strided byte 访问。子窗口按自己的物理 lane 轴重算访问形式，不能沿用
+完整 local 字段的 unit 标记；terminal 仅拼写已选步长和原快照地址。
 
 natural field到RVV register的完整窗口用`rvv.replica_storage_load`表示。它的
 `StorageWindowPlanAttr`给出logical lane axis、unit/strided projection、extent/alignment、record
@@ -458,9 +468,11 @@ partial 或 scale 支路。该 leaf 要求非空的完整 lane 域，输入、�
 共同满足目标寄存器预算；尾部和单 slot 继续使用原有 reduction 合同。
 该组的输出不可与尚未消费的输入重叠；issue 临时组数同时计入 seed 和全部
 early-clobber 结果，不能只比较 operation 前后的两个活跃集合而漏掉交接峰值。
-仅有一个消费者且 LMUL 至少为 1 的完整输入 slots 可以选择 `.consumed` 形式：
+仅有一个消费者、且物理容量至少能保存 32 bits 的完整 I16 slots 可以选择 `.consumed` 形式：
 每个 singleton 写入自身已消费输入的首寄存器，使用 tied early-clobber operands，
 不与其它尚未读取的 slot 重叠。额外驻留只有共享 seed；原输入不再有其它消费者。
+fractional LMUL 结果先保序扩展到 m1 再解释为 I32，仅使用已写入的 singleton；
+扩展部分的未定义 bits 不参与计算。容量不足以保存 I32 的载体不能采用此形式。
 这遵循 [RVV reduction 的源目的重叠规则](https://docs.riscv.org/reference/isa/v20260120/unpriv/v-st-ext.html)，
 不适用于普通 widening arithmetic。
 

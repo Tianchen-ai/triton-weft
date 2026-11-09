@@ -605,7 +605,13 @@ mlir::FailureOr<Binding> Emitter::materializeNumeric(mlir::Value value,
             emitInterleavedField(value, binding, "0", partIndex);
         if (part.kind != Binding::Kind::Vector || part.parts.size() != 1) {
           value.getDefiningOp()->emitError(
-              "encoded field part has no single selected RVV value");
+              "encoded field part has no single selected RVV value")
+              << "; field=" << binding.field.name
+              << ", form=" << binding.field.useAccess.getForm()
+              << ", field-rank=" << binding.field.logicalRank
+              << ", lane-axis=" << laneAxisFor(value)
+              << ", interleave-axis=" << owner.interleaveRowAxis
+              << ", interleave-rows=" << owner.interleaveRows;
           return mlir::failure();
         }
         streamed.parts.push_back(std::move(part.parts.front()));

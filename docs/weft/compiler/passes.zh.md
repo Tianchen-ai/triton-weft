@@ -35,6 +35,8 @@ Canonical select。流式 producer graph 独立于初始 packet 枚举目标合�
 往返转换。RISC-V 访存选择还会证明缩放后的 lookup 字节偏移能由所选 unsigned 载体表示，
 必要的扩展显式进入 Physical IR。保存值查表保留索引与表的有效域，不跨 alias 写入移动读取。
 
+非重叠位域拼接沿 signedness 转换消费同一范围证明，保留原有有限字段位宽。
+
 ## 软件流水深度
 
 ```python

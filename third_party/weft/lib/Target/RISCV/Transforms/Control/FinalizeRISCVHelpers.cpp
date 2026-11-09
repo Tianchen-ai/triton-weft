@@ -115,6 +115,9 @@ public:
       helper->setAttr("native_restrict_captures",
           DenseI64ArrayAttr::get(&getContext(), riscv::helperRestrictCaptures(helper)));
       helper->setAttr("native_abi", StringAttr::get(&getContext(), "selected-parts"));
+      if (helper.getNoinline())
+        helper->setAttr("native_entry_alignment",
+                       IntegerAttr::get(IntegerType::get(&getContext(), 64), 32));
     });
   }
 };

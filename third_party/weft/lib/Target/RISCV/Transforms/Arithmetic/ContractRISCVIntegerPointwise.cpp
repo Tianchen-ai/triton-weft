@@ -31,16 +31,10 @@ std::optional<int64_t> sharedConstant(Value value) {
   return std::nullopt;
 }
 
-std::optional<unsigned> unsignedBits(Value value, unsigned depth = 0) {
-  if (depth >= 8) return std::nullopt;
-  auto type = dyn_cast<IntegerType>(logicalElement(value.getType()));
-  if (!type) return std::nullopt;
-  if (auto widen = value.getDefiningOp<riscv::WidenOp>()) {
-    auto bits = unsignedBits(widen.getInput(), depth + 1);
-    if (bits && *bits < type.getWidth()) return bits;
-  }
-  if (type.isUnsigned()) return type.getWidth();
-  return std::nullopt;
+std::optional<unsigned> unsignedBits(Value value) {
+  auto range = riscv_internal::integerRange(value);
+  if (!range || range->minimum.isNegative()) return std::nullopt;
+  return range->maximum.getActiveBits();
 }
 
 // A low-bit extraction cannot observe an addend divisible by the entire

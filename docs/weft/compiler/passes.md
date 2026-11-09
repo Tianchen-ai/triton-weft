@@ -40,6 +40,9 @@ selection also proves that scaled lookup offsets fit their selected unsigned
 carrier, inserting an explicit extension when necessary. Saved table lookups
 carry index and table validity without moving their read across an aliasing write.
 
+Disjoint bit assembly consumes the same range proofs across signedness casts,
+retaining the original finite field width.
+
 ## Software pipeline depth
 
 ```python

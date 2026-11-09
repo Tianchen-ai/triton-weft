@@ -1950,11 +1950,22 @@ riscv::AccessAttr fieldAccess(mlir::Builder &builder,
   if ((mapping == "natural" && facts.scalarPerRecord) ||
       laneTraversesRecords(operation, physicalType))
     form = "strided";
+  auto readType = mlir::dyn_cast<riscv::ValueType>(physicalType);
+  auto ownerEncoding = mlir::dyn_cast<kernel::EncodingType>(
+      riscv_internal::logicalElement(operation.getOwner().getType()));
+  if (readType && ownerEncoding && mapping == "natural" &&
+      facts.logicalRank == 1 && facts.chunkBytes == 1 &&
+      riscv_internal::logicalBitWidth(readType.getElementType()) == 8 &&
+      riscv_internal::interleaveRows(operation, ownerEncoding) > 1) {
+    auto lanes = readType.getLayout().getLaneFactors().asArrayRef();
+    if (!lanes.empty() && lanes.back() > 1 &&
+        llvm::all_of(lanes.drop_back(), [](int64_t factor) { return factor == 1; }))
+      form = "strided";
+  }
   auto access = makeAccess(builder, form, mapping, facts.alignment, facts.group,
                     facts.layer, facts.joinFields, facts.joinLowBits,
                     facts.joinRole, facts.bitOffset, facts.storageBits,
                     facts.order, facts.chunkBytes);
-  auto readType = mlir::dyn_cast<riscv::ValueType>(physicalType);
   if (riscv::isContiguousInterleavedScalarRead(operation.getResult(), readType, access))
     return makeAccess(builder, "unit", mapping, facts.alignment, facts.group,
         facts.layer, facts.joinFields, facts.joinLowBits, facts.joinRole,
@@ -4267,7 +4278,7 @@ public:
         return;
       }
       if (field)
-        access = field.getAccess();
+        access = fieldAccess(builder, field, operation.getResult().getType());
       else
         access = makeAccess(builder, "unit", "dense", 1);
       llvm::StringRef form = access.getForm();
