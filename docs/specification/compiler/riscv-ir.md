@@ -513,6 +513,8 @@ active tail 返回零。它不扩大读取范围或改变原整数归约边界�
 单 byte 寄存器组的窗口也可选择 `rvv.signed-bitmask-reduce.complement`：
 mask 为真时以 masked complement 得到 `~x`，为假时保留原 I8 值；对完整 active payload
 作一次保留 seed 的 I8→I16 归约，再在 I32 中计算 `-sum - popcount(mask)`。
+临时字节向量保持活动范围内 mask 为假的原输入；活动范围外的 tail 不被该归约读取，
+因此使用 mask-undisturbed、tail-agnostic 的局部拼写，避免无意义的 tail policy 切换。
 由于 `-x = ~x + 1`，合法的 -128 不会在 I8 中取负，空 tail 仍为零；不需要额外
 merge 或 widened 符号向量。临时寄存器继续遵守三组预算，较宽 carrier 使用原两归约形式。
 pass 明确选定 leaf，emitter 只拼写该序列。
