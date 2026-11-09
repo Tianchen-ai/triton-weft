@@ -830,6 +830,50 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
     clones[value] = cloned;
     return cloned;
   };
+  auto projectSnapshot = [&]() -> mlir::FailureOr<mlir::Value> {
+    if (sourceType.getLayout().getValidity() != "full" ||
+        sourceType.getShape()[*position] > std::numeric_limits<uint32_t>::max())
+      return mlir::failure();
+    int64_t indexLMUL = 0;
+    for (int64_t legal : target.getLegalLMULEighths().asArrayRef())
+      if (legal * target.getVlenBits() >= windowExtent * 32 * 8 &&
+          (indexLMUL == 0 || legal < indexLMUL))
+        indexLMUL = legal;
+    if (!indexLMUL)
+      return mlir::failure();
+    auto element = mlir::IntegerType::get(rewriter.getContext(), 32,
+                                          mlir::IntegerType::Unsigned);
+    auto singleton = [&](int64_t number) { return rewriter.getDenseI64ArrayAttr({number}); };
+    const bool scalar = resultType.getLayout().getCarrier() == "scalar";
+    auto layout = riscv::LayoutAttr::get(
+        rewriter.getContext(), scalar ? "scalar" : "rvv", singleton(axis), singleton(1),
+        singleton(scalar ? 1 : windowExtent), singleton(scalar ? windowExtent : 1), singleton(1), singleton(1),
+        32, scalar ? 0 : indexLMUL, scalar ? 1 : windowExtent,
+        scalar ? 0 : std::max<int64_t>(1, (indexLMUL + 7) / 8), "full");
+    if (!scalar && !riscv::supportsRVVLayout(target, layout))
+      return mlir::failure();
+    auto indexType = riscv::ValueType::get(rewriter.getContext(), element,
+        singleton(windowExtent), singleton(axis), layout);
+    auto local = riscv::IotaOp::create(rewriter, definition->getLoc(), indexType,
+        0, windowExtent, riscv_internal::unselectedLeaf(rewriter));
+    auto width = mlir::arith::ConstantIndexOp::create(rewriter, definition->getLoc(), windowExtent);
+    auto offset = mlir::arith::MulIOp::create(rewriter, definition->getLoc(), windowIndex, width);
+    auto typedOffset = riscv::CastOp::create(rewriter, definition->getLoc(),
+        element, offset.getResult(), riscv_internal::unselectedLeaf(rewriter));
+    auto indices = riscv::BinaryOp::create(rewriter, definition->getLoc(), indexType,
+        local.getResult(), typedOffset.getResult(), "add", riscv_internal::unselectedLeaf(rewriter));
+    llvm::SmallVector<mlir::Attribute> selectors(sourceType.getShape().size(), rewriter.getStringAttr("all"));
+    selectors[*position] = rewriter.getStringAttr("gather");
+    auto projected = riscv::ExtractOp::create(rewriter, definition->getLoc(), resultType,
+        value, mlir::ValueRange{indices.getResult()}, rewriter.getArrayAttr(selectors),
+        riscv_internal::unassignedAccess(rewriter), riscv_internal::unselectedLeaf(rewriter));
+    return remember(projected.getResult());
+  };
+
+  // Preserve the selected field's numeric snapshot, including scalar metadata.
+  // A window selects its existing coordinates rather than re-reading storage.
+  if (mlir::isa<riscv::FieldOp>(definition))
+    return projectSnapshot();
 
   if (auto iota = mlir::dyn_cast<riscv::IotaOp>(definition)) {
     if (iota.getStart() != 0 ||
@@ -1069,6 +1113,11 @@ mlir::FailureOr<mlir::Value> cloneIssueWindow(
     // and all decode facts remain owned by the original plan.
     if (sourcePlan.getReductionAxis() != axis) {
       auto issuePosition = axisPosition(sourceType, axis);
+      // Splitting a lane axis orthogonal to the selected memory progression
+      // consumes the already loaded value. Replaying its one-part load would
+      // retain the old coordinates, so select the numeric subwindow instead.
+      if (issuePosition && sourceType.getLayout().getLaneFactors()[*issuePosition] > windowExtent)
+        return projectSnapshot();
       auto sourceTimes =
           checkedProduct(sourceType.getLayout().getTimeFactors().asArrayRef());
       auto sourceReplicas = checkedProduct(

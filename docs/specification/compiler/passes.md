@@ -1587,6 +1587,10 @@ issue-window 的纯数值投影覆盖 compare/select，分别保留原 predicate
 同一坐标窗口。单个完整 issue 的 assemble 沿原数值 producer 投影；已经选择的
 一维 full-valid issue slice 则通过显式 numeric lookup 投影已有快照，不重放原读取。
 lookup 的原值、坐标与结果共同进入后续布局、访存和资源验证。
+已选 Encoding 字段以及与读取推进轴正交的 lane 子窗口，同样对原 numeric snapshot
+建立显式坐标投影，不克隆 producer 或重放读取。scalar replica 元数据采用相同的
+scalar 坐标载体，RVV 数据采用目标合法的索引载体；后续访存规划仍验证索引 EMUL，
+布局转换和临时存储进入实际 Physical 程序及资源收口。
 
 encoded local packing 的 bind 保持原输入的逻辑域与读取快照；active-extent 分析
 沿其 input 继承真实有效边界。后续字段投影不能以本地 allocation 的容量代替
