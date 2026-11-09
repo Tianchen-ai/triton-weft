@@ -45,6 +45,8 @@ class WeftBackend(BaseBackend):
         values.update(physical)
         if self.target.arch == "riscv64" and values.get("matrix_extension", "auto") == "auto":
             values["matrix_extension"] = self.target.matrix_extension
+        if self.target.arch == "riscv64":
+            values.setdefault("data_cache", self.target.data_cache)
         if self.target.arch == "x86_64":
             weft.x86_target_capabilities(self.target.march, self.target.abi, self.target.vlen_bits)
         values["toolchain"] = Toolchain.resolve(values.get("toolchain", {}), self.target).to_dict()

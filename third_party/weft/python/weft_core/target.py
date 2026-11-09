@@ -1,5 +1,5 @@
 """CPU descriptors and capability queries, independent of a frontend driver."""
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from . import compiler
 from .options import WeftOptions
@@ -13,6 +13,7 @@ class CPUTarget:
     abi: str
     vlen_bits: int
     matrix_extension: str = "none"
+    data_cache: dict | None = field(default=None, hash=False)
 
 
 def extension_catalog():
@@ -29,7 +30,7 @@ def target_capabilities(target: CPUTarget, *, matrix_extension=None):
         return compiler.x86_target_capabilities(target.march, target.abi, target.vlen_bits)
     if not isinstance(matrix_extension, str):
         raise TypeError("matrix_extension must be a registered extension name or 'none'")
-    options = asdict(WeftOptions(matrix_extension=matrix_extension))
+    options = asdict(WeftOptions(matrix_extension=matrix_extension, data_cache=target.data_cache))
     options.update(march=target.march, abi=target.abi, vlen_bits=target.vlen_bits)
     return compiler.target_capabilities(options)
 
