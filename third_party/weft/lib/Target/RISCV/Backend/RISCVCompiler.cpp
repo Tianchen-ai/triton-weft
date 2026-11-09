@@ -64,6 +64,16 @@ public:
                     llvm::ArrayRef<weft::RISCVPipelinePass> sequence)
       : report(report), sequence(sequence) {}
   void runBeforePass(mlir::Pass *pass, mlir::Operation *) override {
+    std::string invocation;
+    llvm::raw_string_ostream stream(invocation);
+    pass->printAsTextualPipeline(stream);
+    if (depth++ != 0) {
+      // A pipeline owner may reuse an SDK transform internally. Record that
+      // real work under its parent's stage, without consuming another entry
+      // in the independently checked top-level physical pipeline.
+      report.startPass(report.currentStage(), pass->getArgument(), invocation);
+      return;
+    }
     if (position >= sequence.size() || pass->getArgument() != sequence[position].argument) {
       report.enter("pipeline", pass->getArgument());
       report.fail(weft::RISCVFailureCategory::CompilerError,
@@ -71,24 +81,22 @@ public:
       report.startPass("pipeline", pass->getArgument(), pass->getArgument());
       return;
     }
-    std::string invocation;
-    llvm::raw_string_ostream stream(invocation);
-    pass->printAsTextualPipeline(stream);
     report.startPass(sequence[position].stage, pass->getArgument(), invocation);
   }
   void runAfterPass(mlir::Pass *, mlir::Operation *) override {
     report.finishPass(true);
-    ++position;
+    if (--depth == 0) ++position;
   }
   void runAfterPassFailed(mlir::Pass *, mlir::Operation *operation) override {
     report.finishPass(false);
     report.captureFailedIR(operation);
-    ++position;
+    if (--depth == 0) ++position;
   }
 private:
   weft::RISCVCompilationReport &report;
   llvm::ArrayRef<weft::RISCVPipelinePass> sequence;
   size_t position = 0;
+  unsigned depth = 0;
 };
 
 mlir::LogicalResult executePipeline(mlir::ModuleOp module, mlir::PassManager &manager,

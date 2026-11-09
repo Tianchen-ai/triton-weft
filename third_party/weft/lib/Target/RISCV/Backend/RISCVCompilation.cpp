@@ -1,5 +1,6 @@
 #include "Weft/Target/RISCV/RISCVCompilation.h"
 #include "mlir/IR/Operation.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
@@ -91,9 +92,18 @@ void RISCVCompilationReport::startPass(llvm::StringRef nextStage, llvm::StringRe
 }
 
 void RISCVCompilationReport::finishPass(bool successful) {
-  assert(!pipeline.empty() && pipeline.back().status == "running");
-  pipeline.back().status = successful ? "completed" : "failed";
+  // A pass can run a nested pipeline. Its completed child remains the last
+  // observation, while the parent's matching invocation is still running.
+  auto current = llvm::find_if(llvm::reverse(pipeline), [](const auto &step) {
+    return step.status == "running";
+  });
+  assert(current != pipeline.rend() && "no matching running pass invocation");
+  current->status = successful ? "completed" : "failed";
   if (!successful) ensureFailure();
+  else if (auto parent = llvm::find_if(llvm::reverse(pipeline), [](const auto &step) {
+             return step.status == "running";
+           }); parent != pipeline.rend())
+    enter(parent->stage, parent->pass);
 }
 
 void RISCVCompilationReport::captureFailedIR(Operation *operation) {
