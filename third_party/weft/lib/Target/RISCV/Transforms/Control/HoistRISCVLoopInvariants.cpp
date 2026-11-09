@@ -151,6 +151,13 @@ public:
             if (auto conversion =
                     mlir::dyn_cast<weft::riscv::ConvertLayoutOp>(operation))
               return conversion.getConversion().getEffect() == "pure";
+            if (mlir::isa<weft::riscv::SelectOp, weft::riscv::ReshapeOp,
+                          weft::riscv::RVVSplatOp,
+                          weft::riscv::RVVAxisBroadcastOp>(operation))
+              return llvm::all_of(operation->getResults(), [](mlir::Value value) {
+                auto type = mlir::dyn_cast<weft::riscv::ValueType>(value.getType());
+                return !type || type.getLayout().getValidity() == "full";
+              }) && mlir::isMemoryEffectFree(operation);
             return mlir::isa<weft::riscv::ConstantOp,
                              weft::riscv::IotaOp,
                              weft::riscv::UnaryOp, weft::riscv::BinaryOp,

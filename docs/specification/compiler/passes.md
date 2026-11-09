@@ -1352,6 +1352,13 @@ LICM 将循环内的不变量移出其原循环，并闭合仍被子循环消费
 不应用将任意 dialect type 改成 `arith.select` 的通用折叠。最终 verifier 也检查 scalar
 `arith.select` 的输入类型，不能让缺少物理 transfer 合同的选择直到 C emission 才失败。
 
+### `HoistRISCVLoopInvariants`
+
+循环不变的纯坐标和数值表达式通过 MLIR 的 LICM 工具外提。已物化的 splat、
+轴广播、select 和 reshape 同样参与，要求完整有效域，不能借用循环内的尾部范围。
+每次移动先用共同 SSA 活跃区间分析评估实际放置，只在既有寄存器预算内延长驻留；
+后续正式资源闭合仍核验完整结果。外提不复制计算、不移动 stage birth 或读取快照。
+
 ### `ScheduleRISCVLevels` 与 `PipelineRISCVLevels`
 
 `ScheduleRISCVLevels` 是 scheduler。它读取已 lowering 的 physical `scf.for`、SSA use-def、
