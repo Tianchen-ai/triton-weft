@@ -64,12 +64,16 @@ mlir::LogicalResult Emitter::compileHelper(riscv::HelperOp op) {
       scalarList(binding.memory.origins);
       break;
     }
-    case Binding::Kind::LocalArray:
-      if (result || !type) return mlir::failure();
-      binding.scalar = parameter(*type + " *", binding.scalar);
+    case Binding::Kind::LocalArray: {
+      auto storage = mlir::isa<riscv::LocalType>(value.getType())
+                         ? std::optional<std::string>("uint8_t")
+                         : type;
+      if (result || !storage) return mlir::failure();
+      binding.scalar = parameter(*storage + " *", binding.scalar);
       binding.localElements = parameter("size_t", binding.localElements);
       scalarList(binding.localExtents);
       break;
+    }
     case Binding::Kind::Record:
       if (result) return mlir::failure();
       binding.recordPointer = parameter("const uint8_t *", binding.recordPointer);

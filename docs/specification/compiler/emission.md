@@ -12,6 +12,9 @@ translator内部可以用临时binding map把SSA value对应到C expression、RV
 原生 helper 捕获中已经确定的 descriptor extent、stride 与 origin 直接保留字面值，
 不重新作为运行时 `size_t` 参数传入。动态坐标和 extent 仍显式传参；这只保留已选
 描述符的静态事实，不改变函数边界、访问范围或状态生命周期。
+helper 捕获的 `LocalType` allocation 仍按 byte storage 传递，包括保存较宽数值的
+spill slot；元素类型只用于已经选定的 typed load/store。普通 numeric local Value
+则保留其元素指针，不能用 spill 的逻辑元素类型改变 allocation 的 C 参数类型。
 
 从已选 RVV carrier 提取静态第 0 个元素时，直接拼写 `vmv.x.s` / `vfmv.f.s`，不先发射
 零偏移 `vslidedown`。其它 lane 仍按明确的坐标映射移动；这只消除恒等搬运，不改变读取、

@@ -26,6 +26,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -9473,22 +9474,26 @@ ReloadOp singleChainReload(SpillOp spill) {
 mlir::Value chainValueBeforeSpill(mlir::Value value) {
   while (auto reload = value.getDefiningOp<ReloadOp>()) {
     auto allocation = reload.getSlot().getDefiningOp<LocalAllocOp>();
-    if (!allocation || allocation.getResult().getType().getPurpose() != "spill" ||
-        allocation->getBlock() != reload->getBlock())
+    if (!allocation || allocation.getResult().getType().getPurpose() != "spill")
       break;
+    mlir::DominanceInfo dominance;
     SpillOp writer;
     bool uniqueWrite = true;
     for (mlir::Operation *user : reload.getSlot().getUsers()) {
       if (auto spill = mlir::dyn_cast<SpillOp>(user)) {
-        if (writer || spill->getBlock() != reload->getBlock() ||
-            !allocation->isBeforeInBlock(spill) ||
+        if (writer || !dominance.properlyDominates(allocation.getOperation(), spill.getOperation()) ||
             spill.getInput().getType() != reload.getResult().getType()) {
           uniqueWrite = false;
           break;
         }
         writer = spill;
+      } else if (mlir::isa<HelperOp>(user)) {
+        // Finalization lists the same captured SSA as an explicit ABI input.
+        // Payload uses in the helper body are still direct users of the slot,
+        // and must independently be the checked spill/reloads below.
+        continue;
       } else if (auto other = mlir::dyn_cast<ReloadOp>(user);
-                 !other || other->getBlock() != reload->getBlock() ||
+                 !other ||
                  other.getResult().getType() != reload.getResult().getType()) {
         uniqueWrite = false;
         break;
@@ -9496,12 +9501,15 @@ mlir::Value chainValueBeforeSpill(mlir::Value value) {
     }
     if (!uniqueWrite || !writer ||
         llvm::any_of(reload.getSlot().getUsers(), [&](mlir::Operation *user) {
-          return user != writer.getOperation() && !writer->isBeforeInBlock(user);
+          return user != writer.getOperation() && !mlir::isa<HelperOp>(user) &&
+                 !dominance.properlyDominates(writer.getOperation(), user);
         }))
       break;
     // A shared seed can be spilled once and reloaded for several chains.
     // Recovering its SSA origin does not make any accumulate result shareable:
     // the forward closed-chain check still requires one consumer per link.
+    // Invariant typed indices can be spilled outside a nested consumer loop;
+    // the unique writer must dominate every reload, including across regions.
     value = writer.getInput();
   }
   return value;
@@ -10212,6 +10220,19 @@ mlir::LogicalResult RVVPartialReduceOp::verify() {
   llvm::StringRef instruction = inputElement.getWidth() == 16
                                     ? "rvv.partial-reduce.widen"
                                     : "rvv.partial-reduce";
+  if (getLeaf().getInstruction() == "rvv.partial-reduce.widen.shared-seed") {
+    auto lanes = rvvLaneCount(inputPartial);
+    auto kernel = (*this)->getParentOfType<KernelOp>();
+    if (inputElement.getWidth() != 16 || input.getSlots() < 2 || !kernel ||
+        !lanes || *lanes <= 0 || inputPartial.getShape().size() != 1 ||
+        inputPartial.getShape()[0] != *lanes ||
+        inputPartial.getLayout().getValidity() != "full" ||
+        getLeaf().getTemporaryGroups() != 1 ||
+        input.getResourceGroups() + result.getResourceGroups() + 1 >
+            kernel.getTarget().getVectorRegisters())
+      return emitOpError("shared reduction seed requires full i16 slots within the target register budget");
+    instruction = "rvv.partial-reduce.widen.shared-seed";
+  }
   if (resultPartial.getShape().size() != 1 ||
       resultPartial.getShape()[position] != 1 ||
       resultPartial.getLayout().getLaneFactors()[position] != 1 ||

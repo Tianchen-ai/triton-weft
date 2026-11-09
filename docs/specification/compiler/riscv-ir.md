@@ -451,6 +451,12 @@ FMA，双 f16 存储可使用显式 widening FMA。普通 free-axis FMA 只消�
 作为 passthrough destination，terminal 拼写对应 `_tu` intrinsic。seed 及完整 time parts 合并所需
 的临时 carrier 必须计入资源合同。
 
+多个完整 I16 partial slots 的 widening reduction 可以选择
+`rvv.partial-reduce.widen.shared-seed`：同一条局部指令组只初始化一次 I32 seed，
+并固定一次输入 VTYPE。每个 slot 仍独立归约为原来的 I32 singleton，不合并作者
+partial 或 scale 支路。该 leaf 要求非空的完整 lane 域，输入、全部结果和一组 seed
+共同满足目标寄存器预算；尾部和单 slot 继续使用原有 reduction 合同。
+
 source auto 绑定同时实例化控制 SSA、Value/View shape 和公共 ABI 中对应的 shape symbol。
 其中固定后的 extent 可以用于物理合法性证明；没有绑定的动态 shape 仍沿 ABI 输入。
 标量 carrier 的物理 part 包含 replica 与 time 两种因子，状态初始化、carry、局部 reload 和
@@ -503,10 +509,11 @@ lifetime。mask 不通过普通 yield 或未标识的 block argument 逃逸，�
 完整的 widened 符号向量。两次归约均保留 seed 作为 VL=0 时的 destination，empty
 active tail 返回零。它不扩大读取范围或改变原整数归约边界。
 单 byte 寄存器组的窗口也可选择 `rvv.signed-bitmask-reduce.complement`：
-mask 为假时使用 `~x`，为真时使用原 I8 值，对完整 active payload 作一次保留 seed 的
-I8→I16 归约，再以 I32 加上 `active_lanes - popcount(mask)`。由于 `-x = ~x + 1`，
-合法的 -128 不会在 I8 中取负，空 tail 仍为零。两个 byte 临时 carrier 与一个 I16 seed
-占三组临时寄存器；较宽 carrier 使用原两归约形式。pass 明确选定 leaf，emitter 只拼写该序列。
+mask 为真时以 masked complement 得到 `~x`，为假时保留原 I8 值；对完整 active payload
+作一次保留 seed 的 I8→I16 归约，再在 I32 中计算 `-sum - popcount(mask)`。
+由于 `-x = ~x + 1`，合法的 -128 不会在 I8 中取负，空 tail 仍为零；不需要额外
+merge 或 widened 符号向量。临时寄存器继续遵守三组预算，较宽 carrier 使用原两归约形式。
+pass 明确选定 leaf，emitter 只拼写该序列。
 
 pipeline参数只有在改写成真实 guard、prologue、steady-state、epilogue与buffer-version carry后
 才算实现。未消费 `ScheduleAttr` 或只有一个 depth 字段的module不能进入emission。
