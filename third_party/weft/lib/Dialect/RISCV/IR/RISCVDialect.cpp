@@ -10220,18 +10220,23 @@ mlir::LogicalResult RVVPartialReduceOp::verify() {
   llvm::StringRef instruction = inputElement.getWidth() == 16
                                     ? "rvv.partial-reduce.widen"
                                     : "rvv.partial-reduce";
-  if (getLeaf().getInstruction() == "rvv.partial-reduce.widen.shared-seed") {
+  const bool consumed = getLeaf().getInstruction() ==
+      "rvv.partial-reduce.widen.shared-seed.consumed";
+  if (consumed || getLeaf().getInstruction() == "rvv.partial-reduce.widen.shared-seed") {
     auto lanes = rvvLaneCount(inputPartial);
     auto kernel = (*this)->getParentOfType<KernelOp>();
+    const int64_t scratch = consumed ? 1 : 1 + result.getResourceGroups();
     if (inputElement.getWidth() != 16 || input.getSlots() < 2 || !kernel ||
         !lanes || *lanes <= 0 || inputPartial.getShape().size() != 1 ||
         inputPartial.getShape()[0] != *lanes ||
         inputPartial.getLayout().getValidity() != "full" ||
-        getLeaf().getTemporaryGroups() != 1 + result.getResourceGroups() ||
-        input.getResourceGroups() + result.getResourceGroups() + 1 >
+        (consumed && (!getInput().hasOneUse() ||
+                      inputPartial.getLayout().getLmulEighths() < 8)) ||
+        getLeaf().getTemporaryGroups() != scratch ||
+        input.getResourceGroups() + scratch >
             kernel.getTarget().getVectorRegisters())
       return emitOpError("shared reduction seed requires full i16 slots within the target register budget");
-    instruction = "rvv.partial-reduce.widen.shared-seed";
+    instruction = getLeaf().getInstruction();
   }
   if (resultPartial.getShape().size() != 1 ||
       resultPartial.getShape()[position] != 1 ||
