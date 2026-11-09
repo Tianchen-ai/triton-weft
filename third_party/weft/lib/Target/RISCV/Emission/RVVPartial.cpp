@@ -527,7 +527,8 @@ mlir::LogicalResult
 Emitter::compileRVVPartialReduce(riscv::RVVPartialReduceOp operation) {
   llvm::StringRef instruction = instructionOf(operation.getOperation());
   if (instruction != "rvv.partial-reduce.widen" &&
-      instruction != "rvv.partial-reduce")
+      instruction != "rvv.partial-reduce" &&
+      instruction != "rvv.partial-reduce.widen.shared-seed")
     return fail(operation, "RVV partial reduction has no exact selected leaf");
   Binding input = bindings.lookup(operation.getInput());
   auto inputType = operation.getInput().getType();
@@ -538,6 +539,36 @@ Emitter::compileRVVPartialReduce(riscv::RVVPartialReduceOp operation) {
       resultType.getSlots() != inputType.getSlots())
     return fail(operation,
                 "RVV partial reduction has no complete typed input set");
+  if (instruction == "rvv.partial-reduce.widen.shared-seed") {
+    const std::string seed = fresh("partial_reduce_seed");
+    const std::string vl = std::to_string(physicalLanesFor(inputPartial));
+    line("vint32m1_t " + seed + ";");
+    Binding result;
+    result.kind = Binding::Kind::PartialSet;
+    for (size_t slot = 0; slot < input.parts.size(); ++slot) {
+      result.parts.push_back(fresh("partial_reduced"));
+      line("vint32m1_t " + result.parts.back() + ";");
+    }
+    line("__asm__(");
+    line("  \"vsetivli zero, 1, e32, m1, ta, ma\\n\\t\"");
+    line("  \"vmv.s.x %[seed], zero\\n\\t\"");
+    line("  \"vsetvli zero, %[vl], e16, " +
+         lmulSpelling(inputPartial.getLayout().getLmulEighths()) + ", ta, ma\\n\\t\"");
+    for (size_t slot = 0; slot < input.parts.size(); ++slot)
+      line("  \"vwredsum.vs %[out" + std::to_string(slot) + "], %[in" +
+           std::to_string(slot) + "], %[seed]\\n\\t\"");
+    std::string outputs = "  : [seed] \"=&vr\"(" + seed + ")";
+    std::string inputs = "  : [vl] \"r\"((size_t)" + vl + ")";
+    for (size_t slot = 0; slot < input.parts.size(); ++slot) {
+      outputs += ", [out" + std::to_string(slot) + "] \"=&vr\"(" + result.parts[slot] + ")";
+      inputs += ", [in" + std::to_string(slot) + "] \"vr\"(" + input.parts[slot] + ")";
+    }
+    line(outputs);
+    line(inputs);
+    line("  : \"vl\", \"vtype\");");
+    bindings[operation.getResult()] = std::move(result);
+    return mlir::success();
+  }
   std::string seed = fresh("partial_reduce_seed");
   line("vint32m1_t " + seed + " = __riscv_vmv_v_x_i32m1(0, 1);");
   const std::string reduction = instruction == "rvv.partial-reduce.widen"
