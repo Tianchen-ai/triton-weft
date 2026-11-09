@@ -120,6 +120,9 @@ bool transfersIntoRegion(Operation *operation, Value value, bool captured = fals
 std::optional<int64_t> riscv_internal::surroundingRegisterGroups(
     Operation *anchor, ArrayRef<Value> excluded) {
   llvm::DenseSet<Value> seen;
+  llvm::DenseSet<Value> excludedStorage;
+  for (Value value : excluded)
+    excludedStorage.insert(registerStorageIdentity(value));
   int64_t total = 0;
   for (Operation *at = anchor; at && !isa<riscv::KernelOp>(at); at = at->getParentOp()) {
     auto liveness = BlockRegisterLiveness::get(*at->getBlock());
@@ -128,7 +131,7 @@ std::optional<int64_t> riscv_internal::surroundingRegisterGroups(
     if (!position) return std::nullopt;
     for (const auto &interval : liveness->intervals()) {
       if ((!isa<BlockArgument>(interval.value) && interval.begin >= *position) || interval.end < *position ||
-          llvm::is_contained(excluded, interval.value) || !seen.insert(interval.value).second) continue;
+          excludedStorage.contains(interval.value) || !seen.insert(interval.value).second) continue;
       // An initial value with only this control use has transferred to its
       // region argument. Counting it again in the ancestor keeps a dead birth
       // live beside its carry and can double an entire fractional-LMUL tuple.
@@ -299,6 +302,20 @@ std::optional<RegisterPeak> BlockRegisterLiveness::peak(bool nativeExpansion) co
 std::optional<RegisterPeak> riscv_internal::registerPeak(Block &block) {
   auto analysis = BlockRegisterLiveness::get(block);
   return analysis ? analysis->peak() : std::nullopt;
+}
+
+std::optional<int64_t> riscv_internal::registerResidenceCost(Block &block) {
+  auto liveness = BlockRegisterLiveness::get(block);
+  if (!liveness) return std::nullopt;
+  int64_t cost = 0;
+  for (const RegisterInterval &interval : liveness->intervals()) {
+    const int64_t length = interval.end - interval.begin;
+    if (length && interval.groups >
+        (std::numeric_limits<int64_t>::max() - cost) / length)
+      return std::nullopt;
+    cost += interval.groups * length;
+  }
+  return cost;
 }
 
 std::optional<int64_t> riscv_internal::nativeUnrollRegisterGroups(Operation *operation, int64_t copies) {

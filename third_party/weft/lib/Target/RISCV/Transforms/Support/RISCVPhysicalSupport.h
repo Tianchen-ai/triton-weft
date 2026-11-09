@@ -215,6 +215,7 @@ storageWindowPlan(mlir::Builder &builder, riscv::FieldOp field,
 void copyOrigin(mlir::Operation *source, mlir::Operation *target);
 
 void materializeWholeLayeredReads(mlir::ModuleOp module);
+void reuseIndexedEntrySnapshots(mlir::ModuleOp module);
 
 } // namespace weft::riscv_internal
 

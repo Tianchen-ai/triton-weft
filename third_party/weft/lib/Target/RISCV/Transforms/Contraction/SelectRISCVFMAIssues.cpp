@@ -6,12 +6,45 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Pass/Pass.h"
+#include "Weft/Analysis/PhysicalDependence.h"
+#include "llvm/ADT/DenseSet.h"
 
 using namespace mlir;
 using namespace weft;
 using namespace weft::riscv_internal;
 
 namespace {
+// The system compiler can hoist independent reads past the physical schedule.
+// A repeated outer loop then keeps every unrolled input panel live together,
+// even though each panel fits at its own numeric consumer. Keep the existing
+// FMA issue boundary when that invariant read frontier exceeds the target.
+bool invariantReadFrontierExceeds(scf::ForOp loop, int64_t budget) {
+  auto trips = analysis::staticTripCount(loop);
+  if (!trips || *trips < 2) return false;
+  llvm::DenseSet<Value> invariant, storage;
+  int64_t groups = 0;
+  for (Operation &operation : *loop.getBody()) {
+    if (operation.getNumRegions() || !riscv::hasOnlyReadEffects(&operation) ||
+        !llvm::all_of(operation.getOperands(), [&](Value operand) {
+          return loop.isDefinedOutsideOfLoop(operand) || invariant.contains(operand);
+        }))
+      continue;
+    for (Value result : operation.getResults()) {
+      invariant.insert(result);
+      auto type = dyn_cast<riscv::ValueType>(result.getType());
+      if (!type || type.getLayout().getCarrier() != "rvv" ||
+          isMemoryEffectFree(&operation) ||
+          !storage.insert(registerStorageIdentity(result)).second)
+        continue;
+      auto resident = residentRegisterGroups(result);
+      if (!resident) return false;
+      groups += *resident;
+      if (groups > budget) return true;
+    }
+  }
+  return false;
+}
+
 struct Candidate {
   Operation *operation;
   Value vector, multiplier, accumulator;
@@ -55,6 +88,17 @@ struct Candidate {
       // A non-stream step without explicit VL may depend on several physical
       // points. Leave it to its existing exact leaf until those bounds are IR.
       if (!candidate.active) return std::nullopt;
+    } else if (auto fma = dyn_cast<riscv::FMAOp>(operation)) {
+      auto result = dyn_cast<riscv::ValueType>(fma.getResult().getType());
+      if (!result || result.getLayout().getValidity() != "full" ||
+          fma.getKind() != "add" ||
+          !fma.getLeaf().getInstruction().starts_with("rvv.vfmacc."))
+        return std::nullopt;
+      candidate.vector = fma.getLhs();
+      candidate.multiplier = fma.getRhs();
+      candidate.accumulator = fma.getAccumulator();
+      candidate.result = result;
+      candidate.full = true;
     } else return std::nullopt;
     auto vector = dyn_cast<riscv::ValueType>(candidate.vector.getType());
     if (!vector) return std::nullopt;
@@ -69,7 +113,8 @@ struct Candidate {
     return candidate;
   }
 
-  bool requiresClosedIssue() const {
+  bool requiresClosedIssue(bool excessInvariantReads) const {
+    if (excessInvariantReads) return true;
     int64_t supplies = geometry.scalar || vector == multiplier ? 1 : 2;
     int64_t resident = issueRegisterGroups(accumulator) + supplies * geometry.inputGroups;
     // A replica's input can die after its own consumers: do not charge every
@@ -154,13 +199,24 @@ public:
     IRRewriter b(&getContext());
     SmallVector<Operation *> operations;
     getOperation().walk([&](Operation *operation) {
-      if (isa<riscv::RVVTileContractOp, riscv::RVVStreamContractStepOp, riscv::RVVContractStepOp>(operation))
+      if (isa<riscv::RVVTileContractOp, riscv::RVVStreamContractStepOp,
+              riscv::RVVContractStepOp, riscv::FMAOp>(operation))
         operations.push_back(operation);
     });
+    llvm::DenseMap<Operation *, bool> invariantFrontiers;
     SmallVector<Operation *> selectedOperations;
     for (Operation *operation : operations) {
       auto candidate = Candidate::get(operation);
-      if (!candidate || !candidate->requiresClosedIssue()) continue;
+      if (!candidate) continue;
+      bool excess = false;
+      if (auto loop = dyn_cast<scf::ForOp>(operation->getParentOp())) {
+        auto [entry, inserted] = invariantFrontiers.try_emplace(loop, false);
+        if (inserted)
+          entry->second = invariantReadFrontierExceeds(loop,
+              operation->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters());
+        excess = entry->second;
+      }
+      if (!candidate->requiresClosedIssue(excess)) continue;
       selectedOperations.push_back(operation);
     }
     for (Operation *operation : selectedOperations) {

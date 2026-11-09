@@ -16,6 +16,10 @@ mlir::LogicalResult Emitter::compileHelper(riscv::HelperOp op) {
   std::string name = fresh(identifier(kernel.getSymName()) + "_" + identifier(op.getName()));
   llvm::SmallVector<std::string> declarations, arguments;
   auto parameter = [&](std::string type, std::string value, bool output = false) {
+    uint64_t constant;
+    if (!output && type == "size_t" &&
+        !llvm::StringRef(value).getAsInteger(10, constant))
+      return value;
     std::string arg = "arg_" + std::to_string(declarations.size());
     declarations.push_back(type + (output ? " *" : " ") + arg);
     arguments.push_back(output ? "&(" + value + ")" : value);

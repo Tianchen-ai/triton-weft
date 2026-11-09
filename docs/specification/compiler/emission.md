@@ -9,6 +9,10 @@ typed program entities；每个target operation也已有闭合的[local leaf](le
 translator内部可以用临时binding map把SSA value对应到C expression、RVV variable、local array
 或typed fragment register。该表只保存已发射值的文本，不是跨pass decision authority。
 
+原生 helper 捕获中已经确定的 descriptor extent、stride 与 origin 直接保留字面值，
+不重新作为运行时 `size_t` 参数传入。动态坐标和 extent 仍显式传参；这只保留已选
+描述符的静态事实，不改变函数边界、访问范围或状态生命周期。
+
 从已选 RVV carrier 提取静态第 0 个元素时，直接拼写 `vmv.x.s` / `vfmv.f.s`，不先发射
 零偏移 `vslidedown`。其它 lane 仍按明确的坐标映射移动；这只消除恒等搬运，不改变读取、
 有效域、整数位宽或浮点数值。多消费者的提取共享仍由局部 extraction binding 保存。

@@ -261,6 +261,12 @@ MMA，并在改写后检查完整 kernel 的寄存器驻留；不能把此局部
 同一raw window上的scalar-prime leaf不构成上述prefetch：它没有future-iteration、distance、
 buffer version或新增SSA，只是一个由完整memory edge和实测parameter共同选择的固定局部序列。
 
+系统编译器可能把有序循环内相互独立的只读输入全部提升，形成超过目标容量的寄存器前沿。
+物理 FMA issue 选择沿同块 use-def 计算循环不变的实际 RVV 读取，按存储身份去重并累计驻留组；
+已知重复循环的读取前沿超出目标预算时，使用已有 tied-result issue 边界保持局部供给与计算。
+该边界不改变数值操作、读取快照、Level 或源级复用范围，也不引入硬件内存栅栏。
+它约束后续机器编译的移动，不把最终 IR 的零临时存储等同于机器码零 spill。
+
 Triton `SoftwarePipeliner.cpp:21-27` 同样分schedule与expander；
 `LowerLoops.cpp:49-117`、`AssignLatencies.cpp:172-231`读取async能力、shared encoding、use
 distance、mask与MMA wait约束。TileLang `pipeline_planning.cc:1083-1337`读取source stage/order

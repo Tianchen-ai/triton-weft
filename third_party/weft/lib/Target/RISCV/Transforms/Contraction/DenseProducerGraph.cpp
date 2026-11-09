@@ -687,7 +687,15 @@ bool DenseProducerGraph::needsRealization() const {
   // before the generic materializer snapshots each value independently.
   if (llvm::any_of(order, [&](Operation *op) {
         auto groups = operationRegisterGroups(op);
-        if (!groups || *groups > budget) return true;
+        SmallVector<Value> current(op->getOperands());
+        llvm::append_range(current, op->getResults());
+        auto outside = surroundingRegisterGroups(op, current);
+        // Each producer executes at its own position in the selected schedule.
+        // The sink's live set may contain later values which do not yet exist
+        // here. Charge the operation together with its actual surrounding SSA.
+        if (!groups || !outside || *groups >
+            root->getParentOfType<riscv::KernelOp>().getTarget().getVectorRegisters() - *outside)
+          return true;
         return llvm::any_of(op->getResults(), [&](Value value) {
           auto scalar = scalarRegisterCount(value.getType(), xlen);
           return !scalar || *scalar > 32;

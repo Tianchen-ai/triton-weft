@@ -1694,11 +1694,18 @@ public:
             issuePlan
                 ? mlir::dyn_cast<riscv::ValueType>(issuePlan.getAccumulatorType())
                 : riscv::ValueType();
+        auto dotOutput = mlir::dyn_cast<riscv::ValueType>(contribution.dot.getResult().getType());
+        const bool sameCarry = contribution.dot.getResult().getType() == carry ||
+            (carryType && dotOutput && !contribution.dotRenames.empty() &&
+             dotOutput.getShape() == carryType.getShape() &&
+             dotOutput.getElementType() == carryType.getElementType() &&
+             dotOutput.getLayout().getCarrier() == "scalar" &&
+             dotOutput.getLayout().getReplicaFactors() == carryType.getLayout().getReplicaFactors());
         complete &= contribution.dot.getPartialUnroll() == slots &&
                     contribution.dot.getOver().size() == 1 &&
                     contribution.dot.getOver()[0] == reductionAxis &&
                     contribution.dot.getPartialTopology() == firstTopology &&
-                    contribution.dot.getResult().getType() == carry &&
+                    sameCarry &&
                     contribution.scaleMultiply.getResult().getType() == carry &&
                     contribution.carryAdd.getResult().getType() == carry &&
                     issuePlan &&
@@ -1852,6 +1859,8 @@ public:
         if (contribution.carryAdd != finalAdd)
           rewriter.eraseOp(contribution.carryAdd);
         rewriter.eraseOp(contribution.scaleMultiply);
+        for (auto rename : contribution.dotRenames)
+          rewriter.eraseOp(rename);
         rewriter.eraseOp(contribution.dot);
       }
       llvm::DenseSet<mlir::Operation *> issueCleanupVisited;

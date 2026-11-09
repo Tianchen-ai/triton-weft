@@ -277,6 +277,7 @@ struct ScaledPartialContribution {
   riscv::BinaryOp carryAdd;
   mlir::Value scale;
   mlir::Value previous;
+  llvm::SmallVector<riscv::ReshapeOp> dotRenames;
 };
 
 std::optional<ScaledPartialContribution>

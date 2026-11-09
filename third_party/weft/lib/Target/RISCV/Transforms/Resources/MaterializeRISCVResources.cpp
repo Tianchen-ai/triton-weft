@@ -443,18 +443,6 @@ bool isIntegerPointwise(mlir::Operation *operation) {
          });
 }
 
-std::optional<int64_t> residentCost(mlir::Block &block) {
-  int64_t cost = 0;
-  for (const Interval &interval : intervalsFor(block)) {
-    const int64_t length = interval.end - interval.begin;
-    if (length && interval.groups >
-                      (std::numeric_limits<int64_t>::max() - cost) / length)
-      return std::nullopt;
-    cost += interval.groups * length;
-  }
-  return cost;
-}
-
 bool sinkIntegerSlice(mlir::Operation *root, mlir::IRRewriter &rewriter,
                       int64_t &savedCost) {
   if (!isIntegerPointwise(root) || !root->getResult(0).hasOneUse())
@@ -515,13 +503,13 @@ bool sinkIntegerSlice(mlir::Operation *root, mlir::IRRewriter &rewriter,
   }
   if (!crossedPartial || ordered.size() != slice.size())
     return false;
-  auto beforeCost = residentCost(*block);
+  auto beforeCost = riscv_internal::registerResidenceCost(*block);
   if (!beforeCost)
     return false;
   const int64_t beforePeak = analyzeBlock(*block).total();
   for (auto *operation : ordered)
     rewriter.moveOpBefore(operation, consumer);
-  auto afterCost = residentCost(*block);
+  auto afterCost = riscv_internal::registerResidenceCost(*block);
   if (afterCost && *afterCost < *beforeCost &&
       savedCost <= std::numeric_limits<int64_t>::max() -
                        (*beforeCost - *afterCost) &&

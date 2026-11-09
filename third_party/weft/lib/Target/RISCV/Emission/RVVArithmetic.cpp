@@ -1,6 +1,7 @@
 #include "Emitter.h"
 #include "Weft/Analysis/ReductionIdentity.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
+#include "Weft/Dialect/RISCV/IR/Numerics.h"
 
 namespace weft::riscv_emission {
 
@@ -997,7 +998,7 @@ mlir::LogicalResult Emitter::compileCastImpl(ConversionOp operation) {
   auto targetCType = scalarCType(target);
   if (!targetCType)
     return fail(operation, "cast target has no intrinsic-C type");
-  auto rounding = rawOperation->getAttrOfType<mlir::StringAttr>("rounding");
+  auto rounding = riscv::conversionRounding(rawOperation);
   auto saturate = rawOperation->getAttrOfType<mlir::BoolAttr>("saturate");
   auto scalarExpression = [&](llvm::StringRef inputExpression)
       -> mlir::FailureOr<std::string> {

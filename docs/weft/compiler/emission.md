@@ -8,6 +8,9 @@ The generated code is inspectable through `CompiledKernel.asm` and exported arti
 RVV operations become typed intrinsics; selected extension operations can use
 typed local assembly. Layout, active length, conversion, local packing,
 software-pipeline versions and resource decisions have already been materialized.
+The shared RISC-V C toolchain disables an additional scalar SLP packing pass by
+default. Explicit RVV packets remain intact, and scalar replicas retain their
+selected representation. The native build metadata records these compiler flags.
 Clang 23 compiles the resulting C with the selected ISA, ABI and VLEN.
 
 Inspect `asm["riscvir"]`, then `asm["c"]`. For a load, follow the logical region

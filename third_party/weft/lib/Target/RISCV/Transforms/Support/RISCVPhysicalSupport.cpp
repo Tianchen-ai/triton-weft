@@ -1,4 +1,5 @@
 #include "Transforms/Support/RISCVPhysicalSupport.h"
+#include "Weft/Dialect/RISCV/IR/Numerics.h"
 #include "Weft/Dialect/Kernel/IR/TypeQueries.h"
 #include "Weft/Analysis/StorageBytes.h"
 #include "Weft/Dialect/Kernel/IR/ShapeBindings.h"
@@ -1536,7 +1537,7 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
           (mlir::isa<mlir::Float8E4M3FNType>(source) ? "f8e4m3fn-to-f32" : "f8e5m2-to-f32");
     }
     if (source.isBF16() != target.isBF16()) {
-      auto rounding = operation->getAttrOfType<mlir::StringAttr>("rounding");
+      auto rounding = riscv::conversionRounding(operation);
       auto saturate = operation->getAttrOfType<mlir::BoolAttr>("saturate");
       if ((!source.isF32() && !target.isF32()) ||
           (rounding && rounding.getValue() != "rne") ||
@@ -1547,7 +1548,7 @@ riscv_internal::terminalInstruction(mlir::Operation *operation) {
                              ? "rvv." : "scalar.") +
              (source.isBF16() ? "bf16-to-f32" : "f32-to-bf16-rne");
     }
-    auto rounding = operation->getAttrOfType<mlir::StringAttr>("rounding");
+    auto rounding = riscv::conversionRounding(operation);
     auto saturate = operation->getAttrOfType<mlir::BoolAttr>("saturate");
     if (carrierOf(operation->getResult(0).getType()) != "rvv") {
       auto integer = mlir::dyn_cast<mlir::IntegerType>(target);
@@ -2048,6 +2049,16 @@ riscv_internal::analyzeIndexedEntryRelation(
     return std::nullopt;
 
   mlir::Value indexValue = stripRepresentationConversions(fullIndices);
+  // A lookup may widen the complete index after constructing entry*stride
+  // plus payload. Follow only value-preserving conversions, retaining the
+  // original typed arithmetic (including any earlier finite-width wrap).
+  for (unsigned depth = 0; depth != 8; ++depth) {
+    auto input = exactIntegerCoordinateInput(indexValue);
+    if (!input) break;
+    auto integer = mlir::dyn_cast<mlir::IntegerType>(logicalElement(input.getType()));
+    if (integer && integer.isSigned()) break;
+    indexValue = stripRepresentationConversions(input);
+  }
   auto add = indexValue.getDefiningOp<riscv::BinaryOp>();
   if (!add || add.getKind() != "add")
     return std::nullopt;
@@ -2169,6 +2180,10 @@ riscv_internal::integerRange(mlir::Value value, unsigned depth) {
     else if (auto op = input.getDefiningOp<riscv::WidenOp>()) preserve(op.getInput(), Kind::Cast);
     else if (auto op = input.getDefiningOp<riscv::CastOp>()) preserve(op.getInput(), Kind::Cast);
     else if (auto op = input.getDefiningOp<riscv::NarrowOp>()) preserve(op.getInput(), op.getSaturate() ? Kind::Saturate : Kind::Cast);
+    else if (auto op = input.getDefiningOp<riscv::ReshapeOp>()) preserve(op.getInput());
+    else if (auto op = input.getDefiningOp<riscv::SelectOp>()) {
+      result.kind = Kind::Union; result.inputs = {op.getTrueValue(), op.getFalseValue()};
+    }
     else if (auto op = input.getDefiningOp<riscv::ExtractOp>()) preserve(op.getInput());
     else if (auto op = input.getDefiningOp<riscv::BinaryOp>()) {
       result.kind = analysis::integerBinaryKind(op.getKind()); result.inputs = {op.getLhs(), op.getRhs()};

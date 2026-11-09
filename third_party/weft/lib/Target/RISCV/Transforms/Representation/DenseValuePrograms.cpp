@@ -1033,11 +1033,9 @@ private:
         sharedBridges[value] = storage;
         continue;
       }
-      auto bridge = riscv::ConvertLayoutOp::create(b, value.getLoc(), expected, storage,
-          riscv_internal::layoutConversion(b, local.getLayout(), expected.getLayout()),
-          riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
-      riscv_internal::copyOrigin(value.getDefiningOp(), bridge);
-      sharedBridges[value] = bridge;
+      auto bridge = riscv_internal::reloadLocalValue(b, storage, expected, graph.root);
+      if (failed(bridge)) return failure();
+      sharedBridges[value] = *bridge;
     }
     for (auto [position, reduction] : llvm::enumerate(graph.reductions)) {
       Value result;
@@ -1048,10 +1046,9 @@ private:
         auto local = cast<riscv::ValueType>(source.getType());
         result = source;
         if (local != expected) {
-          result = riscv::ConvertLayoutOp::create(b, loc, expected, source,
-              riscv_internal::layoutConversion(b, local.getLayout(), expected.getLayout()),
-              riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
-          riscv_internal::copyOrigin(reduction, result.getDefiningOp());
+          auto bridge = riscv_internal::reloadLocalValue(b, source, expected, reduction);
+          if (failed(bridge)) return failure();
+          result = *bridge;
         }
       }
       reduction.getResult().replaceAllUsesWith(result);
@@ -1071,10 +1068,9 @@ private:
           auto local = cast<riscv::ValueType>(snapshot.getType());
           Value bridge = snapshot;
           if (local != expected) {
-            bridge = riscv::ConvertLayoutOp::create(b, op->getLoc(), expected, snapshot,
-                riscv_internal::layoutConversion(b, local.getLayout(), expected.getLayout()),
-                riscv::AccessAttr(), riscv_internal::unselectedLeaf(b));
-            riscv_internal::copyOrigin(op, bridge.getDefiningOp());
+            auto restored = riscv_internal::reloadLocalValue(b, snapshot, expected, op);
+            if (failed(restored)) return failure();
+            bridge = *restored;
           }
           op->getResult(0).replaceAllUsesWith(bridge);
         } else if (llvm::is_contained(graph.localReads, dyn_cast<riscv::ConvertLayoutOp>(op))) {

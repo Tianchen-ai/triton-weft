@@ -121,6 +121,11 @@ class Toolchain:
             if flag.startswith("-mrvv-vector-bits=") and flag != f"-mrvv-vector-bits={target.vlen_bits}":
                 raise ValueError("toolchain vector length disagrees with the compiler target")
         vector_bits = f"-mrvv-vector-bits={target.vlen_bits}"
+        if not x86 and not any(flag in ("-fslp-vectorize", "-fno-slp-vectorize") for flag in values["cflags"]):
+            # RVV intrinsics already implement the selected physical packets.
+            # Repacking unrelated scalar replicas through SLP adds unplanned
+            # broadcasts, inserts and VTYPE changes at the terminal C boundary.
+            values["cflags"] = ("-fno-slp-vectorize", *values["cflags"])
         if not x86 and vector_bits not in values["cflags"]:
             # Physical layouts and runtime checks already require this VLEN.
             # Carry the same fact into native codegen instead of discarding it

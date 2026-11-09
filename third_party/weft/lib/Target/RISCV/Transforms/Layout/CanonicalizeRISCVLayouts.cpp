@@ -25,6 +25,21 @@ bool rematerializable(mlir::Operation *operation) {
          operation->getNumResults() == 1;
 }
 
+bool rematerializableCoordinate(mlir::Value value) {
+  // Positional axes can reach a consumer through a signedness or width cast.
+  // Those exact coordinate conversions do not turn a cheap iota into a
+  // shared numerical payload that must be extracted from a vector register.
+  // Keep each conversion in the rebuilt chain; the common integer proof only
+  // permits following it when its complete value range is preserved.
+  for (unsigned depth = 0; depth != 8; ++depth) {
+    if (value.getDefiningOp<riscv::IotaOp>()) return true;
+    auto input = riscv_internal::exactIntegerCoordinateInput(value);
+    if (!input) return false;
+    value = input;
+  }
+  return false;
+}
+
 bool isPureRepresentationConversion(riscv::ConvertLayoutOp conversion) {
   return conversion.getConversion().getEffect() == "pure";
 }
@@ -62,6 +77,50 @@ bool preservesReadOrder(mlir::Operation *from, mlir::Operation *to) {
   return true;
 }
 
+void replaceUnitProjection(mlir::IRRewriter &rewriter,
+                           mlir::Operation *operation, mlir::Value input,
+                           riscv::ValueType result) {
+  auto source = mlir::cast<riscv::ValueType>(input.getType());
+  auto before = source.getLayout();
+  auto projected = result;
+  if (before.getCarrier() != "unassigned") {
+    auto factors = [&](mlir::DenseI64ArrayAttr original) {
+      llvm::SmallVector<int64_t> mapped;
+      for (auto [position, axis] : llvm::enumerate(result.getAxisIds().asArrayRef())) {
+        auto found = llvm::find(source.getAxisIds().asArrayRef(), axis);
+        if (found == source.getAxisIds().asArrayRef().end()) {
+          assert(result.getShape()[position] == 1);
+          mapped.push_back(1);
+        } else {
+          mapped.push_back(original[found - source.getAxisIds().asArrayRef().begin()]);
+        }
+      }
+      return rewriter.getDenseI64ArrayAttr(mapped);
+    };
+    auto layout = riscv::LayoutAttr::get(rewriter.getContext(), before.getCarrier(),
+        result.getAxisIds(), factors(before.getTimeFactors()), factors(before.getLaneFactors()),
+        factors(before.getReplicaFactors()), factors(before.getFragmentFactors()),
+        factors(before.getLocalFactors()), before.getSew(), before.getLmulEighths(),
+        before.getVl(), before.getRegisterGroups(), before.getValidity(), before.getReplicaGroup());
+    projected = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(result, layout));
+  }
+  rewriter.setInsertionPoint(operation);
+  auto renamed = riscv::ReshapeOp::create(rewriter, operation->getLoc(), projected,
+      input, source.getAxisIds(), mlir::DenseI64ArrayAttr());
+  riscv_internal::copyOrigin(operation, renamed);
+  mlir::Value value = renamed;
+  // Deleting a unit coordinate does not change its producer's register or
+  // storage partition. Keep any consumer representation on an explicit edge.
+  if (projected != result) {
+    auto conversion = riscv::ConvertLayoutOp::create(rewriter, operation->getLoc(), result,
+        value, riscv_internal::layoutConversion(rewriter, projected.getLayout(), result.getLayout()),
+        riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
+    riscv_internal::copyOrigin(operation, conversion);
+    value = conversion;
+  }
+  rewriter.replaceOp(operation, value);
+}
+
 bool canReprojectIndex(mlir::Value value, riscv::LayoutAttr required,
                        riscv::TargetAttr target, mlir::Builder &builder,
                        unsigned &remaining) {
@@ -82,7 +141,7 @@ bool canReprojectIndex(mlir::Value value, riscv::LayoutAttr required,
     return true;
   mlir::Operation *producer = value.getDefiningOp();
   if (!producer || !rematerializable(producer) ||
-      (!value.hasOneUse() && !mlir::isa<riscv::IotaOp>(producer)))
+      (!value.hasOneUse() && !rematerializableCoordinate(value)))
     return false;
   for (mlir::Value operand : producer->getOperands()) {
     auto operandType = mlir::dyn_cast<riscv::ValueType>(operand.getType());
@@ -224,11 +283,8 @@ public:
       if (cursor) unitProjections.push_back(extract);
     });
     for (auto extract : unitProjections) {
-      rewriter.setInsertionPoint(extract);
-      auto projected = riscv::ReshapeOp::create(rewriter, extract.getLoc(), extract.getResult().getType(),
-          extract.getInput(), extract.getInput().getType().getAxisIds(), mlir::DenseI64ArrayAttr());
-      riscv_internal::copyOrigin(extract, projected);
-      rewriter.replaceOp(extract, projected.getResult());
+      replaceUnitProjection(rewriter, extract, extract.getInput(),
+          mlir::cast<riscv::ValueType>(extract.getResult().getType()));
     }
     getOperation().walk([&](riscv::ExtractOp extract) {
       auto input = extract.getInput().getType();
@@ -306,12 +362,8 @@ public:
         unitReductions.push_back(reduce);
     });
     for (auto reduce : unitReductions) {
-      rewriter.setInsertionPoint(reduce);
-      auto input = mlir::cast<riscv::ValueType>(reduce.getInput().getType());
-      auto projected = riscv::ReshapeOp::create(rewriter, reduce.getLoc(),
-          reduce.getResult().getType(), reduce.getInput(), input.getAxisIds(), mlir::DenseI64ArrayAttr());
-      riscv_internal::copyOrigin(reduce, projected);
-      rewriter.replaceOp(reduce, projected.getResult());
+      replaceUnitProjection(rewriter, reduce, reduce.getInput(),
+          mlir::cast<riscv::ValueType>(reduce.getResult().getType()));
     }
     llvm::SmallVector<riscv::ReshapeOp> renames;
     getOperation().walk([&](riscv::ReshapeOp reshape) { renames.push_back(reshape); });
@@ -750,7 +802,7 @@ public:
         }
         if (!producer || !rematerializable(producer) ||
             (!conversion.getInput().hasOneUse() &&
-             !mlir::isa<riscv::IotaOp>(producer)))
+             !rematerializableCoordinate(conversion.getInput())))
           continue;
         auto targetType = conversion.getResult().getType();
         auto targetValue = mlir::cast<riscv::ValueType>(targetType);
@@ -922,6 +974,24 @@ public:
         }
       });
     }
+
+    // Rematerializing a producer can change the input of an earlier unit-axis
+    // projection. Re-close that edge against its current carrier before the
+    // conversion leaves are selected, retaining the consumer representation.
+    llvm::SmallVector<riscv::ReshapeOp> unitReshapes;
+    getOperation().walk([&](riscv::ReshapeOp reshape) {
+      auto source = reshape.getInput().getType();
+      auto result = reshape.getResult().getType();
+      if (!reshape->getParentOfType<riscv::KernelOp>().getResourcesMaterialized() &&
+          source.getLayout().getCarrier() != "unassigned" &&
+          kernel::isUnitAxisProjection(source.getShape(), source.getAxisIds(),
+              result.getShape(), result.getAxisIds(), reshape.getOrder()) &&
+          !riscv::hasIdenticalReshapeCarrier(source, result, reshape.getOrder()))
+        unitReshapes.push_back(reshape);
+    });
+    for (auto reshape : unitReshapes)
+      replaceUnitProjection(rewriter, reshape, reshape.getInput(),
+          reshape.getResult().getType());
 
     llvm::SmallVector<riscv::ConvertLayoutOp> packs;
     getOperation().walk([&](riscv::ConvertLayoutOp conversion) {

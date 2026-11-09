@@ -159,19 +159,33 @@ planEncodedLocalPack(mlir::Builder &builder,
     auto implementation = dot->template getAttrOfType<riscv::ImplementationAttr>("implementation");
     if (!implementation || implementation.getFamily() != "widen-dot" ||
         !llvm::is_contained(dot.getOver(), recordAxis)) return;
-    for (mlir::Value operand : {dot.getLhs(), dot.getRhs()}) {
-      auto field = riscv_internal::sourceField(operand);
-      if (!field) continue;
-      mlir::Value owner = field.getOwner();
-      for (unsigned depth = 0; depth < 32; ++depth) {
-        if (owner == materialize.getResult()) {
-          reductionLaneConsumer = true;
-          break;
+    llvm::SmallVector<mlir::Value> operands{dot.getLhs(), dot.getRhs()};
+    llvm::DenseSet<mlir::Value> inspected;
+    while (!operands.empty()) {
+      mlir::Value operand = operands.pop_back_val();
+      if (!inspected.insert(operand).second) continue;
+      if (auto field = riscv_internal::sourceField(operand)) {
+        mlir::Value owner = field.getOwner();
+        for (unsigned depth = 0; depth < 32; ++depth) {
+          if (owner == materialize.getResult()) {
+            reductionLaneConsumer = true;
+            break;
+          }
+          if (auto extract = owner.getDefiningOp<riscv::ExtractOp>()) owner = extract.getInput();
+          else if (auto convert = owner.getDefiningOp<riscv::ConvertLayoutOp>()) owner = convert.getInput();
+          else break;
         }
-        if (auto extract = owner.getDefiningOp<riscv::ExtractOp>()) owner = extract.getInput();
-        else if (auto convert = owner.getDefiningOp<riscv::ConvertLayoutOp>()) owner = convert.getInput();
-        else break;
+        continue;
       }
+      // Field decoding and exact casts remain part of the same payload
+      // supply. Inspect pure, regionless use-def edges so a centered bit or
+      // nibble expression cannot hide its reduction-lane storage requirement.
+      auto *producer = operand.getDefiningOp();
+      if (!producer || producer->getNumRegions() ||
+          !mlir::isMemoryEffectFree(producer)) continue;
+      for (mlir::Value input : producer->getOperands())
+        if (mlir::isa<riscv::ValueType>(input.getType()))
+          operands.push_back(input);
     }
   };
   materialize->getParentOfType<riscv::KernelOp>().walk([&](mlir::Operation *operation) {
@@ -182,7 +196,15 @@ planEncodedLocalPack(mlir::Builder &builder,
     else if (auto dot = mlir::dyn_cast<riscv::OuterContractOp>(operation))
       inspectContraction(dot);
   });
-  if (reductionLaneConsumer) interleaveRows = 1;
+  if (reductionLaneConsumer) {
+    // A record-contiguous pack has the source's existing byte arrangement.
+    // When every observation stays in the original read epoch, retaining the
+    // staged descriptor performs the same reads without a copy and allocation.
+    // Interfering writes still require the complete snapshot below.
+    if (!riscv_internal::needsReadSnapshot(load))
+      return std::nullopt;
+    interleaveRows = 1;
+  }
 
   auto representedExtent = [&](size_t axis) -> std::optional<int64_t> {
     int64_t extent = 1;

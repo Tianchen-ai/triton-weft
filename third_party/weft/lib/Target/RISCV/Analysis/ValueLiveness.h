@@ -61,6 +61,9 @@ private:
 };
 
 std::optional<RegisterPeak> registerPeak(mlir::Block &block);
+// Register groups integrated over SSA live intervals in this ordered block.
+// Representation aliases retain the same storage interval.
+std::optional<int64_t> registerResidenceCost(mlir::Block &block);
 
 // Repeated issue bodies share values defined outside the loop. Account for
 // those captures once, rather than multiplying the unrelated kernel peak.

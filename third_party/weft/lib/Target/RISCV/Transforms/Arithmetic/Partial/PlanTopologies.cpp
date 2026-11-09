@@ -1375,13 +1375,14 @@ public:
             return parts && *parts == 1 ? std::optional<int64_t>(0)
                                         : std::nullopt;
           };
+          auto dotOutput = mlir::dyn_cast<riscv::ValueType>(contribution.dot.getResult().getType());
           auto lhsPart = carryType
                              ? projectReplica(contribution.dot.getLhs().getType(),
-                                              carryType, outputPart)
+                                              dotOutput, outputPart)
                              : singletonPart(contribution.dot.getLhs().getType());
           auto rhsPart = carryType
                              ? projectReplica(contribution.dot.getRhs().getType(),
-                                              carryType, outputPart)
+                                              dotOutput, outputPart)
                              : singletonPart(contribution.dot.getRhs().getType());
           auto scaleType =
               mlir::dyn_cast<riscv::ValueType>(contribution.scale.getType());

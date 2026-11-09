@@ -23,6 +23,11 @@ source 的 `new/materialize` birth 在变换期间保持各自身份，不能因
 规则坐标供给通过共同整数范围证明穿过数值不变的 cast/widen/narrow，不能穿过可能回绕
 或饱和的转换。相同 shape 的坐标重命名按位置映射；完整 row-major affine ordinal 的
 split/merge 重新计算结果轴 stride。其它 mixed-radix 表达保持未证明，不能只按轴名重构。
+同一 iota 经已证明保值的整数转换供给多个物理布局时，各消费者可以在自己的布局中
+重建这条纯坐标链，并保留原转换；共享整数转换不要求先生成向量坐标再逐项提取。
+这项有界重物化不穿过数值 payload、读取快照或 state/stage 的 birth。
+整数 cast 物理化为 narrow 时，`rounding="none"` 表示没有浮点舍入；指令选择与发射
+消费同一查询，保留整数截断和有限位宽，不经 double 或浮点取整函数中转。
 已能证明规则 Encoding 窗口的传输在 dense value realization 之前物理化；
 其坐标只参与地址选择，失去使用后清除，不能先独立生成一份数值索引数组再尝试恢复供给。
 精确整数 mul/add 在 fragment 物化后、dense 数值程序展开前使用同一 MAC 选择器闭合，
@@ -50,6 +55,10 @@ pointwise 与 MMA 累加器复用实现，不因匿名局部轴而先 unpack 两
 即使普通位置轴获得了新名字。分析将当前轴映射回原 lookup 轴，使相同 contraction
 可以共同处理表项坐标和 payload；改变大小的后缀不凭轴名推定对应，动态前缀仍要求
 原身份。选择后的真实 gather、conversion 与资源继续由同一物理管线验证。
+索引的 EEW 比结果 SEW 更宽、不能覆盖消费者的整片 lane 域时，普通 lookup/gather
+沿索引已有的合法 issue 分解生成结果，再以显式 conversion 接回消费者布局。
+已证明的整表项供给仍优先保留 entry/payload 关系；完整索引的保值 unsigned
+扩宽不打断该证明。任何实际索引 EMUL 都必须属于目标的合法域。
 每个 kernel 唯一的 root domain 是结构锚点；即使普通 Tensor 程序没有子 Level，
 它也不作为无使用的纯数值删除。目标转换消费该锚点，不产生运行时工作。
 完整、静态有效域上的零坐标标量投影消去纯 broadcast/extract 往返；相同坐标的
@@ -81,6 +90,8 @@ RISC-V 适配层只描述物理操作的数值含义；layout conversion 不改�
 物理 splat 保留标量范围；masked negate 交由共同分析求原值与取负值的并集。
 分析在扩展位宽内计算取负，若结果可能跨过机器类型边界则退回完整类型域，
 不能用对 signed-min 无效的绝对值证明允许更多窄累加。
+物理 `select` 将两条数值分支交给同一整数分析求并集；reshape 只改变坐标排列，
+沿输入保留数值范围。未知分支仍返回完整类型域，不由其条件猜测更窄的区间。
 
 物理标量常量实现 MLIR `ConstantLike` 与 constant materializer。整数 cast 和比较
 通过标准 folding 接口计算相同位宽的 APInt 结果，保留符号扩展、截断回绕和比较的
@@ -223,6 +234,7 @@ ConvertWeftToRISCV
 → LowerRISCVComposites
 → RetainRISCVFragmentAccumulators
 → PropagateRISCVConsumerLayouts
+→ ScheduleRISCVLocalSupplies
 → MaterializeRISCVValuePrograms
 → MaterializeRISCVPrograms
 → VectorizeRISCVRecordLoops
@@ -244,6 +256,8 @@ ConvertWeftToRISCV
 → MaterializeRISCVLocalProjections
 → EliminateDeadRISCVLayouts
 → PropagateRISCVConsumerLayouts
+→ ScheduleRISCVLocalSupplies
+→ MaterializeRISCVValuePrograms
 → CanonicalizeRISCVLayouts
 → PlanRISCVMemory
 → SelectRISCVMemoryByteProjections
@@ -310,6 +324,21 @@ use 数量的 rematerialization；资源闭合后的清理不能替代这个位�
 完整 fragment 与其 consumer layout 在 Value program 的局部存储决策之前先闭合一次，
 避免将本可驻留的 accumulator 与 pointwise 链提前拆成数组。后续 materialization 新产生的
 fragment 仍经过相同 passes；整数 MAC 保留在访存关系确定之后选择。
+
+whole-value 物化前复用 `ScheduleRISCVLocalSupplies` 缩短同 block 的单消费者寄存器供给。
+转换、逐元素算术、已选择的读取和数值投影可移到唯一消费者之前；不跨 region、birth、
+write 或未知 effect，读取保持原存储 epoch。依消费者逆序遍历已有 SSA，逐次重算真实
+vector/fragment 峰值和共同 SSA 驻留成本，只在驻留成本下降且不增加峰值时保留移动；
+中间程序可以仍超预算，由后续资源 pass
+闭合。该过程不复制计算或读取，不改变作者 Level、数值分组或布局。
+资源查询按共享 storage identity 排除当前操作数及其别名，不把同一寄存器再次计作外围驻留。
+producer admission 使用每个操作自己执行位置的活跃值，不能将 sink 位置才产生的值
+收费到前面的操作；候选完整供给与最终资源判断继续使用共同分析。
+
+完整私有快照恢复到 replica-grouped 寄存器消费者时，先恢复未分组的普通 RVV
+carrier，再通过显式 `lane_repack` 恢复分组；完整坐标映射、VL、LMUL 与临时寄存器
+经过同一 layout/repack 查询验证。dense producer 和 ordinary Value materializer
+共用这个 reload 实现；不能直接将 local load 标记成分组寄存器表示。
 
 内部 RISC-V pipeline 可在这次清理、consumer propagation 与 `CanonicalizeRISCVLayouts`
 之前观察同一层 Physical IR。module 的 `weft.riscv.layout_input` 保存尚未消费的
@@ -439,6 +468,9 @@ encoded Record capture 明确传递原读取的指针、byte strides、origins �
 取得实际 extent；不能要求源码为完整轴另写一个 Level。源区间和输入值的轴、shape、
 Encoding 及原读取关系由 verifier 核对。pack 的 payload 继续消费已保存的输入值；
 descriptor 只提供范围，不引入一次新读取或改变 stage 的 birth/handoff。
+局部 pack 判断归约轴供给时，穿过同一程序的纯、无区域字段解码与转换链，
+继续追踪原快照身份。按 record 内 lane 归约的消费者保留每条记录连续的字节，
+不能因 payload 经过中心化算术就被误选为面向输出轴的 byte interleave。
 可写 capture 只有在独立 captures 和全部真实访存都被证明不重叠时才标记 `restrict`。
 同一 allocation 上的不同指针参数不按同源关系合并；未知地址或 effects 阻止该限定。
 final verifier 重算同一证明，terminal 只拼写已冻结的限定。
@@ -608,6 +640,9 @@ load 到每个 consumer 都处于同一 read epoch，包括重复子区域中 co
 
 Encoded stage 同样遵守原读取快照。连续完整 record 区域可以具有多个轴和动态行长；
 `LocalSize`、allocation 和原 load 的 snapshot edge 明确保存实际字节数及所有权。
+reduction-lane 消费者要求连续 record 时，逐 record 的原始布局无需 interleave。若共享
+存储分析证明全部观察处于原 read epoch，则保留 staged descriptor，不为同一字节布局
+增加一次 allocation 和整块复制；存在干扰写入时仍在原读取点形成完整快照。
 对完整 ABI 内存区间的 `storage_disjoint` 检查可以证明当前调用没有干扰写入：此时
 同一个 physical load 借用原 descriptor；否则在原读取点复制完整 record 区域。
 这个选择不专门化调用地址、不改变参数的 alias 合同，也不生成另一份 kernel。
@@ -805,6 +840,9 @@ reuse 证明，不由该窄合同猜测。
 
 在 fragment accumulator retention 与 issue grouping 之后，从已选 `ime_unpack` 提取保序
 RVV 候选；沿普通 cast、pointwise、new 与 scf.for init/iter_arg/yield 的同域 use-def 传播。
+保序、同 shape 的显式轴改名也传递候选布局：每条边保存其对应域，逐位置映射物理 factors；
+同 shape 而没有该关系的独立轴不合并。final verifier 使用共同 carrier-coordinate 证明检查
+成组 reshape，不能把转置或重分块当作无搬运的改名。
 值按 SSA identity 去重，一个 component 至多 128 个值、1024 条 use edge，越界明确报告。
 每次 pass 对一个 kernel 至多比较两个完整物理候选；不激活 generic ValueType 的 IME carrier，也不换作者树。
 供应侧可以穿过只省略单位物理轴的 rank-subdomain cast/pointwise，保持其原有 shape 与 axis，
@@ -830,6 +868,9 @@ row SSA 的广播单独物化并共享，后续 fragment pointwise 消费该已�
 明确的 local leaf，以保持其物理生成位置，不改变 canonical state birth。
 同一供应共享关系也适用于单行完整 carrier。资源闭合前，纯 `lane_repack` 与返回完全相同
 type 的逆转换可以消除；这不授权穿过已选 coordinate exchange 任意重建 producer。
+行缩放的构造前沿包含已完成的结果 parts；局部 scratch 只计超出完整结果驻留的额外需求，
+通用资源分析另行计算输入、完整结果和其它活跃值，避免重复收费。Value materialization
+检查下游 consumer 时，在该 consumer 的真实位置重建预算，不套用上游 producer 的活跃集合。
 
 单行 fragment 的有效 atom 小于一个硬件寄存器、完整 row 大于一个寄存器时，handoff
 可先以独立的小范围 slide 组成完整寄存器，再通过已验证的 `vset` 映射合并。自然 atom、
@@ -1431,6 +1472,11 @@ part 坐标提取 lane 0；这不改变 layout propagation 对普通 singleton �
 effect 的区间；相同范围共享 SSA，连续子范围用已有 `rvv_issue_slice`，不增加更宽读取。
 子范围只缩小最外侧的有效 lane axis，并保持其余坐标与 validity。跨动态 issue、其它 memory
 节点与无法闭合的范围不由这条规则处理；完整资源分析仍核算共享后的存活区间。
+最终 physical CSE 后，同一 block 内的完整一维 indexed-entry 读取沿用该 effect
+区间证明共享原快照。source、字节偏移、stride、payload、access、leaf 和有效域必须相同；
+结果轴名不同时，以保序 reshape 连接消费者。偏移的标量 Binary 使用 MLIR 的操作等价
+判断，只忽略诊断属性和位置，保留所有语义 properties 及精确 SSA operands。
+共享不跨越写入、未知 effects 或作者 birth，之后重新计算完整资源存活区间。
 
 同一 block 内两个完整一维 natural strided window，若 field owner、Encoding、type 与坐标
 相同，步长都是 2、静态 base 相差 1，且每个 time part 覆盖相同的相邻交错区间，可以选择
@@ -1527,6 +1573,9 @@ replica；不能因展开时的 SSA 拼写不同而重选 topology。
 多个独立输出 replica 的 Level-scaled partial 保留一个向量合并结果，再做最终标量提取，
 避免每条 scale 链分别提取后在标量端重建同宽加法。已有 add-tree pass 仍可在向量内部
 缩短 MAC 依赖链；整数宽度、各项 scale、原浮点更新边界与完整资源核算保持不变。
+单消费者、同 shape/元素类型/replica 排列的 scalar positional reshape 只重命名 dot
+结果的坐标。partial 匹配穿过这条已证明的表示边，按 dot 的原坐标投影操作数，并按
+原 carry 坐标消费 scale；生成最终 carry 后删除已替代的 rename，不改变作者的状态轴。
 
 nested scale 与 indexed operand 共用具体 field 供应时，planner 保留表示转换路线，
 不能仅因 replica 数较多就选择会重新读取字段的 scalar rematerialization。deferred scale

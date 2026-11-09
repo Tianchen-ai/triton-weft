@@ -2,12 +2,17 @@
 #define WEFT_DIALECT_RISCV_IR_NUMERICS_H
 
 #include "mlir/IR/Value.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/StringRef.h"
 #include <limits>
 
 namespace weft::riscv {
 class UnaryOp;
 class RVVWidenDotOp;
+
+// Physical integer truncation created from a cast spells an absent rounding
+// contract as "none". Selection and emission must interpret that identically.
+mlir::StringAttr conversionRounding(mlir::Operation *operation);
 
 // Rectangular validity belongs to axes. A partial free/output axis does not
 // require partial reduction lanes when both saved reduction domains are full.
