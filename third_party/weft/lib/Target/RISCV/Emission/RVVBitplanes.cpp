@@ -451,7 +451,7 @@ mlir::LogicalResult Emitter::compileRVVSignedBitmaskReduce(
   if (instruction == "rvv.signed-bitmask-reduce.complement") {
     std::string signedValue = fresh("signed_bitmask_value");
     line(vectorType(operation.getData()) + " " + signedValue + " = __riscv_vnot_v_" +
-         suffix + "_tumu(" + mask.parts.front() + ", " + data.parts.front() + ", " + data.parts.front() +
+         suffix + "_mu(" + mask.parts.front() + ", " + data.parts.front() + ", " + data.parts.front() +
          ", " + vl + ");");
     std::string total = fresh("signed_bitmask_total");
     line("vint16m1_t " + total + " = __riscv_vwredsum_vs_" + suffix +
