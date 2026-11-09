@@ -1159,6 +1159,9 @@ physical origins 与活动范围必须可证明。子 point 的全局 base 减�
 动态 scalar index 跨寄存器 replicas、无法选择直接寄存器提取时，使用同一数值快照的
 `local_view → slice → load`。有定义点的 SSA 在其 producer 后建立一次副本，后续提取
 复用支配的私有 descriptor，不在每个 lane 重存完整 Value，也不重新读取源 View。
+跨层复用只越过已证明非空的静态循环，不跨越条件 region 或未知次数的循环。
+静态次数查询复用共同 `IntegerFacts` 和 MLIR 整数范围接口，识别尚未常量折叠的
+单值边界表达式；非单值仍保持动态。新副本的生命周期和局部资源由后续 pass 重新闭合。
 
 scalar carrier 若保留非单位 lane window，表示该窗口内已证明一致的标量供应；
 time/replica parts 是有限标量 tuple，不能仅因 time factor 大于一就建立局部数组。
