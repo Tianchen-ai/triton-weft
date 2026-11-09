@@ -484,6 +484,10 @@ final verifier 要求显式的合法二次幂对齐；C emitter 只输出已选 
 子循环视为保留；其外层遍历不重复添加 padding。静态小子循环可能在原生代码生成时完全展开，
 外层仍保留自己的对齐决定。四次是有限放置策略的边界，不是 ISA 事实或展开正确性的前提。
 该策略不假定更大边界总是更快，也不根据 kernel 名称选择代码偏移。
+原生展开的驻留查询只检查有限的 1/2/4 份候选，在隔离的分析副本中复用 MLIR SCF
+展开工具，按真实 carry 与最后使用点重算 SSA 峰值，不将整个峰值简单乘以展开次数。
+仅由该循环接管的 init 存储与 carry 合并核算；仍有其它观察者的 init 继续驻留。
+查询不改写正式循环，实际机器调度与寄存器分配继续由原生工具链完成。
 原生工具链显式配置 `-falign-loops` 或 `-fno-align-loops` 时，backend 将循环放置交还
 该配置，Physical kernel 保存 `native_loop_alignment=0`，不再用 statement attribute
 覆盖用户的选择。其它情况保留 32-byte 策略；checkpoint 重放继承同一放置决定。
