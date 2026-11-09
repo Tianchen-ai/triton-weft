@@ -1,4 +1,5 @@
 #include "Weft/Analysis/PhysicalDependence.h"
+#include "Weft/Analysis/IntegerFacts.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -28,10 +29,23 @@ SmallVector<Value> weft::analysis::externalOperands(Operation *operation) {
 
 std::optional<uint64_t> weft::analysis::staticTripCount(Operation *operation) {
   auto loop = dyn_cast<scf::ForOp>(operation);
+  if (!loop) return {};
+  auto constant = [&](Value value, APInt &result, bool isUnsigned) {
+    if (matchPattern(value, m_ConstantInt(&result))) return true;
+    // Bounds can still be exact before canonicalization, e.g. an encoded
+    // record extent divided by its group extent. Reuse the bounded integer
+    // proof and MLIR range interfaces; a non-singleton remains dynamic.
+    auto type = IntegerType::get(value.getContext(), 64,
+        isUnsigned ? IntegerType::Unsigned : IntegerType::Signed);
+    auto range = integerRange(value, type);
+    if (!range || range->minimum != range->maximum) return false;
+    result = range->minimum.extOrTrunc(64);
+    return true;
+  };
   APInt lower, upper, step;
-  if (!loop || !matchPattern(loop.getLowerBound(), m_ConstantInt(&lower)) ||
-      !matchPattern(loop.getUpperBound(), m_ConstantInt(&upper)) ||
-      !matchPattern(loop.getStep(), m_ConstantInt(&step)) || !step.isStrictlyPositive() ||
+  if (!constant(loop.getLowerBound(), lower, loop.getUnsignedCmp()) ||
+      !constant(loop.getUpperBound(), upper, loop.getUnsignedCmp()) ||
+      !constant(loop.getStep(), step, false) || !step.isStrictlyPositive() ||
       lower.getBitWidth() > 64 || upper.getBitWidth() > 64 || step.getBitWidth() > 64)
     return {};
   lower = loop.getUnsignedCmp() ? lower.zext(128) : lower.sext(128);

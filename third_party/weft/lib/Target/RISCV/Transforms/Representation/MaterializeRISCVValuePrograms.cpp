@@ -5,6 +5,7 @@
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "Weft/Dialect/RISCV/IR/DenseBounds.h"
 #include "Weft/Dialect/RISCV/IR/Stream.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 #include "Transforms/Representation/DenseValuePrograms.h"
 #include "Transforms/Contraction/DenseProducerGraph.h"
 #include "Transforms/Contraction/DenseIssue.h"
@@ -719,17 +720,41 @@ private:
     auto stage = dyn_cast<riscv::RegisterMaterializeOp>(anchor);
     const bool preservesStage = stage && stage.getResult() == value &&
         stage.getRealization() != "physical-share";
-    auto storage = allocate(type, anchor, preservesStage);
+    // Freeze an already computed SSA value once in its defining scope. Placing
+    // the copy at a nested consumer replays every store on each traversal even
+    // though the numerical value is loop invariant. This moves no source read
+    // or numerical producer; final resource analysis accounts for the retained
+    // private storage. Only cross proved nonempty static loops: an unknown or
+    // conditional traversal must not acquire unconditional copy work. Block
+    // arguments keep their current scoped placement.
+    OpBuilder::InsertionGuard insertion(b);
+    Operation *owner = anchor;
+    if (Operation *producer = value.getDefiningOp()) {
+      Operation *position = consumer ? consumer : anchor;
+      bool repeated = false, closed = true;
+      while (position->getBlock() != producer->getBlock()) {
+        auto loop = dyn_cast_or_null<scf::ForOp>(position->getParentOp());
+        auto count = loop ? analysis::staticTripCount(loop) : std::nullopt;
+        if (!count || *count == 0) { closed = false; break; }
+        repeated |= *count > 1;
+        position = loop;
+      }
+      if (closed && repeated) {
+        b.setInsertionPointAfter(producer);
+        owner = producer;
+      }
+    }
+    auto storage = allocate(type, owner, preservesStage);
     if (failed(storage)) return failure();
-    auto memory = view(*storage, anchor);
+    auto memory = view(*storage, owner);
     if (failed(memory)) return failure();
     auto m = cast<riscv::MemDescType>(memory->getType());
     auto sliceType = riscv::MemDescType::get(b.getContext(), m.getEncoding(), m.getShape(), m.getAxisIds(),
         m.getStrides(), m.getOrigins(), m.getAlignment(), "slice", m.getAccess(), m.getAliasSet(),
         m.getLayoutIdentity(), m.getStorageBits(), m.getElements(), m.getInterleaveRows());
-    auto slice = riscv::SliceOp::create(b, anchor->getLoc(), sliceType, *memory, ValueRange{},
+    auto slice = riscv::SliceOp::create(b, owner->getLoc(), sliceType, *memory, ValueRange{},
         b.getArrayAttr(SmallVector<Attribute>(type.getShape().size(), b.getStringAttr("all"))));
-    riscv::StoreOp::create(b, anchor->getLoc(), value, slice, riscv_internal::unassignedAccess(b),
+    riscv::StoreOp::create(b, owner->getLoc(), value, slice, riscv_internal::unassignedAccess(b),
         riscv_internal::unselectedLeaf(b), riscv::FieldStorePlanAttr());
     numericStorage[value] = *memory;
     return *memory;
