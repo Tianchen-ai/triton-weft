@@ -20,6 +20,10 @@ Canonical 程序在同一进程通过 native bindings 建立和验证，不先�
 不调用外部 Weft 编译器。编译库使用 Triton 选择的 LLVM/MLIR SDK。
 Clang 子进程属于 C→native 编译阶段；已加载 kernel 的执行不启动编译器。
 `CompiledKernel.asm` 提供 `weftir`、`riscvir`、`c` 和 `so`。
+本机目标发现同时保留所选 CPU 集合的共同数据缓存几何，沿 `CPUTarget.data_cache`
+传入已有 `data_cache` 物理配置及其缓存身份。未知或不一致时保持为空，不推定缓存容量；
+显式 AOT/物理配置仍可声明自己的几何。它影响 panel、供给与局部存储放置，
+不改变 ISA 执行许可，也不由 runtime 重新选择物理实现。
 
 [x86 后端](x86.md)共用前端、JIT、缓存与原生运行组件，其物理与代码生成阶段为
 `x86ir`、`llir`、`so`。目标选择为 `x86_64/x86-64-v3` 或 `x86-64-v4`，ABI 为 `sysv`，

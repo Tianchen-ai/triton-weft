@@ -55,7 +55,8 @@ def _native_target(facts):
             raise ValueError("multiple matrix extensions need an explicit compilation target")
         if supported:
             selected = supported[0]
-    return CPUTarget("weft", architecture, march, native["abi"], native["vlen_bits"], selected)
+    return CPUTarget("weft", architecture, march, native["abi"], native["vlen_bits"], selected,
+                     facts.get("data_cache"))
 
 
 def target(profile="native"):

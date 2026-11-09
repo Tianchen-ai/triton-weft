@@ -94,10 +94,16 @@ bool riscvTargetCapabilitiesJSON(const RISCVTargetProfile &profile,
   llvm::StringSet<> seen;
   for (const auto &fragment : profile.fragmentCapabilities)
     if (seen.insert(fragment.extension).second) enabled.push_back(fragment.extension);
+  llvm::json::Value dataCache(nullptr);
+  if (profile.dataCache) {
+    const auto &cache = *profile.dataCache;
+    dataCache = llvm::json::Object{{"size_bytes", cache.sizeBytes},
+        {"line_bytes", cache.lineBytes}, {"ways", cache.ways}, {"sets", cache.sets}};
+  }
   result = llvm::json::Object{{"kind", "weft-target-capabilities"},
       {"target", llvm::json::Object{{"march", profile.march}, {"abi", profile.abi},
           {"xlen", profile.xlen}, {"vlen_bits", profile.vlenBits}}},
-      {"isa_extensions", std::move(isa)},
+      {"isa_extensions", std::move(isa)}, {"data_cache", std::move(dataCache)},
       {"capabilities", llvm::json::Object{
           {"rvv", profile.hasRVV}, {"scalar_f32", profile.hasF}, {"scalar_f64", profile.hasD},
           {"scalar_f16_arithmetic", profile.hasScalarF16},
