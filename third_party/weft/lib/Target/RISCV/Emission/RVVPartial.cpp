@@ -528,7 +528,8 @@ Emitter::compileRVVPartialReduce(riscv::RVVPartialReduceOp operation) {
   llvm::StringRef instruction = instructionOf(operation.getOperation());
   if (instruction != "rvv.partial-reduce.widen" &&
       instruction != "rvv.partial-reduce" &&
-      instruction != "rvv.partial-reduce.widen.shared-seed")
+      instruction != "rvv.partial-reduce.widen.shared-seed" &&
+      instruction != "rvv.partial-reduce.widen.shared-seed.consumed")
     return fail(operation, "RVV partial reduction has no exact selected leaf");
   Binding input = bindings.lookup(operation.getInput());
   auto inputType = operation.getInput().getType();
@@ -539,33 +540,59 @@ Emitter::compileRVVPartialReduce(riscv::RVVPartialReduceOp operation) {
       resultType.getSlots() != inputType.getSlots())
     return fail(operation,
                 "RVV partial reduction has no complete typed input set");
-  if (instruction == "rvv.partial-reduce.widen.shared-seed") {
+  if (instruction == "rvv.partial-reduce.widen.shared-seed" ||
+      instruction == "rvv.partial-reduce.widen.shared-seed.consumed") {
+    const bool consumed = instruction.ends_with(".consumed");
     const std::string seed = fresh("partial_reduce_seed");
     const std::string vl = std::to_string(physicalLanesFor(inputPartial));
     line("vint32m1_t " + seed + ";");
     Binding result;
     result.kind = Binding::Kind::PartialSet;
+    llvm::SmallVector<std::string> consumedSlots;
     for (size_t slot = 0; slot < input.parts.size(); ++slot) {
       result.parts.push_back(fresh("partial_reduced"));
-      line("vint32m1_t " + result.parts.back() + ";");
+      if (consumed) {
+        consumedSlots.push_back(fresh("partial_consumed"));
+        line(vectorTypeFor(inputPartial) + " " + consumedSlots.back() + " = " + input.parts[slot] + ";");
+      } else line("vint32m1_t " + result.parts.back() + ";");
     }
     line("__asm__(");
     line("  \"vsetivli zero, 1, e32, m1, ta, ma\\n\\t\"");
     line("  \"vmv.s.x %[seed], zero\\n\\t\"");
     line("  \"vsetvli zero, %[vl], e16, " +
          lmulSpelling(inputPartial.getLayout().getLmulEighths()) + ", ta, ma\\n\\t\"");
-    for (size_t slot = 0; slot < input.parts.size(); ++slot)
-      line("  \"vwredsum.vs %[out" + std::to_string(slot) + "], %[in" +
-           std::to_string(slot) + "], %[seed]\\n\\t\"");
+    for (size_t slot = 0; slot < input.parts.size(); ++slot) {
+      std::string out = (consumed ? "io" : "out") + std::to_string(slot);
+      std::string in = (consumed ? "io" : "in") + std::to_string(slot);
+      line("  \"vwredsum.vs %[" + out + "], %[" + in + "], %[seed]\\n\\t\"");
+    }
     std::string outputs = "  : [seed] \"=&vr\"(" + seed + ")";
     std::string inputs = "  : [vl] \"r\"((size_t)" + vl + ")";
     for (size_t slot = 0; slot < input.parts.size(); ++slot) {
-      outputs += ", [out" + std::to_string(slot) + "] \"=&vr\"(" + result.parts[slot] + ")";
-      inputs += ", [in" + std::to_string(slot) + "] \"vr\"(" + input.parts[slot] + ")";
+      if (consumed)
+        outputs += ", [io" + std::to_string(slot) + "] \"+&vr\"(" + consumedSlots[slot] + ")";
+      else {
+        outputs += ", [out" + std::to_string(slot) + "] \"=&vr\"(" + result.parts[slot] + ")";
+        inputs += ", [in" + std::to_string(slot) + "] \"vr\"(" + input.parts[slot] + ")";
+      }
     }
     line(outputs);
     line(inputs);
     line("  : \"vl\", \"vtype\");");
+    if (consumed) {
+      const std::string lmul = lmulSpelling(inputPartial.getLayout().getLmulEighths());
+      for (size_t slot = 0; slot < input.parts.size(); ++slot) {
+        std::string scalar;
+        if (inputPartial.getLayout().getLmulEighths() < 8) {
+          scalar = "__riscv_vreinterpret_v_i16m1_i32m1(__riscv_vlmul_ext_v_i16" +
+              lmul + "_i16m1(" + consumedSlots[slot] + "))";
+        } else {
+          scalar = "__riscv_vreinterpret_v_i16" + lmul + "_i32" + lmul + "(" + consumedSlots[slot] + ")";
+          if (lmul != "m1") scalar = "__riscv_vget_v_i32" + lmul + "_i32m1(" + scalar + ", 0)";
+        }
+        line("vint32m1_t " + result.parts[slot] + " = " + scalar + ";");
+      }
+    }
     bindings[operation.getResult()] = std::move(result);
     return mlir::success();
   }

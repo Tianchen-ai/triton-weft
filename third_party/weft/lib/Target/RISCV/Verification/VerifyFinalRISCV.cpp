@@ -226,6 +226,15 @@ public:
     llvm::DenseSet<std::pair<int64_t, int64_t>> partialBirths;
     getOperation().walk([&](mlir::Operation *operation) {
       if (auto helper = mlir::dyn_cast<riscv::HelperOp>(operation)) {
+        if (helper.getNoinline()) {
+          auto alignment = helper->getAttrOfType<mlir::IntegerAttr>("native_entry_alignment");
+          const int64_t bytes = alignment && alignment.getType().isInteger(64)
+              ? alignment.getInt() : 0;
+          if (bytes < 2 || bytes > 4096 || (bytes & (bytes - 1))) {
+            helper.emitError("native helper requires a selected power-of-two code alignment in [2, 4096]");
+            failed = true;
+          }
+        }
         auto restricted = helper->getAttrOfType<mlir::DenseI64ArrayAttr>("native_restrict_captures");
         if (!restricted || restricted.asArrayRef() != llvm::ArrayRef<int64_t>(riscv::helperRestrictCaptures(helper))) {
           helper.emitError("native helper pointer qualifiers require complete capture and payload disjointness proofs");
@@ -586,7 +595,9 @@ public:
             elementBits % 8 == 0 &&
             access.getAlignment() < static_cast<int64_t>(elementBits / 8) &&
             !llvm::all_of(field.getResult().getUsers(), [](mlir::Operation *user) {
-              return mlir::isa<riscv::FieldReadOp>(user);
+              auto replica = mlir::dyn_cast<riscv::RVVReplicaStorageLoadOp>(user);
+              return mlir::isa<riscv::FieldReadOp>(user) ||
+                  (replica && replica.getPlan().getKind() == "interleaved_natural");
             })) {
           field.emitError(
               "final natural RVV field requires a typed byte-load operation for its proven alignment");

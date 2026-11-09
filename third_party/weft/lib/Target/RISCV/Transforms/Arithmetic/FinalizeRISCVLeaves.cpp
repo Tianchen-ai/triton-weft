@@ -607,6 +607,27 @@ void selectReducedScalarScales(mlir::ModuleOp module) {
     llvm::errs() << "weft-scalar-reduced-scale: selected=" << selected << '\n';
 }
 
+void selectAffineLayeredWindows(mlir::ModuleOp module) {
+  mlir::Builder builder(module.getContext());
+  module.walk([&](riscv::RVVStorageWindowOp window) {
+    auto field = window.getField().getDefiningOp<riscv::FieldOp>();
+    auto access = window.getAccess();
+    auto encoding = field ? mlir::dyn_cast<kernel::EncodingType>(
+        riscv_internal::logicalElement(field.getOwner().getType())) : kernel::EncodingType();
+    if (!encoding || window.getPlan().getKind() != "layered" ||
+        access.getFieldChunkBytes() != 1 ||
+        access.getMapping() != "grouped_layered")
+      return;
+    const int64_t rows = riscv_internal::interleaveRows(field, encoding);
+    if (rows <= 1) return;
+    auto old = window.getLeaf();
+    window.setLeafAttr(riscv_internal::leaf(builder, "rvv", "storage-window",
+        "rvv.storage-window.layered.strided", "rvv.storage-window.layered.strided",
+        old.getOperandGroups(), old.getResultGroups(), 0, old.getFragmentGroups(),
+        "none", old.getTail(), {rows}, old.getLocalBytes()));
+  });
+}
+
 void selectSharedReductionSeeds(mlir::ModuleOp module) {
   mlir::Builder builder(module.getContext());
   module.walk([&](riscv::RVVPartialReduceOp reduce) {
@@ -614,21 +635,28 @@ void selectSharedReductionSeeds(mlir::ModuleOp module) {
     auto partial = input.getPartialType();
     auto kernel = reduce->getParentOfType<riscv::KernelOp>();
     auto lanes = riscv::rvvLaneCount(partial);
+    const bool consumed = reduce.getInput().hasOneUse() && lanes && *lanes >= 2;
+    const int64_t scratch = consumed ? 1 :
+        1 + reduce.getResult().getType().getResourceGroups();
     if (!kernel || reduce.getLeaf().getInstruction() != "rvv.partial-reduce.widen" ||
         input.getSlots() < 2 || !lanes || *lanes <= 0 ||
         partial.getShape().size() != 1 || partial.getShape()[0] != *lanes ||
         partial.getLayout().getValidity() != "full" ||
-        input.getResourceGroups() + reduce.getResult().getType().getResourceGroups() + 1 >
+        input.getResourceGroups() + scratch >
             kernel.getTarget().getVectorRegisters())
       return;
     // One local group uses one seed and one VTYPE setting. A terminal asm
     // sequence keeps that selected resource contract intact through Clang;
     // independent intrinsic calls can duplicate both for every slot.
-    // Early-clobber outputs coexist with every input at the instruction issue.
+    // Consumed full-register slots can hold their own singleton results.
+    // Tied operands keep each result separate from not-yet-read input slots.
     auto old = reduce.getLeaf();
+    llvm::StringRef instruction = consumed
+        ? "rvv.partial-reduce.widen.shared-seed.consumed"
+        : "rvv.partial-reduce.widen.shared-seed";
     reduce.setLeafAttr(riscv_internal::leaf(builder, "rvv", "partial-reduce",
-        "rvv.partial-reduce.widen.shared-seed", "rvv.partial-reduce.widen.shared-seed",
-        old.getOperandGroups(), old.getResultGroups(), 1 + old.getResultGroups(), old.getFragmentGroups(),
+        instruction, instruction,
+        old.getOperandGroups(), old.getResultGroups(), scratch, old.getFragmentGroups(),
         "none", "exact", old.getParameters().asArrayRef(), old.getLocalBytes()));
   });
 }
@@ -1153,6 +1181,7 @@ public:
     }
     selectUnsignedNarrowShifts(getOperation());
     selectReducedScalarScales(getOperation());
+    selectAffineLayeredWindows(getOperation());
     selectSharedReductionSeeds(getOperation());
     if (mlir::failed(riscv_internal::selectPredicateRegisters(getOperation()))) {
       signalPassFailure();

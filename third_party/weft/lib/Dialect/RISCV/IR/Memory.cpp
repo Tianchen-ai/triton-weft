@@ -873,6 +873,14 @@ bool weft::riscv::haveDisjointLocalStorage(Value lhs, Value rhs) {
 
 SmallVector<int64_t> weft::riscv::helperRestrictCaptures(HelperOp helper) {
   SmallVector<int64_t> result;
+  auto descriptorProjectionOf = [](Value value, Value capture) {
+    while (value != capture) {
+      if (auto slice = value.getDefiningOp<SliceOp>()) value = slice.getBase();
+      else if (auto subview = value.getDefiningOp<SubviewOp>()) value = subview.getBase();
+      else return false;
+    }
+    return true;
+  };
   auto basedOn = [](Value value, Value capture) {
     SmallVector<Value> pending{value};
     llvm::DenseSet<Value> seen;
@@ -892,7 +900,11 @@ SmallVector<int64_t> weft::riscv::helperRestrictCaptures(HelperOp helper) {
     if (!memory || memory.getAccess() == "read") continue;
     bool independent = true, written = false;
     for (Value other : helper.getCaptures())
-      if (other != value && addressable(other.getType()) && mayAliasStorageAt(value, other, helper))
+      // Slice descriptors borrow the captured base pointer; they are not a
+      // second native pointer argument. Distinct pointer captures still need
+      // the ordinary disjointness proof, even when their storage may coincide.
+      if (other != value && addressable(other.getType()) &&
+          !descriptorProjectionOf(other, value) && mayAliasStorageAt(value, other, helper))
         independent = false;
     if (!independent) continue;
     helper.getBody().walk([&](Operation *operation) {

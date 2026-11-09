@@ -1675,6 +1675,10 @@ Binding Emitter::emitInterleavedField(mlir::Value result,
   if (fieldCoordinate)
     logicalIndex = "((" + logicalIndex + ") + " + std::to_string(fieldCoordinate) + ")";
   const bool lanesInRecord = laneAxisFor(result) != owner.interleaveRowAxis;
+  const bool byteInterleavedStride = lanesInRecord &&
+      fieldBinding.field.useAccess.getForm() == "strided" &&
+      field->access.getMapping() == "natural" && logicalWidth == 8 &&
+      field->access.getFieldChunkBytes() == 1;
   if (lanesInRecord &&
       (field->logicalRank != 1 ||
        laneAxisFor(result) != resultLayout.getAxisIds().asArrayRef().back() ||
@@ -1688,8 +1692,9 @@ Binding Emitter::emitInterleavedField(mlir::Value result,
                                           ? partition
                                           : field->access.getFieldChunkBytes() / std::max<int64_t>(1, logicalWidth / 8))
                                    : std::min(field->access.getFieldChunkBytes(), field->access.getLayerSize());
-    if (physicalLanes(result) > contiguous || partition % physicalLanes(result) ||
-        contiguous % physicalLanes(result))
+    if ((!byteInterleavedStride && (physicalLanes(result) > contiguous ||
+                                   contiguous % physicalLanes(result))) ||
+        partition % physicalLanes(result))
       return {};
   }
   const int64_t rawLMUL = *rawCarrier;
@@ -1743,7 +1748,8 @@ Binding Emitter::emitInterleavedField(mlir::Value result,
   }
   auto loadByte = [&](llvm::StringRef byte, llvm::StringRef prefix) {
     std::string loaded = fresh(prefix);
-    const int64_t stride = lanesInRecord ? 1 : field->access.getFieldChunkBytes();
+    const int64_t stride = byteInterleavedStride ? owner.interleaveRows :
+        lanesInRecord ? 1 : field->access.getFieldChunkBytes();
     line(rawType + " " + loaded + " = __riscv_vl" + (stride == 1 ? "e8_v_" : "se8_v_") +
          rawSuffix + "((const uint8_t *)" + fieldStorageAddress(owner, *field, byte, offset) +
          (stride == 1 ? "" : ", " + std::to_string(stride)) + ", " + vl + ");");

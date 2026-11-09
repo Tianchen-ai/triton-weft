@@ -27,6 +27,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     endif()
     install(DIRECTORY "${WEFT_CORE_SDK}/" DESTINATION ${WEFT_INSTALL_ROOT} USE_SOURCE_PERMISSIONS
       PATTERN "__pycache__" EXCLUDE PATTERN "_runtime*.so" EXCLUDE)
+    if(EXISTS "${WEFT_CORE_SDK}/bin/clang")
+      install(PROGRAMS "${WEFT_CORE_SDK}/bin/clang"
+        DESTINATION ${WEFT_INSTALL_ROOT}/bin)
+    endif()
     add_subdirectory(python)
     return()
   endif()

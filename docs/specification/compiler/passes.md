@@ -480,9 +480,11 @@ descriptor 只提供范围，不引入一次新读取或改变 stage 的 birth/h
 不能因 payload 经过中心化算术就被误选为面向输出轴的 byte interleave。
 可写 capture 只有在独立 captures 和全部真实访存都被证明不重叠时才标记 `restrict`。
 同一 allocation 上的不同指针参数不按同源关系合并；未知地址或 effects 阻止该限定。
+Slice/Subview capture 只保存已有 base 的坐标和范围，不作为第二个原生指针参数；
+其 base capture 的独立性检查仍包含所有实际指针参数和完整 payload 读写。
 final verifier 重算同一证明，terminal 只拼写已冻结的限定。
 
-同一收尾 pass 为原生 kernel 入口写入 `native_entry_alignment=32`。这是有界的代码放置
+同一收尾 pass 为原生 kernel 和 noinline helper 入口写入 `native_entry_alignment=32`。这是有界的代码放置
 策略，最多增加 30 bytes 对齐填充，不是 VLEN 或 cache-line 大小声明。它避免入口仅按
 压缩指令的两字节要求放置、使相同指令随链接器布局产生不稳定的取指表现。
 final verifier 要求显式的合法二次幂对齐；C emitter 只输出已选 `aligned` 属性。
@@ -1950,15 +1952,16 @@ validity 保持相同。不穿过改变类型的数值操作，不移动任何�
 其它 consumers 仍使用原值；后续 CSE 和资源分析处理重复供应及实际驻留。
 
 对同 block、单 use 的整数位字段拼接 `(low | (high << c)) ± bias`，先证明 `low` 是
-至多 `c` 个 unsigned bits 的值，且 `0 < c < SEW`。窄 unsigned 值的数值 widening 可以提供
-这项证明；未知位域不改写。所有参与运算的 vector type 相同，bias 与 multiplier 保持同一
+至多 `c` 个 unsigned bits 的值，且 `0 < c < SEW`。共同 `IntegerFacts` 分析沿实际
+数值转换提供非负值域证明；未知位域不改写。所有参与运算的 vector type 相同，bias 与 multiplier 保持同一
 元素宽度，不越过 region、write 或未知 effect。
 
 非重叠位域的 OR 等于同宽加法，因此 pass 形成真实的 `low ± bias` 与
 `rvv_integer_mac(high, 2^c, biased_low)`，以两条 RVV 指令代替 shift、OR、bias 三条指令。
 模算术保持包括 overflow 在内的相同整数结果；scalar 常量查询不穿过改变位宽的 cast。
-低位范围从数值 widening 的原始整数类型取得，不能因为结果已经扩展为 u8/u16 而丢失
-原有位宽证明。OR 结果到 bias 之间允许一个单 use、同布局同位宽的 signedness cast；
+低位范围保留数值 widening 的原始整数类型和后续 signedness 转换的实际值域，不能因为
+结果已经扩展为 u8/u16 而丢失原有位宽证明；可能回绕或出现负数时不能借用窄输入域。
+OR 结果到 bias 之间允许一个单 use、同布局同位宽的 signedness cast；
 此时在两个输入上显式保留该 bit-pattern reinterpret，再执行同宽模运算。改变位宽、
 坐标或布局的 cast 不属于这一关系。
 新增普通 binary 继续经过 operation selection 和 leaf finalization；MAC 的精度、布局与
