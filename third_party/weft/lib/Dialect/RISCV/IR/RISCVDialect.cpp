@@ -7884,6 +7884,35 @@ mlir::LogicalResult RVVWidenMultiplyOp::verify() {
           result.getLayout().getFragmentFactors() &&
       lhs.getLayout().getLocalFactors() == rhs.getLayout().getLocalFactors() &&
       lhs.getLayout().getLocalFactors() == result.getLayout().getLocalFactors();
+  auto mapsCoordinates = [&](ValueType operand) {
+    auto laneAxes = [](ValueType value) {
+      llvm::SmallVector<int64_t> axes;
+      for (auto [axis, lanes] : llvm::zip(value.getAxisIds().asArrayRef(),
+                                         value.getLayout().getLaneFactors().asArrayRef()))
+        if (lanes > 1) axes.push_back(axis);
+      return axes;
+    };
+    if (laneAxes(operand) != laneAxes(result)) return false;
+    for (auto [position, axis] : llvm::enumerate(result.getAxisIds().asArrayRef()))
+      if (!llvm::is_contained(operand.getAxisIds().asArrayRef(), axis) &&
+          result.getLayout().getLaneFactors()[position] != 1) return false;
+    for (auto [position, axis] : llvm::enumerate(operand.getAxisIds().asArrayRef())) {
+      auto found = llvm::find(result.getAxisIds().asArrayRef(), axis);
+      if (found == result.getAxisIds().asArrayRef().end()) return false;
+      size_t target = found - result.getAxisIds().asArrayRef().begin();
+      if (operand.getShape()[position] == 1 && result.getShape()[target] != 1) {
+        if (result.getLayout().getLaneFactors()[target] != 1) return false;
+      } else if (operand.getShape()[position] != result.getShape()[target] ||
+                 !sameAxisMapping(operand, position, result, target)) return false;
+    }
+    return operand.getLayout().getCarrier() == "rvv";
+  };
+  const bool broadcastCoordinates = result.getLayout().getCarrier() == "rvv" &&
+      mapsCoordinates(lhs) && mapsCoordinates(rhs) &&
+      llvm::all_of(result.getAxisIds().asArrayRef(), [&](int64_t axis) {
+        return llvm::is_contained(lhs.getAxisIds().asArrayRef(), axis) ||
+               llvm::is_contained(rhs.getAxisIds().asArrayRef(), axis);
+      });
   if (!kernel || !lhsElement || !rhsElement || !resultElement ||
       lhsElement.isSignless() || rhsElement.isSignless() ||
       resultElement.isSignless() || lhsElement.getWidth() > 16 ||
@@ -7891,7 +7920,7 @@ mlir::LogicalResult RVVWidenMultiplyOp::verify() {
       lhsElement.getWidth() > lhs.getLayout().getSew() ||
       rhsElement.getWidth() > rhs.getLayout().getSew() ||
       resultElement.getWidth() != 2 * lhs.getLayout().getSew() ||
-      !sameCoordinates ||
+      (!sameCoordinates && !broadcastCoordinates) ||
       lhs.getLayout().getSew() != rhs.getLayout().getSew() ||
       result.getLayout().getSew() !=
           static_cast<int64_t>(resultElement.getWidth()) ||
@@ -7908,7 +7937,7 @@ mlir::LogicalResult RVVWidenMultiplyOp::verify() {
       !exactLeaf(getLeaf(), "rvv", "widen-multiply", instruction, "none",
                  "exact"))
     return emitOpError(
-        "RVV widening multiply requires coordinate-identical integer operands and one exact doubled-width result layout");
+        "RVV widening multiply requires coordinate-preserving integer operands and one exact doubled-width result layout");
   return mlir::success();
 }
 

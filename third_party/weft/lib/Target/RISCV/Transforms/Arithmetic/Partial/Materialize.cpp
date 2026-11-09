@@ -78,6 +78,83 @@ mlir::FailureOr<mlir::Value> materializePlannedPartial(
   }
   return partial;
 }
+void materializeZeroSeededProducts(mlir::ModuleOp module, mlir::IRRewriter &rewriter) {
+  llvm::SmallVector<riscv::RVVWidenAccumulateOp> zeroSeededAccumulates;
+  module.walk([&](riscv::RVVWidenAccumulateOp accumulate) {
+    zeroSeededAccumulates.push_back(accumulate);
+  });
+  for (riscv::RVVWidenAccumulateOp accumulate : zeroSeededAccumulates) {
+    auto splat =
+        accumulate.getAccumulator().getDefiningOp<riscv::RVVSplatOp>();
+    auto constant = splat
+                        ? splat.getScalar().getDefiningOp<riscv::ConstantOp>()
+                        : riscv::ConstantOp();
+    auto integer = constant
+                       ? mlir::dyn_cast<mlir::IntegerAttr>(constant.getValue())
+                       : mlir::IntegerAttr();
+    if (!splat || !constant || !integer || !integer.getValue().isZero() ||
+        !accumulate.getLengths().empty())
+      continue;
+    auto lhs = accumulate.getLhs().getType();
+    auto rhs = accumulate.getRhs().getType();
+    auto result = accumulate.getResult().getType();
+    auto lhsElement = mlir::dyn_cast<mlir::IntegerType>(lhs.getElementType());
+    auto rhsElement = mlir::dyn_cast<mlir::IntegerType>(rhs.getElementType());
+    auto resultElement =
+        mlir::dyn_cast<mlir::IntegerType>(result.getElementType());
+    auto kernel = accumulate->getParentOfType<riscv::KernelOp>();
+    auto mapsParts = [&](riscv::ValueType input) {
+      auto parts = riscv::rvvCarrierCount(result.getLayout());
+      if (!parts) return false;
+      for (int64_t part = 0; part < *parts; ++part)
+        if (!riscv::projectCarrierPart(input, result, part)) return false;
+      return true;
+    };
+    if (!lhsElement || !rhsElement || lhsElement.isSignless() ||
+        rhsElement.isSignless() || !resultElement ||
+        resultElement.isSignless() ||
+        (!lhsElement.isSigned() && !rhsElement.isSigned()) ||
+        !mapsParts(lhs) || !mapsParts(rhs) ||
+        lhs.getLayout().getSew() != rhs.getLayout().getSew() ||
+        resultElement.getWidth() != 2 * lhs.getLayout().getSew() ||
+        result.getLayout().getSew() != resultElement.getWidth() ||
+        lhs.getLayout().getLmulEighths() !=
+            rhs.getLayout().getLmulEighths() ||
+        result.getLayout().getLmulEighths() !=
+            2 * lhs.getLayout().getLmulEighths() ||
+        lhs.getLayout().getVl() != rhs.getLayout().getVl() ||
+        lhs.getLayout().getVl() != result.getLayout().getVl() || !kernel ||
+        !kernel.getTarget().getHasWideningInteger() ||
+        !llvm::is_contained(
+            kernel.getTarget().getLegalLMULEighths().asArrayRef(),
+            result.getLayout().getLmulEighths()))
+      continue;
+    llvm::StringRef instruction;
+    if (lhsElement.isSigned() && rhsElement.isSigned())
+      instruction = "rvv.vwmul.vv";
+    else if (lhsElement.isSigned())
+      instruction = "rvv.vwmulsu.vv";
+    else
+      instruction = "rvv.vwmulsu.vv.swap";
+    rewriter.setInsertionPoint(accumulate);
+    auto product = riscv::RVVWidenMultiplyOp::create(rewriter,
+        accumulate.getLoc(), accumulate.getResult().getType(),
+        accumulate.getLhs(), accumulate.getRhs(),
+        riscv_internal::leaf(
+            rewriter, "rvv", "widen-multiply", instruction, instruction,
+            lhs.getLayout().getRegisterGroups() +
+                rhs.getLayout().getRegisterGroups(),
+            accumulate.getResult().getType().getLayout().getRegisterGroups(),
+            0, 0, "none", "exact"));
+    riscv_internal::copyOrigin(accumulate, product);
+    accumulate.getResult().replaceAllUsesWith(product.getResult());
+    rewriter.eraseOp(accumulate);
+    if (splat.getResult().use_empty())
+      rewriter.eraseOp(splat);
+    if (constant.getResult().use_empty())
+      rewriter.eraseOp(constant);
+  }
+}
 } // namespace
 
 class MaterializeRISCVPartialAccumulatorsPass
@@ -332,96 +409,7 @@ public:
         rewriter.eraseOp(constant);
     }
 
-    llvm::SmallVector<riscv::RVVWidenAccumulateOp> zeroSeededAccumulates;
-    getOperation().walk([&](riscv::RVVWidenAccumulateOp accumulate) {
-      zeroSeededAccumulates.push_back(accumulate);
-    });
-    for (riscv::RVVWidenAccumulateOp accumulate : zeroSeededAccumulates) {
-      auto splat =
-          accumulate.getAccumulator().getDefiningOp<riscv::RVVSplatOp>();
-      auto constant = splat
-                          ? splat.getScalar().getDefiningOp<riscv::ConstantOp>()
-                          : riscv::ConstantOp();
-      auto integer = constant
-                         ? mlir::dyn_cast<mlir::IntegerAttr>(constant.getValue())
-                         : mlir::IntegerAttr();
-      if (!splat || !constant || !integer || !integer.getValue().isZero() ||
-          !splat.getResult().hasOneUse())
-        continue;
-      auto lhs = accumulate.getLhs().getType();
-      auto rhs = accumulate.getRhs().getType();
-      auto result = accumulate.getResult().getType();
-      auto lhsElement = mlir::dyn_cast<mlir::IntegerType>(lhs.getElementType());
-      auto rhsElement = mlir::dyn_cast<mlir::IntegerType>(rhs.getElementType());
-      auto resultElement =
-          mlir::dyn_cast<mlir::IntegerType>(result.getElementType());
-      auto kernel = accumulate->getParentOfType<riscv::KernelOp>();
-      if (!lhsElement || !rhsElement || lhsElement.isSignless() ||
-          rhsElement.isSignless() || !resultElement ||
-          resultElement.isSignless() ||
-          (!lhsElement.isSigned() && !rhsElement.isSigned()) ||
-          lhs.getShape() != rhs.getShape() || lhs.getShape() != result.getShape() ||
-          lhs.getAxisIds() != rhs.getAxisIds() ||
-          lhs.getAxisIds() != result.getAxisIds() ||
-          lhs.getLayout().getTimeFactors() !=
-              rhs.getLayout().getTimeFactors() ||
-          lhs.getLayout().getTimeFactors() !=
-              result.getLayout().getTimeFactors() ||
-          lhs.getLayout().getLaneFactors() !=
-              rhs.getLayout().getLaneFactors() ||
-          lhs.getLayout().getLaneFactors() !=
-              result.getLayout().getLaneFactors() ||
-          lhs.getLayout().getReplicaFactors() !=
-              rhs.getLayout().getReplicaFactors() ||
-          lhs.getLayout().getReplicaFactors() !=
-              result.getLayout().getReplicaFactors() ||
-          lhs.getLayout().getFragmentFactors() !=
-              rhs.getLayout().getFragmentFactors() ||
-          lhs.getLayout().getFragmentFactors() !=
-              result.getLayout().getFragmentFactors() ||
-          lhs.getLayout().getLocalFactors() !=
-              rhs.getLayout().getLocalFactors() ||
-          lhs.getLayout().getLocalFactors() !=
-              result.getLayout().getLocalFactors() ||
-          lhs.getLayout().getSew() != rhs.getLayout().getSew() ||
-          resultElement.getWidth() != 2 * lhs.getLayout().getSew() ||
-          result.getLayout().getSew() != resultElement.getWidth() ||
-          lhs.getLayout().getLmulEighths() !=
-              rhs.getLayout().getLmulEighths() ||
-          result.getLayout().getLmulEighths() !=
-              2 * lhs.getLayout().getLmulEighths() ||
-          lhs.getLayout().getVl() != rhs.getLayout().getVl() ||
-          lhs.getLayout().getVl() != result.getLayout().getVl() || !kernel ||
-          !kernel.getTarget().getHasWideningInteger() ||
-          !llvm::is_contained(
-              kernel.getTarget().getLegalLMULEighths().asArrayRef(),
-              result.getLayout().getLmulEighths()))
-        continue;
-      llvm::StringRef instruction;
-      if (lhsElement.isSigned() && rhsElement.isSigned())
-        instruction = "rvv.vwmul.vv";
-      else if (lhsElement.isSigned())
-        instruction = "rvv.vwmulsu.vv";
-      else
-        instruction = "rvv.vwmulsu.vv.swap";
-      rewriter.setInsertionPoint(accumulate);
-      auto product = riscv::RVVWidenMultiplyOp::create(rewriter,
-          accumulate.getLoc(), accumulate.getResult().getType(),
-          accumulate.getLhs(), accumulate.getRhs(),
-          riscv_internal::leaf(
-              rewriter, "rvv", "widen-multiply", instruction, instruction,
-              lhs.getLayout().getRegisterGroups() +
-                  rhs.getLayout().getRegisterGroups(),
-              accumulate.getResult().getType().getLayout().getRegisterGroups(),
-              0, 0, "none", "exact"));
-      riscv_internal::copyOrigin(accumulate, product);
-      accumulate.getResult().replaceAllUsesWith(product.getResult());
-      rewriter.eraseOp(accumulate);
-      if (splat.getResult().use_empty())
-        rewriter.eraseOp(splat);
-      if (constant.getResult().use_empty())
-        rewriter.eraseOp(constant);
-    }
+    materializeZeroSeededProducts(getOperation(), rewriter);
 
     llvm::SmallVector<riscv::ReduceOp> nestedScaledReductions;
     llvm::DenseSet<mlir::Operation *> matchedNestedDots;
@@ -2659,6 +2647,10 @@ public:
         [&](riscv::RVVPartialSetOp partial) { partialSets.push_back(partial); });
     for (riscv::RVVPartialSetOp partial : partialSets)
       sinkReplicaSupplies(partial);
+
+    // The traversals above introduce new closed partial chains. Close their
+    // zero seeds before local-value materialization observes their residency.
+    if (!failed) materializeZeroSeededProducts(getOperation(), rewriter);
 
     if (failed)
       signalPassFailure();

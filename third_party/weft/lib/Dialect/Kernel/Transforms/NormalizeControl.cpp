@@ -216,6 +216,51 @@ public:
   }
 };
 
+class FoldIdentityTileGather : public OpRewritePattern<weft::kernel::ExtractOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::ExtractOp extract,
+                                PatternRewriter &rewriter) const override {
+    namespace k = weft::kernel;
+    auto input = dyn_cast<k::ValueType>(extract.getInput().getType());
+    auto output = dyn_cast<k::ValueType>(extract.getResult().getType());
+    if (!input || !output || input.getShape().size() < 2 ||
+        input.getShape() != output.getShape() ||
+        input.getElementType() != output.getElementType() ||
+        extract.getSelectors().size() != input.getShape().size())
+      return failure();
+    // Packed payload projections retain their record/layer supply until
+    // target memory planning. Whole-byte metadata and ordinary numerical
+    // tiles can express an identity gather as a coordinate-only rename.
+    if (extract.getInput().getDefiningOp<k::FieldOp>())
+      if (auto integer = dyn_cast<IntegerType>(input.getElementType());
+          integer && integer.getWidth() < 8)
+        return failure();
+    size_t next = 0;
+    for (auto [axis, selector] : llvm::enumerate(extract.getSelectors())) {
+      StringRef kind = cast<StringAttr>(selector).getValue();
+      if (kind == "all") {
+        if (input.getAxisIds()[axis] != output.getAxisIds()[axis]) return failure();
+        continue;
+      }
+      if (kind != "gather" || next == extract.getIndices().size()) return failure();
+      Value index = extract.getIndices()[next++];
+      auto type = dyn_cast<k::ValueType>(index.getType());
+      int64_t extent = input.getShape()[axis];
+      if (!type || type.getShape().size() != 1 || extent <= 0 ||
+          type.getShape()[0] != extent ||
+          type.getAxisIds()[0] != output.getAxisIds()[axis] ||
+          !weft::analysis::hasUnsignedBound(index, extent) ||
+          !weft::analysis::hasRowMajorCoordinates(index))
+        return failure();
+    }
+    if (next != extract.getIndices().size()) return failure();
+    rewriter.replaceOpWithNewOp<k::ReshapeOp>(extract, output,
+        extract.getInput(), input.getAxisIds());
+    return success();
+  }
+};
+
 class EraseUnusedEmpty : public OpRewritePattern<weft::kernel::EmptyOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -529,6 +574,41 @@ public:
   }
 };
 
+struct EraseUnusedHelperResults : OpRewritePattern<weft::kernel::HelperOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(weft::kernel::HelperOp helper,
+                                PatternRewriter &rewriter) const override {
+    SmallVector<unsigned> retained;
+    SmallVector<Type> types;
+    for (auto [index, result] : llvm::enumerate(helper.getResults()))
+      if (!result.use_empty()) {
+        retained.push_back(index);
+        types.push_back(result.getType());
+      }
+    if (retained.size() == helper.getNumResults()) return failure();
+    SmallVector<weft::kernel::HelperReturnOp> exits;
+    helper.getBody().walk([&](weft::kernel::HelperReturnOp exit) {
+      if (exit->getParentOfType<weft::kernel::HelperOp>() == helper) exits.push_back(exit);
+    });
+    for (auto exit : exits) {
+      SmallVector<Value> values;
+      for (unsigned index : retained) values.push_back(exit.getValues()[index]);
+      rewriter.modifyOpInPlace(exit, [&] { exit.getValuesMutable().assign(values); });
+    }
+    OperationState state(helper.getLoc(), helper->getName());
+    state.addOperands(helper->getOperands());
+    state.addTypes(types);
+    state.addAttributes(helper->getAttrs());
+    state.addRegion();
+    Operation *replacement = rewriter.create(state);
+    replacement->getRegion(0).takeBody(helper.getBody());
+    for (auto [index, original] : llvm::enumerate(retained))
+      rewriter.replaceAllUsesWith(helper.getResult(original), replacement->getResult(index));
+    rewriter.eraseOp(helper);
+    return success();
+  }
+};
+
 class NormalizeCanonicalControl
     : public PassWrapper<NormalizeCanonicalControl, OperationPass<ModuleOp>> {
 public:
@@ -589,8 +669,8 @@ public:
                  FoldDescriptorExtent,
                  FoldIdentitySlice, FoldScalarInteger, FoldScalarIntegerCompare,
                  FoldConstantIf, NormalizeScalarSelect, NormalizeBoundedGather,
-                 FoldIdentityLookup,
-                 EraseUnusedEmpty>(&getContext());
+                 FoldIdentityLookup, FoldIdentityTileGather,
+                 EraseUnusedEmpty, EraseUnusedHelperResults>(&getContext());
     // Dead control carries can be the only extra consumer of a coordinate
     // rename. Revisit both in the same bounded worklist, so deleting a carry
     // exposes the producer to the existing single-consumer rewrite. Folding
