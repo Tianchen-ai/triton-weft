@@ -134,15 +134,26 @@ public:
       SmallVector<Range> ranges;
       for (auto [i, demand] : llvm::enumerate(demands)) {
         bool scalar = isa<vector::ExtractOp>(demand.user);
-        bool adjacentPacket = !ranges.empty() && scalar && ranges.back().scalars &&
-            demand.begin == ranges.back().end &&
-            (demand.end - ranges.back().begin) * type.getElementTypeBitWidth() <= 128;
-        if (!ranges.empty() && (demand.begin < ranges.back().end || adjacentPacket)) {
+        if (!ranges.empty() && demand.begin < ranges.back().end) {
           ranges.back().end = std::max(ranges.back().end, demand.end);
           ranges.back().last = i + 1;
           ranges.back().scalars &= scalar;
         } else ranges.push_back({demand.begin, demand.end, i, i + 1, scalar});
       }
+      // Resolve every overlapping consumer before joining scalar packets.
+      // An adjacent scalar can also belong to a wide payload projection; eager
+      // joining would bridge its scalar prefix into that payload and impose a
+      // cross-packet permutation on otherwise independent fields.
+      SmallVector<Range> packets;
+      for (auto range : ranges) {
+        if (!packets.empty() && range.scalars && packets.back().scalars &&
+            range.begin == packets.back().end &&
+            (range.end - packets.back().begin) * type.getElementTypeBitWidth() <= 128) {
+          packets.back().end = range.end;
+          packets.back().last = range.last;
+        } else packets.push_back(range);
+      }
+      ranges = std::move(packets);
       if (ranges.size() > 16 || (ranges.size() == 1 && ranges.front().begin == 0 &&
                                 ranges.front().end == type.getNumElements())) continue;
       bool dense = !ranges.empty() && ranges.front().begin == 0 &&
