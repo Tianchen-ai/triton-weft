@@ -442,6 +442,8 @@ replicas 保持原顺序。`ime_unpack` 在该合同下是 alias 或合法的低
 值始终是 RVV Value，不伪装成 i32 fragment。memory 或其它不支持的 consumer 通过显式
 `lane_repack` 恢复所需布局。多 lane-axis 的局部 pointwise 使用完整 carrier，活动矩形之外的
 单元不成为可观察结果；内存边界仍按各逻辑轴的有效范围访问，不能把矩形误作一个 lane prefix。
+逐元素运算的 lane 对齐比较有序逻辑轴及其 lane 因子；相同 carrier 宽度不等于相同坐标顺序。
+多个 lane 轴顺序不同时，选择已有的坐标 gather 路线，其 index、移动与临时寄存器进入成本和资源合同。
 
 ## 5. Composite 与 terminal target operations
 
