@@ -60,6 +60,9 @@ partition。只有time/lane/register/fragment/local各自的总分解一致时�
 已证明的 singleton extract 或单元素 reduction 规范化为 reshape 时，先保留输入的
 完整 carrier partition，再以显式 layout conversion 接回原消费者布局；不能因为
 删除一个单位坐标，就把 RVV producer 的多 part 值直接改标成 scalar。
+线性 reshape 重分解混合 lane/replica 因子时，如果两端不能直接保持线性序号，
+layout pass 在该 use edge 形成有序 lane carrier，再经已有 conversion materializer
+重排并接回消费者表示。转换的临时值、完整坐标及资源仍由同一物理管线验证。
 
 issue-window 投影通过保形的轴重命名时，按位置追溯输入轴，保留相同的窗口坐标。
 已压缩为 `regular` 的索引关系仍按原完整域求值：先加入 issue 的全局 offset，
@@ -450,6 +453,10 @@ outer traversal、workspace或pipeline不能隐藏在 leaf 中。
 该共同合同由 `StreamOps.cpp` 验证，`MaterializeRISCVPrograms` 写出真实 init/loop/finalize。
 32-bit signed/unsigned add reduction 也可使用同一有界 stream，按原位宽执行模加，
 所有 lane 以零初始化并在原闭合边界归约；不跨 widen/narrow 改变累加宽度。
+无 free axis 或仅剩 singleton 轴的整数 contraction，若输入已达到 accumulator
+位宽，物化为该位宽的逐元素乘法与 add reduction。较窄输入按原 signedness
+显式扩展；同位宽 signedness 转换保留原 bits。窄输入 widening dot 继续使用已有
+partial 路线，不为一个 scalar result 发明额外 free axis 或改变作者 partial 边界。
 
 浮点 contraction 的多条 reduction axes 可由外围有序物理循环和最内 RVV K 窗口共同遍历，
 所有循环携带同一完整初始化的 partial，只在原闭合 operation 的出口收敛。f32/f64 使用同型
