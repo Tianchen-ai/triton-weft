@@ -390,19 +390,10 @@ public:
       getOperation().walk([&](riscv::KernelOp kernel) {
         selectFragmentRegisterReuse(kernel);
       });
-    getOperation().walk([&](riscv::IMEZeroOp zero) {
-      auto kernel = zero->getParentOfType<riscv::KernelOp>();
-      if (!kernel || kernel.getResourcesMaterialized() ||
-          !zero->getParentOfType<scf::ForOp>() || !zero.getResult().hasOneUse())
-        return;
-      auto width = riscv::fragmentZeroPrefixWidth(zero.getResult().getType(), kernel.getTarget());
-      if (!width) return;
-      // Keep a short logical zero at its use instead of hoisting a full
-      // fragment constant and copying every unused hardware row each iteration.
-      OpBuilder builder(zero);
-      zero.setLeafAttr(leaf(builder, "ime", "fragment-init", "ime.zero.local-prefix",
-                           "ime.zero.local-prefix", 0, 0, 0, 0, "none", "exact", {*width}));
-    });
+    // A zero already local to its single MMA needs no residency repair. Keep
+    // its ordinary intrinsic so the system compiler can share the constant
+    // across fragment parts. A forced local asm would add a vtype barrier and
+    // prevent that sharing despite having no outer seed to copy or shorten.
     getOperation().walk([&](riscv::BinaryOp op) {
       if (op.getKind() == "mul") consumers.push_back(op);
     });
