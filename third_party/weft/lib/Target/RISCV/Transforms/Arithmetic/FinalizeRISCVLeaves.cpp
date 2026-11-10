@@ -650,13 +650,18 @@ void selectSharedReductionSeeds(mlir::ModuleOp module) {
         reduce, {reduce.getInput(), reduce.getResult()});
     const int64_t independentGroups = input.getResourceGroups() +
         reduce.getResult().getType().getResourceGroups() + 1;
-    // Independent intrinsics leave register reuse and instruction interleaving
-    // to Clang. A tied multi-output asm constrains every slot for the complete
-    // sequence; reserve it for a proven reduction in otherwise excessive live
-    // register demand, rather than trading away scheduling freedom everywhere.
-    if (!outside || *outside + independentGroups <=
-                        kernel.getTarget().getVectorRegisters())
+    // Two independent reductions can expose useful scheduling freedom. Larger
+    // groups also pay for repeated seed/result versus input VTYPE settings:
+    // the shared sequence saves two state changes for every additional slot,
+    // beyond its own entry/exit pair. Retain that local instruction saving even
+    // when both register live sets fit; capacity alone is not a cost model.
+    const int64_t savedStateChanges = 2 * (input.getSlots() - 1);
+    const bool sharesVectorState = savedStateChanges > 2;
+    if (!outside || (!sharesVectorState &&
+        *outside + independentGroups <= kernel.getTarget().getVectorRegisters()))
       return;
+    reduce->setAttr("weft.riscv.reduction_state_cost",
+                   builder.getDenseI64ArrayAttr({2 * input.getSlots(), 4}));
     // One local group uses one seed and one VTYPE setting. A terminal asm
     // sequence keeps that selected resource contract intact through Clang;
     // independent intrinsic calls can duplicate both for every slot.

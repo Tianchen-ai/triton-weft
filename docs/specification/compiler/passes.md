@@ -1695,6 +1695,11 @@ VLMAX、full active lanes、整数LMUL比和offset对齐闭合，terminal只拼�
 slot pack统一使用最终VL：每次slide保留已构造前缀，未构造lane在唯一的multiply/reduce之前
 全部被后续slide覆盖；输入的未定义尾lane不会进入最终数值运算。
 局部选择先检查target、坐标与资源合同，再比较包含pack、seed、reduction和VL设置的成本；
+多 slot 的 widening reduction 同时计算完整活跃寄存器与 vector-state 切换工作。
+两个 slot 在独立实现资源合法时保留 intrinsic 调度自由；更多 slot 的共享 seed
+可减少重复的输入／结果 VTYPE 切换，即使两者的寄存器均能容纳也参与选择。
+所选 op 的 `weft.riscv.reduction_state_cost` 记录独立与共享序列的有界结构成本，
+不改变各 slot 的数值分组、覆盖许可或最终资源验证。
 可scalar-rematerialize的供应以无vector extract的成本下界比较。供应搜索最多32个节点，
 包括静态一维`iota`：同逻辑range/axis的scalar replica使用既有`register.iota`，
 不能因初始vector坐标表示漏掉这条合法供应；查询与物化接受相同的producer集合。
