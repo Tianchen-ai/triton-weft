@@ -2,6 +2,7 @@
 
 #include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Transforms/Arithmetic/PredicateRegisters.h"
+#include "Analysis/ValueLiveness.h"
 
 #include "Weft/Dialect/RISCV/IR/RISCVDialect.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
@@ -644,6 +645,17 @@ void selectSharedReductionSeeds(mlir::ModuleOp module) {
         partial.getLayout().getValidity() != "full" ||
         input.getResourceGroups() + scratch >
             kernel.getTarget().getVectorRegisters())
+      return;
+    auto outside = riscv_internal::surroundingRegisterGroups(
+        reduce, {reduce.getInput(), reduce.getResult()});
+    const int64_t independentGroups = input.getResourceGroups() +
+        reduce.getResult().getType().getResourceGroups() + 1;
+    // Independent intrinsics leave register reuse and instruction interleaving
+    // to Clang. A tied multi-output asm constrains every slot for the complete
+    // sequence; reserve it for a proven reduction in otherwise excessive live
+    // register demand, rather than trading away scheduling freedom everywhere.
+    if (!outside || *outside + independentGroups <=
+                        kernel.getTarget().getVectorRegisters())
       return;
     // One local group uses one seed and one VTYPE setting. A terminal asm
     // sequence keeps that selected resource contract intact through Clang;

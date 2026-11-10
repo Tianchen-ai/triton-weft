@@ -466,6 +466,9 @@ FMA，双 f16 存储可使用显式 widening FMA。普通 free-axis FMA 只消�
 并固定一次输入 VTYPE。每个 slot 仍独立归约为原来的 I32 singleton，不合并作者
 partial 或 scale 支路。该 leaf 要求非空的完整 lane 域，输入、全部结果和一组 seed
 共同满足目标寄存器预算；尾部和单 slot 继续使用原有 reduction 合同。
+选择同时计入该位置已有的 SSA 驻留。独立 intrinsic 的输入、结果和 seed 已能满足
+寄存器预算时保留独立实现，让目标工具链自由复用寄存器并交错指令；只有可证明的
+交接压力超额才使用共享序列，不能仅因 slots 多于一个就强制绑定整组寄存器。
 该组的输出不可与尚未消费的输入重叠；issue 临时组数同时计入 seed 和全部
 early-clobber 结果，不能只比较 operation 前后的两个活跃集合而漏掉交接峰值。
 仅有一个消费者、且物理容量至少能保存 32 bits 的完整 I16 slots 可以选择 `.consumed` 形式：
