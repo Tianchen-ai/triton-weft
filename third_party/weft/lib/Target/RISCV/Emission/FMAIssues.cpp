@@ -72,7 +72,7 @@ mlir::LogicalResult Emitter::compileFMA(riscv::FMAOp operation) {
         builtin + "(" + left + ", " + rhs->scalar + ", " + addend + ")", "fma"));
     return mlir::success();
   }
-  bool rows = instruction.ends_with(".row.vf");
+  bool rows = instruction.ends_with(".row.vf") || instruction.ends_with(".row.vv");
   bool vf = instruction.ends_with(".vf");
   const bool overwriteLHS = instruction == "rvv.vfmadd.vf";
   const auto mnemonic = instruction.split('.').second.split('.').first;
@@ -87,7 +87,8 @@ mlir::LogicalResult Emitter::compileFMA(riscv::FMAOp operation) {
   if ((!vf && !instruction.ends_with(".vv")) ||
       lhs->kind != Binding::Kind::Vector || acc->kind != Binding::Kind::Vector ||
       lhs->parts.size() != acc->parts.size() ||
-      (rows ? !geometry || (rhs->kind != Binding::Kind::ScalarTuple && rhs->kind != Binding::Kind::Scalar) :
+      (rows ? !geometry || (vf ? (rhs->kind != Binding::Kind::ScalarTuple && rhs->kind != Binding::Kind::Scalar) :
+                                rhs->kind != Binding::Kind::Vector) :
        vf ? rhs->kind != Binding::Kind::Scalar :
             rhs->kind != Binding::Kind::Vector || rhs->parts.size() != acc->parts.size()))
     return fail(operation, "pointwise FMA lost its selected numeric bindings");
@@ -96,8 +97,8 @@ mlir::LogicalResult Emitter::compileFMA(riscv::FMAOp operation) {
   for (size_t part = 0; part < acc->parts.size(); ++part) {
     int64_t row = rows ? geometry->multiplierParts[part] : 0;
     if (rows && (rhs->kind == Binding::Kind::Scalar ? row != 0 : row >= int64_t(rhs->parts.size())))
-      return fail(operation, "pointwise FMA row mapping exceeds its scalar binding");
-    std::string multiplier = rows && rhs->kind == Binding::Kind::ScalarTuple
+      return fail(operation, "pointwise FMA row mapping exceeds its selected binding");
+    std::string multiplier = rows && rhs->kind != Binding::Kind::Scalar
         ? rhs->parts[row] : vf ? rhs->scalar : rhs->parts[part];
     std::string name = fresh("fma");
     line(vectorType(operation.getResult()) + " " + name + " = __riscv_" + mnemonic.str() + "_" +

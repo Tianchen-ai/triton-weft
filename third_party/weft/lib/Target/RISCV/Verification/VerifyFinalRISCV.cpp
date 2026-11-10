@@ -196,6 +196,13 @@ public:
         failed = true;
         return;
       }
+      auto restricted = kernel->getAttrOfType<mlir::DenseI64ArrayAttr>("native_restrict_arguments");
+      if (!restricted || !llvm::equal(restricted.asArrayRef(),
+                                      riscv::kernelRestrictArguments(kernel))) {
+        kernel.emitError("native pointer qualifiers must preserve the complete parameter alias/effect contract");
+        failed = true;
+        return;
+      }
       auto used = riscv::usedInstructionExtensions(kernel);
       if (mlir::failed(used)) {
         failed = true;

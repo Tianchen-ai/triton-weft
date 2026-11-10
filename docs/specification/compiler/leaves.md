@@ -125,6 +125,11 @@ time/replica 坐标；共享寄存器坐标分析确定每个结果 part 的来�
 每个输出 carrier 的全部 lane 对应同一个 scalar part；向量输入和 accumulator 保持完整结果
 布局。它不生成 gather、broadcast buffer 或新归约，逐 part 仍是一条 `vfmacc.vf`。
 
+`rvv.vfmacc.row.vv` 及对应减法形式允许多个输出 carrier 共享同一个已有向量 part。
+`FMAIssueGeometry` 必须证明逻辑轴和逐 lane 坐标一致；所选 leaf 只重复引用相应 source
+part，不生成 gather、转换、额外读取或调度屏障。融合继续遵守单消费者、effect、同精度
+和资源合同，不把这种物理寄存器复用扩成新的作者 state/stage 生命周期。
+
 `rvv_integer_mac` 使用 `rvv.vmacc.vx` 实现同宽整数的模乘加。vector、accumulator 与 result
 具有相同的完整 type，multiplier 是相同元素类型的 scalar；每个 part 保留原 active lanes。
 它没有 widening、saturation、读取或额外临时载体，不能跨过显式整数精度边界。

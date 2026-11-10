@@ -118,6 +118,8 @@ Weft 的驻留分析覆盖其 numeric SSA、已选局部临时量与显式 stora
 同一次 terminal translation 同时生成 C prototype 与 `RISCVKernelABI`。ABI 的参数顺序、
 Encoding identity、record span、logical extents、alignment、access 和 alias groups 均来自
 已验证的 kernel/MemDesc，而不由 runtime 解析 C 文本或按格式名补齐。
+入口指针的 `restrict` 只消费物理收口写入并验证的 `native_restrict_arguments`；
+只读 alias 组可以保留与可写组不重叠的事实，不把同组的只读别名误当成写入冲突。
 `RISCVCompilationResult` 保存代码和这些 ABI；Triton native bindings 将它们交给 backend 的 C→native stage，并由 CompiledKernel 导出。
 动态 shape 参数顺序与实际 prototype 一致，source binding 与发现的 target 随产物保持明确。
 加载器负责系统编译、句柄与调用生命周期，不参与 leaf 或资源选择。

@@ -171,6 +171,12 @@ StringRef weft::riscv::pointwiseFMAInstruction(Type lhs, Type rhs, Type result, 
   if (overwriteLHS)
     return kind == "add" && rhs == value.getElementType() ? "rvv.vfmadd.vf" : "";
   if (rhs == result) return select("rvv.vfmacc.vv", "rvv.vfnmsac.vv", "rvv.vfmsac.vv");
+  if (auto parts = dyn_cast<ValueType>(rhs);
+      parts && parts.getLayout().getCarrier() == "rvv") {
+    auto geometry = FMAIssueGeometry::get(value, parts, value);
+    if (geometry && !geometry->scalar && !geometry->widening)
+      return select("rvv.vfmacc.row.vv", "rvv.vfnmsac.row.vv", "rvv.vfmsac.row.vv");
+  }
   if (auto scalar = dyn_cast<ValueType>(rhs);
       scalar && scalar.getLayout().getCarrier() == "scalar") {
     auto geometry = FMAIssueGeometry::get(value, scalar, value);

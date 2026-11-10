@@ -25,6 +25,8 @@ public:
     getOperation().walk([&](riscv::KernelOp kernel) {
       kernel->setAttr("native_entry_alignment",
                      IntegerAttr::get(IntegerType::get(&getContext(), 64), 32));
+      kernel->setAttr("native_restrict_arguments",
+          DenseI64ArrayAttr::get(&getContext(), riscv::kernelRestrictArguments(kernel)));
     });
     bool invalidAlignment = false;
     getOperation().walk([&](riscv::KernelOp kernel) {

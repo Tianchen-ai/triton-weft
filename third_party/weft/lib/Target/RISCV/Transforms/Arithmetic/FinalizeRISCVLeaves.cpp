@@ -791,25 +791,6 @@ mlir::LogicalResult materializeFieldReads(mlir::ModuleOp module) {
     else {
       conversion.getInputMutable().assign(read.getResult());
       conversion.removeSourceAccessAttr();
-      if (kind == "time_to_lane" && readType.getLayout().getCarrier() == "scalar") {
-        auto coordinates = riscv::RegisterCoordinates::get(readType.getLayout());
-        if (!coordinates)
-          return conversion.emitError("numeric field pack has no complete scalar coordinates");
-        llvm::SmallVector<int64_t> one(readType.getShape().size(), 1);
-        auto layout = riscv::LayoutAttr::get(rewriter.getContext(), "scalar", readType.getAxisIds(),
-            rewriter.getDenseI64ArrayAttr(one), rewriter.getDenseI64ArrayAttr(one),
-            rewriter.getDenseI64ArrayAttr(coordinates->extents()),
-            rewriter.getDenseI64ArrayAttr(one), rewriter.getDenseI64ArrayAttr(one),
-            readType.getLayout().getSew(), 0, 1, 0, readType.getLayout().getValidity());
-        auto packedType = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(readType, layout));
-        auto tuple = riscv::ConvertLayoutOp::create(rewriter, conversion.getLoc(), packedType,
-            read.getResult(), riscv_internal::layoutConversion(rewriter, readType.getLayout(), layout),
-            riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
-        riscv_internal::copyOrigin(conversion, tuple);
-        conversion.getInputMutable().assign(tuple.getResult());
-        conversion.setConversionAttr(riscv_internal::layoutConversion(
-            rewriter, layout, conversion.getResult().getType().getLayout()));
-      }
       riscv_internal::selectLaneRepack(rewriter, conversion);
     }
   }
@@ -899,6 +880,41 @@ mlir::LogicalResult materializeFieldReads(mlir::ModuleOp module) {
         riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
     riscv_internal::copyOrigin(read, conversion);
     read.getResult().replaceAllUsesExcept(conversion.getResult(), conversion);
+  }
+  candidates.clear();
+  module.walk([&](riscv::ConvertLayoutOp op) { candidates.push_back(op); });
+  for (auto conversion : candidates) {
+    auto kernel = conversion->getParentOfType<riscv::KernelOp>();
+    auto source = conversion.getInput().getType();
+    auto target = conversion.getResult().getType();
+    if (!kernel || kernel.getResourcesMaterialized() ||
+        conversion.getSourceAccess() ||
+        conversion.getConversion().getKind() != "time_to_lane" ||
+        source.getLayout().getCarrier() != "scalar" ||
+        target.getLayout().getCarrier() != "rvv" ||
+        riscv::fieldReadProjection(conversion.getInput()))
+      continue;
+    auto coordinates = riscv::RegisterCoordinates::get(source.getLayout());
+    if (!coordinates || coordinates->lanes() != 1)
+      return conversion.emitError("numeric pack has no complete scalar coordinates");
+    // Computed tuples and explicit field-read results use the same ordered
+    // numeric pack. Expose their issue-time parts as register replicas before
+    // the existing scalar-to-lane conversion; no storage is read again.
+    llvm::SmallVector<int64_t> one(source.getShape().size(), 1);
+    auto ones = rewriter.getDenseI64ArrayAttr(one);
+    auto layout = riscv::LayoutAttr::get(rewriter.getContext(), "scalar", source.getAxisIds(),
+        ones, ones, rewriter.getDenseI64ArrayAttr(coordinates->extents()), ones, ones,
+        source.getLayout().getSew(), 0, 1, 0, source.getLayout().getValidity());
+    auto packedType = mlir::cast<riscv::ValueType>(riscv_internal::withLayout(source, layout));
+    rewriter.setInsertionPoint(conversion);
+    auto tuple = riscv::ConvertLayoutOp::create(rewriter, conversion.getLoc(), packedType,
+        conversion.getInput(), riscv_internal::layoutConversion(rewriter, source.getLayout(), layout),
+        riscv::AccessAttr(), riscv_internal::unselectedLeaf(rewriter));
+    riscv_internal::copyOrigin(conversion, tuple);
+    conversion.getInputMutable().assign(tuple.getResult());
+    conversion.setConversionAttr(riscv_internal::layoutConversion(
+        rewriter, layout, target.getLayout()));
+    riscv_internal::selectLaneRepack(rewriter, conversion);
   }
   return mlir::success();
 }

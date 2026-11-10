@@ -1257,6 +1257,9 @@ copy traversal，destination 的 stage identity 保留。部分初始化、gathe
 在 `scf.if` 处终止的数值按各 arm 的真实最后 use 借入子 block。若该 arm 只把它交给一个
 loop init，可将其驻留移交给 loop carry；另一 arm 的语法 use 不会使原值永久与 carry 共存。
 条件之后仍有观察者的值继续保留，循环中反复捕获的 invariant 也不能按单次最后 use 回收。
+已证明只有一次迭代的 `scf.for` 不产生捕获值的回边观察。若从 consumer 到捕获边界的
+全部循环都是单次迭代，且该值和所有表示别名的实际观察均在 consumer 之前完成，
+外围驻留查询采用这个真实最后 use。多次、动态迭代或边界之外仍有观察者时继续保留。
 
 ### `RetainRISCVFragmentAccumulators`
 
@@ -1996,6 +1999,8 @@ leaf 将相同 scalar、SEW/LMUL 和完整 VL 的所有 parts 映射到一个只
 再 reload；不能先生成所有输入同时需要、后续 spill 无法修复的 FMA。
 独立的 `fma` 保存 typed operands 和 exact leaf，资源 pass 重新核算实际活跃值；
 它沿用原 pointwise 的逐 part 活动长度，没有 closed FMA issue 的调度屏障或 loop-unroll 限制。
+向量乘数可以通过已有 `FMAIssueGeometry` 的逐 lane 坐标证明，在多个结果 part 中复用。
+这项选择只消费作者已经表达的广播轴，不增加源码级分块、snapshot 或局部 packing。
 
 ### `SelectRISCVScalarPackets`
 
