@@ -68,6 +68,10 @@ layout pass 在该 use edge 形成有序 lane carrier，再经已有 conversion 
 共用相同坐标转换：先将 time parts 重排为 register replicas，再执行已闭合的 lane pack，
 不重新读取存储，也不把 logical i1 的机器存储宽度降为一位。
 
+窄化和比较的结果不能要求较宽输入使用非法 LMUL。两端逻辑 shape 与轴一致时，
+layout pass 保留输入的合法 issue partition，并相应确定窄结果或 Boolean 结果的 EMUL；
+其余消费者仍通过显式 conversion 接入。不改变比较的 signedness、有效域或数值位宽。
+
 issue-window 投影通过保形的轴重命名时，按位置追溯输入轴，保留相同的窗口坐标。
 已压缩为 `regular` 的索引关系仍按原完整域求值：先加入 issue 的全局 offset，
 再计算 repeat、stride 和 base。不能只缩短 result type 后重复读取第一个窗口；
