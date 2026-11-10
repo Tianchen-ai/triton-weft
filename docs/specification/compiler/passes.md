@@ -925,9 +925,10 @@ unpack 的 fragment 来自内层 `scf.for` 结果时，沿对应 yield 追踪 MM
 必须可读或纯计算；无 memory clobber 的 MMA 只更新 SSA fragment。独立供应仍只执行
 一次，不移入循环，不跨越自身的外层 Level。容量分析前按真实最后 use 更新 fragment
 accumulator reuse，避免把可以原位更新的 accumulator 误算成同时存在的新旧两份。
-循环中的单 use fragment zero 若只占硬件 fragment 的前缀，选择既有 local-prefix leaf，
-以能容纳有效元素且满足 SEW/LMUL 合法性的最小载体初始化。有效 VL 不变；不用完整
-硬件 fragment 的常量复制来初始化未被作者结果观察的行。
+共享或外层的 fragment zero 若只占硬件 fragment 的前缀，在 MMA 使用点通过既有
+local-prefix leaf 重物化，以能容纳有效元素且满足 SEW/LMUL 合法性的最小载体初始化。
+已经与唯一 MMA 同 block 的零值保持普通 intrinsic，让系统编译器共享各 fragment part
+的相同常量；不额外插入阻止常量共享的 vtype asm 屏障。有效 VL 和作者可见的行不变。
 沿同 block 的 lane-local add/sub/mul 可继续追踪到唯一 unpack，因此独立整数修正不会
 遮蔽 contraction 依赖。分析遇到多个不同 unpack 或 lifecycle birth 时停止；只移动独立
 供应，不移动这些算术节点，也不重排其运算树。
