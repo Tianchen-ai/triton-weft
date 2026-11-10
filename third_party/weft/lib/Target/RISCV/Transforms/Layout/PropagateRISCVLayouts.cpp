@@ -3780,16 +3780,16 @@ private:
                                                 result.getLayout(),
                                                 kernel.getTarget());
         if (!required &&
-            mlir::isa<riscv::CastOp, riscv::NarrowOp>(operation) &&
+            mlir::isa<riscv::CastOp, riscv::NarrowOp, riscv::CompareOp>(operation) &&
             operandType.getLayout().getCarrier() == "rvv" &&
             result.getLayout().getCarrier() == "rvv" &&
             operandType.getLayout().getSew() > result.getLayout().getSew() &&
             operandType.getShape() == result.getShape() &&
             operandType.getAxisIds() == result.getAxisIds()) {
-          // A narrow result can otherwise request more lanes than its wider
+          // A narrow or Boolean result can request more lanes than its wider
           // input can represent at the largest legal LMUL. Keep the input's
           // logical issue partition and select the corresponding result EMUL.
-          // This changes only the representation of this conversion.
+          // This changes only the operation's physical representation.
           auto joint = riscv_internal::projectLayout(
               builder, result, operandType.getLayout(), kernel.getTarget());
           auto inputLayout = joint ? riscv_internal::projectLayout(
