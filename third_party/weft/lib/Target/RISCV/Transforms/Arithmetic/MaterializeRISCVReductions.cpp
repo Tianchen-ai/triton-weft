@@ -22,7 +22,7 @@ public:
     registry.insert<riscv::WEFTRISCVDialect, arith::ArithDialect>();
   }
   void runOnOperation() override {
-    materializeSingletonIntegerContracts();
+    materializeIntegerReductionContracts();
     SmallVector<riscv::ReduceRegionOp> reductions;
     SmallVector<riscv::ScanOp> scans;
     int64_t nextAxis = 0;
@@ -44,27 +44,40 @@ public:
   }
 
 private:
-  void materializeSingletonIntegerContracts() {
+  void materializeIntegerReductionContracts() {
     SmallVector<Operation *> contracts;
     getOperation().walk([&](Operation *op) {
       if (!isa<riscv::DotOp, riscv::ContractOp, riscv::OuterContractOp>(op)) return;
       auto intent = op->getAttrOfType<StringAttr>("engine");
       if (intent && intent.getValue() == "matrix") return;
       auto result = dyn_cast<riscv::ValueType>(op->getResult(0).getType());
+      auto element = dyn_cast<IntegerType>(logicalElement(op->getResult(0).getType()));
       auto lhs = dyn_cast<riscv::ValueType>(op->getOperand(0).getType());
       auto rhs = dyn_cast<riscv::ValueType>(op->getOperand(1).getType());
       auto over = op->getAttrOfType<DenseI64ArrayAttr>("over");
-      if (!result || !lhs || !rhs || !over || over.size() != 1 ||
-          !isa<IntegerType>(result.getElementType()) ||
-          lhs.getElementType() != result.getElementType() ||
-          rhs.getElementType() != result.getElementType() ||
-          llvm::any_of(result.getShape().asArrayRef(), [](int64_t n) { return n != 1; }))
+      if (!element || !lhs || !rhs || !over || over.size() != 1 ||
+          (result && llvm::any_of(result.getShape().asArrayRef(),
+                                 [](int64_t n) { return n != 1; })))
+        return;
+      auto leftElement = dyn_cast<IntegerType>(lhs.getElementType());
+      auto rightElement = dyn_cast<IntegerType>(rhs.getElementType());
+      if (!leftElement || !rightElement ||
+          leftElement.getWidth() > element.getWidth() ||
+          rightElement.getWidth() > element.getWidth())
+        return;
+      // Keep the narrow widening-dot family intact. A scalar contraction with
+      // an accumulator-width input instead needs ordinary modular products
+      // followed by a lane reduction; it has no surviving vector output axis.
+      if (leftElement.getWidth() < element.getWidth() &&
+          rightElement.getWidth() < element.getWidth())
         return;
       contracts.push_back(op);
     });
     IRRewriter b(&getContext());
     for (Operation *op : contracts) {
-      auto result = cast<riscv::ValueType>(op->getResult(0).getType());
+      Type result = op->getResult(0).getType();
+      auto resultValue = dyn_cast<riscv::ValueType>(result);
+      Type element = logicalElement(result);
       int64_t axis = op->getAttrOfType<DenseI64ArrayAttr>("over")[0];
       SmallVector<int64_t> shape, axes;
       for (Value input : op->getOperands()) {
@@ -78,15 +91,38 @@ private:
       SmallVector<int64_t> freeAxes(axes), freeShape(shape);
       freeAxes.erase(freeAxes.begin() + index);
       freeShape.erase(freeShape.begin() + index);
-      if (ArrayRef<int64_t>(freeAxes) != result.getAxisIds().asArrayRef() ||
-          ArrayRef<int64_t>(freeShape) != result.getShape().asArrayRef()) continue;
+      if (resultValue) {
+        if (ArrayRef<int64_t>(freeAxes) != resultValue.getAxisIds().asArrayRef() ||
+            ArrayRef<int64_t>(freeShape) != resultValue.getShape().asArrayRef()) continue;
+      } else if (!freeAxes.empty()) {
+        continue;
+      }
       b.setInsertionPoint(op);
-      auto productType = riscv::ValueType::get(b.getContext(), result.getElementType(),
+      auto productType = riscv::ValueType::get(b.getContext(), element,
           b.getDenseI64ArrayAttr(shape), b.getDenseI64ArrayAttr(axes), unassignedLayout(b, axes));
-      // Equal-width integer multiply and modular add can use reduction lanes
-      // even when all output axes are singleton. No free-axis vector is needed.
+      auto promote = [&](Value input) -> Value {
+        auto type = cast<riscv::ValueType>(input.getType());
+        if (type.getElementType() == element) return input;
+        auto promoted = riscv::ValueType::get(b.getContext(), element,
+            type.getShape(), type.getAxisIds(),
+            unassignedLayout(b, type.getAxisIds().asArrayRef()));
+        Operation *conversion;
+        if (cast<IntegerType>(type.getElementType()).getWidth() <
+            cast<IntegerType>(element).getWidth())
+          conversion = riscv::WidenOp::create(b, op->getLoc(), promoted, input,
+                                             unselectedLeaf(b));
+        else
+          conversion = riscv::CastOp::create(b, op->getLoc(), promoted, input,
+                                            unselectedLeaf(b));
+        copyOrigin(op, conversion);
+        return conversion->getResult(0);
+      };
+      // Widen each operand using its original signedness. Multiplication and
+      // reduction then use the declared accumulator's modular integer width.
+      Value lhs = promote(op->getOperand(0));
+      Value rhs = promote(op->getOperand(1));
       auto product = riscv::BinaryOp::create(b, op->getLoc(), productType,
-          op->getOperand(0), op->getOperand(1), "mul", unselectedLeaf(b));
+          lhs, rhs, "mul", unselectedLeaf(b));
       auto reduction = riscv::ReduceOp::create(b, op->getLoc(), result, product,
           "add", index, unselectedLeaf(b), ValueRange{});
       copyOrigin(op, product);

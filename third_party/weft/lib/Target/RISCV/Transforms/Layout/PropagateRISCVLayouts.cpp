@@ -3465,11 +3465,11 @@ private:
       auto layout = reshapeCarrierLayout(builder, reshape);
       if (!layout && reshape.getInput().getType().getLayout().getCarrier() == "rvv" &&
           required.getLayout().getCarrier() == "rvv" &&
-          !llvm::equal(reshape.getOrder(), reshape.getInput().getType().getAxisIds().asArrayRef()) &&
-          riscv::reshapeAxisPositions(reshape.getInput().getType(), required, reshape.getOrder())) {
-        // Permuting two coalesced lane axes changes the order inside a register;
-        // it is not a metadata-only reshape. Realize one ordered lane axis on
-        // this use edge, leaving the other coordinates in register parts. The
+          (llvm::equal(reshape.getOrder(), reshape.getInput().getType().getAxisIds().asArrayRef()) ||
+           riscv::reshapeAxisPositions(reshape.getInput().getType(), required, reshape.getOrder()))) {
+        // Permuting lane axes or repartitioning mixed lane/replica radices can
+        // change register order; it is not a metadata-only reshape. Realize one
+        // ordered lane axis on this use edge, leaving other coordinates in parts. The
         // ordinary conversion materializer owns the required shuffle/transfer.
         mlir::OpBuilder::InsertionGuard guard(builder);
         builder.setInsertionPoint(reshape);
