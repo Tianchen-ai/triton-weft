@@ -87,7 +87,7 @@ mlir::FailureOr<std::string> Emitter::axisBroadcastPart(
   std::string source = input.parts[*sourcePart];
   if (from != to)
     source = "__riscv_vlmul_ext_v_" + from + "_" + to + "(" + source + ")";
-  if (physicalLanes(inputValue) == physicalLanes(resultValue))
+  if (!riscv::needsRVVAxisBroadcast(inputType, resultType))
     return source;
   const std::string vl = partVL(resultValue, part);
   const bool narrowIndex = resultType.getLayout().getReplicaGroup() > 1 &&

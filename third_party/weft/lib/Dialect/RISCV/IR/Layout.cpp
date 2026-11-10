@@ -571,7 +571,21 @@ bool weft::riscv::needsRVVAxisBroadcast(mlir::Type input, mlir::Type result) {
     return false;
   auto al = rvvLaneCount(a);
   auto bl = rvvLaneCount(b);
-  return al && bl && *al < *bl;
+  if (!al || !bl || *al > *bl)
+    return false;
+  if (*al < *bl)
+    return true;
+  // Equal carrier widths do not imply equal lane coordinates. In particular,
+  // two coalesced axes may appear in opposite orders after an outer broadcast.
+  auto laneOrder = [](ValueType type) {
+    llvm::SmallVector<std::pair<int64_t, int64_t>> order;
+    for (auto [axis, factor] : llvm::zip(type.getAxisIds().asArrayRef(),
+                                      type.getLayout().getLaneFactors().asArrayRef()))
+      if (factor > 1)
+        order.emplace_back(axis, factor);
+    return order;
+  };
+  return laneOrder(a) != laneOrder(b);
 }
 
 std::optional<int64_t> weft::riscv::rvvBroadcastSourcePart(
