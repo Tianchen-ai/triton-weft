@@ -545,7 +545,7 @@ Emitter::compileRVVPartialReduce(riscv::RVVPartialReduceOp operation) {
     const bool consumed = instruction.ends_with(".consumed");
     const std::string seed = fresh("partial_reduce_seed");
     const std::string vl = std::to_string(physicalLanesFor(inputPartial));
-    line("vint32m1_t " + seed + ";");
+    line("vint32m1_t " + seed + " = __riscv_vmv_v_x_i32m1(0, 1);");
     Binding result;
     result.kind = Binding::Kind::PartialSet;
     llvm::SmallVector<std::string> consumedSlots;
@@ -557,8 +557,6 @@ Emitter::compileRVVPartialReduce(riscv::RVVPartialReduceOp operation) {
       } else line("vint32m1_t " + result.parts.back() + ";");
     }
     line("__asm__(");
-    line("  \"vsetivli zero, 1, e32, m1, ta, ma\\n\\t\"");
-    line("  \"vmv.s.x %[seed], zero\\n\\t\"");
     line("  \"vsetvli zero, %[vl], e16, " +
          lmulSpelling(inputPartial.getLayout().getLmulEighths()) + ", ta, ma\\n\\t\"");
     for (size_t slot = 0; slot < input.parts.size(); ++slot) {
@@ -566,13 +564,14 @@ Emitter::compileRVVPartialReduce(riscv::RVVPartialReduceOp operation) {
       std::string in = (consumed ? "io" : "in") + std::to_string(slot);
       line("  \"vwredsum.vs %[" + out + "], %[" + in + "], %[seed]\\n\\t\"");
     }
-    std::string outputs = "  : [seed] \"=&vr\"(" + seed + ")";
-    std::string inputs = "  : [vl] \"r\"((size_t)" + vl + ")";
+    std::string outputs = "  : ";
+    std::string inputs = "  : [vl] \"r\"((size_t)" + vl + "), [seed] \"vr\"(" + seed + ")";
     for (size_t slot = 0; slot < input.parts.size(); ++slot) {
+      if (slot) outputs += ", ";
       if (consumed)
-        outputs += ", [io" + std::to_string(slot) + "] \"+&vr\"(" + consumedSlots[slot] + ")";
+        outputs += "[io" + std::to_string(slot) + "] \"+&vr\"(" + consumedSlots[slot] + ")";
       else {
-        outputs += ", [out" + std::to_string(slot) + "] \"=&vr\"(" + result.parts[slot] + ")";
+        outputs += "[out" + std::to_string(slot) + "] \"=&vr\"(" + result.parts[slot] + ")";
         inputs += ", [in" + std::to_string(slot) + "] \"vr\"(" + input.parts[slot] + ")";
       }
     }

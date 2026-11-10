@@ -106,6 +106,10 @@ RISC-V native 编译保留 Clang 的常规局部优化。SLP 能合并独立标�
 显式 `toolchain.cflags` 可在既有调优配置中约束这类机器优化，实际 native 命令随编译
 metadata 保存。它不改变作者的数值程序，不能代替 Weft 对布局、流水和显式临时存储的选择。
 
+共享 widening reduction 的零种子用只读 RVV intrinsic 值供给局部汇编。
+种子不在汇编中重新写入，允许 Clang 对相同纯值消冗或移出循环；汇编仍按已选
+输入类型设置 VL/VTYPE，并保持各 partial 的独立结果、覆盖约束及原数值顺序。
+
 已选循环对齐使用 `[[clang::code_align(N)]]`，与禁止展开的 pragma 一起保留到 LLVM
 loop metadata。GNU statement attribute 的拼写在这项组合中会丢失对齐，不能只凭 C 中
 出现属性就宣称最终循环已经对齐；实际落点由系统编译器的循环变换与机器代码确认。
