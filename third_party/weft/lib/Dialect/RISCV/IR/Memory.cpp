@@ -871,6 +871,29 @@ bool weft::riscv::haveDisjointLocalStorage(Value lhs, Value rhs) {
   return a.isOwnedLocal() && b.isOwnedLocal() && !originsMayAlias(a, b);
 }
 
+SmallVector<int64_t> weft::riscv::kernelRestrictArguments(KernelOp kernel) {
+  SmallVector<int64_t> result;
+  auto arguments = kernel.getBody().front().getArguments();
+  for (auto [index, argument] : llvm::enumerate(arguments)) {
+    if (!isa<MemDescType>(argument.getType())) continue;
+    const int64_t aliasSet = kernel.getArgAliasSets()[index];
+    if (aliasSet < 0) continue;
+    unsigned aliases = 0;
+    bool readOnly = true;
+    for (auto [other, candidate] : llvm::enumerate(kernel.getArgAliasSets())) {
+      if (candidate != aliasSet) continue;
+      ++aliases;
+      auto access = cast<StringAttr>(kernel.getArgAccess()[other]).getValue();
+      readOnly &= access == "read" || access == "none";
+    }
+    // C restrict permits overlapping reads when that object is never modified
+    // in this invocation. The ABI already proves disjointness from every
+    // writable alias group; do not discard that proof for read/read aliases.
+    if (aliases == 1 || readOnly) result.push_back(index);
+  }
+  return result;
+}
+
 SmallVector<int64_t> weft::riscv::helperRestrictCaptures(HelperOp helper) {
   SmallVector<int64_t> result;
   auto descriptorProjectionOf = [](Value value, Value capture) {

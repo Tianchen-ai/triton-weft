@@ -608,11 +608,10 @@ private:
         return std::nullopt;
       element = *fieldType;
     }
-    int64_t aliasSet = kernel.getArgAliasSets()[argument.getArgNumber()];
-    size_t aliases = 0;
-    for (int64_t candidate : kernel.getArgAliasSets())
-      aliases += candidate == aliasSet;
-    std::string qualifier = aliasSet >= 0 && aliases == 1 ? " *restrict" : " *";
+    auto restricted = kernel->getAttrOfType<mlir::DenseI64ArrayAttr>("native_restrict_arguments");
+    if (!restricted) return std::nullopt;
+    std::string qualifier = llvm::is_contained(restricted.asArrayRef(),
+        int64_t(argument.getArgNumber())) ? " *restrict" : " *";
     return (writable ? "" : "const ") + element + qualifier;
   }
 

@@ -63,6 +63,10 @@ partition。只有time/lane/register/fragment/local各自的总分解一致时�
 线性 reshape 重分解混合 lane/replica 因子时，如果两端不能直接保持线性序号，
 layout pass 在该 use edge 形成有序 lane carrier，再经已有 conversion materializer
 重排并接回消费者表示。转换的临时值、完整坐标及资源仍由同一物理管线验证。
+完整 row-major scalar tuple 的 reshape 保持原 scalar parts、机器 SEW 与有效域；后续
+向量消费者通过显式 numeric pack 获取其值。字段读取和普通计算得到的 scalar tuple
+共用相同坐标转换：先将 time parts 重排为 register replicas，再执行已闭合的 lane pack，
+不重新读取存储，也不把 logical i1 的机器存储宽度降为一位。
 
 issue-window 投影通过保形的轴重命名时，按位置追溯输入轴，保留相同的窗口坐标。
 已压缩为 `regular` 的索引关系仍按原完整域求值：先加入 issue 的全局 offset，
@@ -107,6 +111,10 @@ reaxis、local bind、snapshot 与有序控制的 SSA 边传播；`addressClass=
 pinned 参数还是私有 allocation。参数 alias set 只在所属 kernel 内比较；local reuse 仍指向
 原 allocation，分支及循环 carry 合并所有可能来源。数值寄存器快照不继续借用原输入 bytes。
 未知来源或未知 effect 不能作为不别名证明，最终验证拒绝没有存储对象的普通 memory effect。
+
+原生入口收口将参数 alias/effect 合同写为 `native_restrict_arguments`，最终验证重算并核对。
+独占 alias 组可使用 C `restrict`；只读组中的参数也可使用它，因为该组与全部可写组不重叠。
+这仍允许同组参数互相重叠读取；含有写入的共享组不能据此获得 `restrict`。终端只打印已选列表。
 
 控制流地址传播、alias-use 闭包和 read epoch 遍历使用跨目标的 StorageLifetime 分析；
 RISC-V 仍定义 descriptor、snapshot、local storage、alias set 与私有 resource 的语义。

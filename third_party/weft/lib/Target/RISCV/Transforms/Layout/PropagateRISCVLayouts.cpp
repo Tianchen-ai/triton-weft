@@ -1874,6 +1874,25 @@ riscv::LayoutAttr reshapeCarrierLayout(mlir::Builder &builder,
         layout.getVl(), layout.getRegisterGroups(), layout.getValidity(),
         layout.getReplicaGroup());
   }
+  if (layout.getCarrier() == "scalar") {
+    auto before = riscv_internal::staticProduct(input.getShape().asArrayRef());
+    auto after = riscv_internal::staticProduct(result.getShape().asArrayRef());
+    if (!before || !after || *before <= 0 || *before != *after ||
+        layout.getTimeFactors() != input.getShape()) return {};
+    for (auto factors : {layout.getLaneFactors(), layout.getReplicaFactors(),
+                         layout.getFragmentFactors(), layout.getLocalFactors()})
+      if (!llvm::all_of(factors.asArrayRef(), [](int64_t n) { return n == 1; }))
+        return {};
+    // Scalar tuples already enumerate the complete row-major value. Preserve
+    // those parts across reassociation; any vector consumer gets an explicit
+    // conversion after this representation-preserving reshape.
+    auto ones = riscv_internal::integers(
+        builder, llvm::SmallVector<int64_t>(result.getShape().size(), 1));
+    return riscv::LayoutAttr::get(builder.getContext(), "scalar", result.getAxisIds(),
+        result.getShape(), ones, ones, ones, ones, layout.getSew(),
+        layout.getLmulEighths(), layout.getVl(), layout.getRegisterGroups(),
+        layout.getValidity(), layout.getReplicaGroup());
+  }
   if (layout.getCarrier() != "rvv") return {};
   // A linear reshape can preserve a tuple of register parts just as it can
   // preserve one vector. Distribute the existing physical radices over the

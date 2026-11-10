@@ -1,5 +1,6 @@
 #include "Analysis/ValueLiveness.h"
 #include "Transforms/Support/RISCVPhysicalSupport.h"
+#include "Weft/Analysis/PhysicalDependence.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -122,6 +123,41 @@ bool transfersIntoRegion(Operation *operation, Value value, bool captured = fals
     });
   return false;
 }
+
+bool consumedBeforeInSingleIteration(Value value, Operation *anchor,
+                                    Operation *boundary) {
+  // A capture normally survives a loop body for its next iteration. A chain
+  // of proven one-trip loops has no backedge use: retain the actual inner
+  // last use instead of extending every capture across the whole region.
+  for (Operation *parent = anchor->getParentOp();; parent = parent->getParentOp()) {
+    auto loop = dyn_cast_or_null<scf::ForOp>(parent);
+    if (!loop || analysis::staticTripCount(loop) != std::optional<uint64_t>(1))
+      return false;
+    if (parent == boundary) break;
+  }
+  SmallVector<Value> pending{registerStorageIdentity(value)};
+  llvm::DenseSet<Value> visited;
+  while (!pending.empty()) {
+    Value alias = pending.pop_back_val();
+    if (!visited.insert(alias).second) continue;
+    if (visited.size() > 128) return false;
+    for (OpOperand &use : alias.getUses()) {
+      bool representation = false;
+      for (Value output : use.getOwner()->getResults())
+        if (riscv::registerAliasSource(output) == alias) {
+          pending.push_back(output);
+          representation = true;
+        }
+      if (representation) continue;
+      auto owner = ancestorInBlock(use.getOwner(), anchor->getBlock());
+      if (owner && owner->isBeforeInBlock(anchor)) continue;
+      owner = ancestorInBlock(use.getOwner(), boundary->getBlock());
+      if (owner && owner->isBeforeInBlock(boundary)) continue;
+      return false;
+    }
+  }
+  return true;
+}
 }
 
 std::optional<int64_t> riscv_internal::surroundingRegisterGroups(
@@ -143,6 +179,8 @@ std::optional<int64_t> riscv_internal::surroundingRegisterGroups(
       // region argument. Counting it again in the ancestor keeps a dead birth
       // live beside its carry and can double an entire fractional-LMUL tuple.
       if (at != anchor && transfersIntoRegion(at, interval.value)) continue;
+      if (at != anchor &&
+          consumedBeforeInSingleIteration(interval.value, anchor, at)) continue;
       if (interval.groups > std::numeric_limits<int64_t>::max() - total) return std::nullopt;
       total += interval.groups;
     }
