@@ -6775,8 +6775,10 @@ mlir::LogicalResult RVVSignedBitmaskReduceOp::verify() {
   llvm::StringRef tail = validity == "tail" ? "agnostic" : "exact";
   llvm::StringRef instruction = getLeaf().getInstruction();
   const bool complement = instruction == "rvv.signed-bitmask-reduce.complement";
+  const bool widenNegate = instruction == "rvv.signed-bitmask-reduce.widen-negate";
   const bool selected = instruction == "rvv.signed-bitmask-reduce.i8-i16" ||
-      (complement && data.getLayout().getLmulEighths() <= 8);
+      (complement && data.getLayout().getLmulEighths() <= 8) ||
+      (widenNegate && data.getLayout().getLmulEighths() <= 4);
   bool onlyReductionAxisIsStreamed = hasAxis;
   if (onlyReductionAxisIsStreamed)
     for (size_t index = 0; index < data.getShape().size(); ++index)
@@ -6809,7 +6811,7 @@ mlir::LogicalResult RVVSignedBitmaskReduceOp::verify() {
       !exactLeaf(getLeaf(), "rvv", "signed-bitmask-reduce",
                  instruction, "none", tail))
     return emitOpError(
-        "RVV signed-bitmask reduction requires signed-i8 data, a matching u1 mask, an i16-safe extent and an exact leaf with three temporary register groups; complement supply requires at most one byte register group");
+        "RVV signed-bitmask reduction requires signed-i8 data, a matching u1 mask, an i16-safe extent and an exact leaf with three temporary register groups; complement supply requires LMUL <= 1 and widened negation requires LMUL <= 1/2");
   return mlir::success();
 }
 

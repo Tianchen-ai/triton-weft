@@ -1437,6 +1437,26 @@ Roles rolesFor(mlir::Value value) {
       constrainReductionContractOperand(contract, value, roles);
     } else if (auto contract = mlir::dyn_cast<riscv::OuterContractOp>(owner)) {
       constrainOuterContractOperand(contract, value, roles);
+    } else if (auto extract = mlir::dyn_cast<riscv::ExtractOp>(owner)) {
+      auto type = mlir::cast<riscv::ValueType>(value.getType());
+      auto result = mlir::dyn_cast<riscv::ValueType>(extract.getResult().getType());
+      auto kernel = extract->getParentOfType<riscv::KernelOp>();
+      // A numeric table's axis need not survive in its gather result. Keep a
+      // complete, register-sized table in lanes instead of propagating the
+      // unrelated result axis back into a scalar tuple of table elements.
+      if (extract.getInput() == value && kernel && result && !roles.local &&
+          !roles.laneAxis && type.getShape().size() == 1 &&
+          result.getShape().size() == 1 && result.getShape()[0] > 1 &&
+          result.getShape()[0] < type.getShape()[0] &&
+          type.getShape()[0] > 1 &&
+          type.getShape()[0] <= kernel.getTarget().getVlenBits() /
+              std::max<int64_t>(8, riscv_internal::logicalBitWidth(type)) &&
+          extract.getSelectors().size() == 1 &&
+          mlir::cast<mlir::StringAttr>(extract.getSelectors()[0]).getValue() == "gather") {
+        roles.laneAxis = type.getAxisIds()[0];
+        roles.anchored = true;
+        roles.fullLaneExtent = true;
+      }
     } else if (auto lookup = mlir::dyn_cast<riscv::LookupOp>(owner)) {
       if (!constrainIndexedEntryLookup(lookup, value, roles)) {
         auto axes = riscv_internal::logicalAxes(lookup.getIndices().getType());

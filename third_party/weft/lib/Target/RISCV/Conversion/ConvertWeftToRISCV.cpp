@@ -1602,6 +1602,21 @@ private:
 
     mlir::OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(insertion);
+    // A runtime dimension may be referenced only by descriptor types after
+    // canonical dead-code elimination. Its declared ABI binding still owns
+    // that extent; reify it before constructing the entry memory views.
+    for (auto [index, attribute] : llvm::enumerate(source.getShapeSymbols())) {
+      const int64_t identity = static_cast<int64_t>(index) + 1;
+      if (shapeExtents.count(identity))
+        continue;
+      auto name = mlir::cast<mlir::StringAttr>(attribute);
+      auto bound = currentBindings.find(name.getValue());
+      shapeExtents[identity] = bound != currentBindings.end()
+          ? mlir::Value(mlir::arith::ConstantIndexOp::create(
+                builder, source.getLoc(), bound->second))
+          : mlir::Value(riscv::SymbolOp::create(
+                builder, source.getLoc(), builder.getIndexType(), name));
+    }
     for (auto [index, sourceArgument] :
          llvm::enumerate(sourceBody.getArguments())) {
       mlir::BlockArgument base = targetBody.getArgument(index);
