@@ -97,6 +97,11 @@ conversion。索引表供应可以沿该 reshape 的不变前缀追踪后续 con
 payload 的 LMUL 还须在实际 32/64-bit storage SEW 下合法。较宽 VLEN 不取消该约束；必要时
 保留较宽的 memory result，再通过显式 conversion 交给较窄 consumer，active VL 和读取范围不变。
 
+窄整数到浮点的分步转换保留每条机器转换的 SEW/LMUL 关系。若 staged table 的后续
+gather 需要大于活动 lane 数的载体容量，先按原整数载体形成 widening 和浮点转换，
+再通过显式 `convert_layout` 供应该容量；不能仅把最终 cast 的 result 改为较宽 LMUL。
+这项转换不重读输入、不扩大有效域，也不改变源 stage 的数值或生命周期。
+
 ## 3. Memory 与 local storage
 
 layered 字段的记录内窗口若来自单字节 chunk 的跨记录交错存储，逐 lane 字节地址是

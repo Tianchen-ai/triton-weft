@@ -70,8 +70,22 @@ LogicalResult riscv_internal::materializeNumericConversions(ModuleOp module, IRR
       if (!layout) return op->emitError("integer-to-float conversion has no legal intermediate layout");
       wideType = cast<riscv::ValueType>(withLayout(wideType, layout));
       Value wide = riscv::WidenOp::create(b, op->getLoc(), wideType, op->getOperand(0), unselectedLeaf(b));
-      Value converted = riscv::CastOp::create(b, op->getLoc(), result, wide, unselectedLeaf(b));
+      auto convertedLayout = projectLayout(b, result, layout,
+          op->getParentOfType<riscv::KernelOp>().getTarget());
+      if (!convertedLayout)
+        return op->emitError("integer-to-float conversion has no legal numeric result layout");
+      auto convertedType = cast<riscv::ValueType>(withLayout(result, convertedLayout));
+      Value converted = riscv::CastOp::create(b, op->getLoc(), convertedType, wide, unselectedLeaf(b));
       inherit(op, wide.getDefiningOp()); inherit(op, converted.getDefiningOp());
+      // A consumer can require more register capacity than these active lanes
+      // need. Preserve the machine-width relation of both numeric instructions
+      // and expose that extra capacity on a separate representation edge.
+      if (convertedType != result) {
+        converted = riscv::ConvertLayoutOp::create(b, op->getLoc(), result, converted,
+            layoutConversion(b, convertedLayout, result.getLayout()),
+            riscv::AccessAttr(), unselectedLeaf(b));
+        inherit(op, converted.getDefiningOp());
+      }
       b.replaceOp(op, converted);
       continue;
     }
