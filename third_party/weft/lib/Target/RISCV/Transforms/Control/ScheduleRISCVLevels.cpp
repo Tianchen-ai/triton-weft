@@ -390,10 +390,22 @@ public:
       getOperation().walk([&](riscv::KernelOp kernel) {
         selectFragmentRegisterReuse(kernel);
       });
-    // A zero already local to its single MMA needs no residency repair. Keep
-    // its ordinary intrinsic so the system compiler can share the constant
-    // across fragment parts. A forced local asm would add a vtype barrier and
-    // prevent that sharing despite having no outer seed to copy or shorten.
+    // A plain local contraction initializer can use ordinary constant sharing.
+    // A source state birth still captures its seed at a lifetime boundary; keep
+    // the bounded prefix there instead of carrying a complete hardware template
+    // through that boundary for every instance.
+    getOperation().walk([&](riscv::IMEZeroOp zero) {
+      auto kernel = zero->getParentOfType<riscv::KernelOp>();
+      if (!kernel || kernel.getResourcesMaterialized() ||
+          !zero->getParentOfType<scf::ForOp>() || !zero.getResult().hasOneUse() ||
+          !isa<riscv::NewOp>(*zero.getResult().getUsers().begin()))
+        return;
+      auto width = riscv::fragmentZeroPrefixWidth(zero.getResult().getType(), kernel.getTarget());
+      if (!width) return;
+      OpBuilder builder(zero);
+      zero.setLeafAttr(leaf(builder, "ime", "fragment-init", "ime.zero.local-prefix",
+                           "ime.zero.local-prefix", 0, 0, 0, 0, "none", "exact", {*width}));
+    });
     getOperation().walk([&](riscv::BinaryOp op) {
       if (op.getKind() == "mul") consumers.push_back(op);
     });

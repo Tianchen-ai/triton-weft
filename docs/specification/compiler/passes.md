@@ -927,8 +927,10 @@ unpack 的 fragment 来自内层 `scf.for` 结果时，沿对应 yield 追踪 MM
 accumulator reuse，避免把可以原位更新的 accumulator 误算成同时存在的新旧两份。
 共享或外层的 fragment zero 若只占硬件 fragment 的前缀，在 MMA 使用点通过既有
 local-prefix leaf 重物化，以能容纳有效元素且满足 SEW/LMUL 合法性的最小载体初始化。
-已经与唯一 MMA 同 block 的零值保持普通 intrinsic，让系统编译器共享各 fragment part
-的相同常量；不额外插入阻止常量共享的 vtype asm 屏障。有效 VL 和作者可见的行不变。
+普通局部 contraction 的零初值保持 intrinsic，让系统编译器共享各 fragment part 的相同
+常量；不额外插入阻止常量共享的 vtype asm 屏障。由 `new` 捕获的 source state 初值
+仍在 birth 位置使用有界 prefix，避免跨生命周期携带完整硬件模板。有效 VL 和作者
+可见的行不变。
 沿同 block 的 lane-local add/sub/mul 可继续追踪到唯一 unpack，因此独立整数修正不会
 遮蔽 contraction 依赖。分析遇到多个不同 unpack 或 lifecycle birth 时停止；只移动独立
 供应，不移动这些算术节点，也不重排其运算树。
