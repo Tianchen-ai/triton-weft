@@ -110,7 +110,7 @@ class Toolchain:
         if bundled_compiler and platform.machine() == "riscv64" and not values["sysroot"] and not explicit_runtime:
             values["cflags"] += native_gcc_runtime(target.abi)
         for flag in (*values["cflags"], *values["ldflags"]):
-            if x86 and flag.startswith("-m") and not flag.startswith(("-march=", "-mtune=")):
+            if x86 and flag.startswith("-m") and flag != "-mllvm" and not flag.startswith(("-march=", "-mtune=")):
                 raise ValueError("x86 ISA features must come from CPUTarget.march, not toolchain feature flags")
             if x86 and flag.startswith(("--target", "-target")):
                 raise ValueError("select the x86 target with toolchain.target, not toolchain.cflags")
