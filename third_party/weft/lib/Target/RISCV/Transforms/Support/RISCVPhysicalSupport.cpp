@@ -1708,7 +1708,7 @@ std::optional<riscv::ValueType> riscv_internal::splitRVVLaneAxes(
     mlir::Builder &builder, riscv::TargetAttr target, riscv::ValueType input,
     llvm::ArrayRef<unsigned> axes) {
   auto before = input.getLayout();
-  if (before.getCarrier() != "rvv" || before.getReplicaGroup() != 1)
+  if (before.getCarrier() != "rvv")
     return std::nullopt;
   llvm::SmallVector<int64_t> lanes(before.getLaneFactors().asArrayRef());
   llvm::SmallVector<int64_t> replicas(before.getReplicaFactors().asArrayRef());
@@ -1723,9 +1723,13 @@ std::optional<riscv::ValueType> riscv_internal::splitRVVLaneAxes(
     lanes[axis] = 1;
   }
   auto count = staticProduct(replicas);
-  if (!count || factor <= 0 || before.getVl() % factor) return std::nullopt;
+  auto divisor = staticProduct({factor, before.getReplicaGroup()});
+  if (!count || !divisor || before.getVl() % *divisor)
+    return std::nullopt;
   // Lane coordinates fix VL, not LMUL. Below the smallest fractional LMUL,
-  // use the legal carrier capacity and account for every live replica.
+  // use the legal carrier capacity and account for every live replica. A
+  // grouped carrier first returns its packed replicas to independent parts;
+  // the same ordered coordinate proof validates that split and the lane split.
   riscv::ValueType selected;
   for (int64_t lmul : target.getLegalLMULEighths().asArrayRef()) {
     if (selected && lmul >= selected.getLayout().getLmulEighths()) continue;
@@ -1734,7 +1738,7 @@ std::optional<riscv::ValueType> riscv_internal::splitRVVLaneAxes(
     auto layout = riscv::LayoutAttr::get(builder.getContext(), "rvv", input.getAxisIds(),
         before.getTimeFactors(), integers(builder, lanes), integers(builder, replicas),
         before.getFragmentFactors(), before.getLocalFactors(), before.getSew(), lmul,
-        before.getVl() / factor, *groups, before.getValidity());
+        before.getVl() / *divisor, *groups, before.getValidity());
     if (!riscv::supportsRVVLayout(target, layout)) continue;
     auto candidate = mlir::cast<riscv::ValueType>(withLayout(input, layout));
     if (riscv::rvvLayoutRepackSlices(input, candidate)) selected = candidate;

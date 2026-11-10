@@ -730,6 +730,10 @@ composite lowering中消费。partial materialization后新出现的replica memo
 普通 dense load/store 的单条 unit/strided leaf 只覆盖一个 lane 轴。多轴计算 carrier 在
 memory use 上先拆成 innermost-lane carrier 与 replicas，读取后再按需合并；不能把最外轴的
 stride 用于整个合并后的 VL。转换保持原访问点、完整 shape/axes 与 memory effects。
+矩阵出口若将多个 replica 分组装入同一 RVV carrier，访存边先通过同一坐标映射
+拆回独立 replica，再拆分外层 lane 轴；VL 同时除以 replica group 与拆分的 lane 因子。
+生成的显式 `lane_repack` 必须通过完整坐标、合法 LMUL、临时值和最终资源检查，
+普通 dense transfer 不直接消费 grouped carrier。
 
 对 stride 为 ABI/runtime operand 的 dense lane axis，unit-stride 探测是局部物理选择。
 选择沿 Slice/Subview 回看底层 descriptor：只为最内层非单例维度加入该探测；被切片隐藏的

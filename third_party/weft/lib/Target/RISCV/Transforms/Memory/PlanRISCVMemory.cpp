@@ -3389,15 +3389,16 @@ mlir::FailureOr<riscv::ValueType> denseMemoryCarrier(
   if (!type || type.getLayout().getCarrier() != "rvv") return type;
   auto before = type.getLayout();
   auto lanes = before.getLaneFactors().asArrayRef();
-  if (llvm::count_if(lanes, [](int64_t n) { return n > 1; }) <= 1) return type;
+  if (before.getReplicaGroup() == 1 &&
+      llvm::count_if(lanes, [](int64_t n) { return n > 1; }) <= 1)
+    return type;
   auto kernel = operation->getParentOfType<riscv::KernelOp>();
-  if (!kernel || kernel.getResourcesMaterialized() ||
-      before.getReplicaGroup() != 1)
-    return operation->emitError("dense multi-axis lane access requires an unfrozen ungrouped register layout"), mlir::failure();
+  if (!kernel || kernel.getResourcesMaterialized())
+    return operation->emitError("dense register access requires an unfrozen layout conversion"), mlir::failure();
   int64_t inner = lanes.size() - 1;
-  while (lanes[inner] == 1) --inner;
+  while (inner >= 0 && lanes[inner] == 1) --inner;
   llvm::SmallVector<unsigned> splitAxes;
-  for (unsigned axis = 0; axis < static_cast<unsigned>(inner); ++axis)
+  for (int64_t axis = 0; axis < inner; ++axis)
     if (lanes[axis] > 1) splitAxes.push_back(axis);
   auto result = riscv_internal::splitRVVLaneAxes(builder, kernel.getTarget(), type, splitAxes);
   if (!result)
