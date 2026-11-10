@@ -708,7 +708,12 @@ public:
       // reduction by a complemented payload and a predicate population count.
       // Unlike byte negation, ~x followed by the scalar +1 correction also
       // represents the signed minimum exactly.
-      llvm::StringRef instruction = dataType.getLayout().getLmulEighths() <= 8
+      // A fractional byte carrier can widen into one architectural register.
+      // Negation there represents -(-128) exactly and needs no population-count
+      // correction. Larger carriers retain the bounded existing supplies.
+      llvm::StringRef instruction = dataType.getLayout().getLmulEighths() <= 4
+          ? "rvv.signed-bitmask-reduce.widen-negate"
+          : dataType.getLayout().getLmulEighths() <= 8
           ? "rvv.signed-bitmask-reduce.complement"
           : "rvv.signed-bitmask-reduce.i8-i16";
       auto maskLeaf = relation->mask.getLeaf();

@@ -422,7 +422,8 @@ mlir::LogicalResult Emitter::compileRVVSignedBitmaskReduce(
     riscv::RVVSignedBitmaskReduceOp operation) {
   const auto instruction = instructionOf(operation.getOperation());
   if (instruction != "rvv.signed-bitmask-reduce.i8-i16" &&
-      instruction != "rvv.signed-bitmask-reduce.complement")
+      instruction != "rvv.signed-bitmask-reduce.complement" &&
+      instruction != "rvv.signed-bitmask-reduce.widen-negate")
     return fail(operation,
                 "RVV signed-bitmask reduction has no exact selected leaf");
   Binding data = bindings.lookup(operation.getData());
@@ -448,6 +449,24 @@ mlir::LogicalResult Emitter::compileRVVSignedBitmaskReduce(
   std::string zero = fresh("signed_bitmask_zero");
   line("vint16m1_t " + zero +
        " = __riscv_vmv_v_x_i16m1(0, 1);");
+  if (instruction == "rvv.signed-bitmask-reduce.widen-negate") {
+    const std::string wideSuffix = "i16" + lmulSpelling(2 * layout.getLmulEighths());
+    std::string wide = fresh("signed_bitmask_wide");
+    line("vint16" + lmulSpelling(2 * layout.getLmulEighths()) + "_t " + wide +
+         " = __riscv_vsext_vf2_" + wideSuffix + "(" + data.parts.front() + ", " + vl + ");");
+    std::string negated = fresh("signed_bitmask_negated");
+    line("vint16" + lmulSpelling(2 * layout.getLmulEighths()) + "_t " + negated +
+         " = __riscv_vneg_v_" + wideSuffix + "_mu(" + mask.parts.front() +
+         ", " + wide + ", " + wide + ", " + vl + ");");
+    std::string total = fresh("signed_bitmask_total");
+    line("vint16m1_t " + total + " = __riscv_vredsum_vs_" + wideSuffix +
+         "_i16m1_tu(" + zero + ", " + negated + ", " + zero + ", " + vl + ");");
+    Binding result;
+    result.kind = Binding::Kind::Scalar;
+    result.scalar = "(-(int32_t)__riscv_vmv_x_s_i16m1_i16(" + total + "))";
+    bindings[operation.getResult()] = std::move(result);
+    return mlir::success();
+  }
   if (instruction == "rvv.signed-bitmask-reduce.complement") {
     std::string signedValue = fresh("signed_bitmask_value");
     line(vectorType(operation.getData()) + " " + signedValue + " = __riscv_vnot_v_" +

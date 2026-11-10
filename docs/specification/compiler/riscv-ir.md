@@ -358,10 +358,18 @@ temporary resource 为相应的 1/2/4 组，仍须通过完整 live-set 检查�
 
 ## 4. Explicit conversion
 
+entry descriptor 的动态 extent 由 kernel 已声明的 shape ABI identity 取得。即使数值
+程序不直接使用该 shape SSA，descriptor type 中的引用仍保留其 ABI 绑定；转换时在
+root-domain 前显式物化该 extent，不从轴名推测运行时长度。
+
 representation conflict是一个真实 `weft_riscv.convert_layout`：source/result type保存完整
 layout，`ConversionAttr`保存 transfer kind/effect/temporaries，leaf保存 exact terminal form。
 conversion保持 element、shape、axes和 logical Value identity，只改变 physical carrier或
 coordinate decomposition。
+
+单轴 numeric table 的分组 gather 可以使用比结果更多的活动 lanes。布局传播保留完整
+table 的寄存器容量，结果通过显式 conversion 交给较小的消费者。索引窄化必须先证明
+完整索引范围，并逐级保留 SEW/LMUL 的容量比例；不能因活动 lanes 较少而截短 table。
 
 storage projection 与 numeric SSA 不混同。`field_read` 是显式 Read-effect op：input 保留
 field/extract 到原 load 或 snapshot 的来源，access 固定字节/bit mapping 与 memory form，
@@ -559,6 +567,10 @@ mask 为真时以 masked complement 得到 `~x`，为假时保留原 I8 值；�
 由于 `-x = ~x + 1`，合法的 -128 不会在 I8 中取负，空 tail 仍为零；不需要额外
 merge 或 widened 符号向量。临时寄存器继续遵守三组预算，较宽 carrier 使用原两归约形式。
 pass 明确选定 leaf，emitter 只拼写该序列。
+I8 LMUL 不超过 1/2 时还可选择 `rvv.signed-bitmask-reduce.widen-negate`：先扩到 I16，
+在原 mask 为真处取负，保留其余 I16 数据，再归约并在 I32 中取反。`-128` 的相反数
+在 I16 中精确表示；少于 256 个元素保持 partial 不溢出。I16 carrier 不超过一个架构
+寄存器，seed、widen 与 selected value 共计三组 temporary，VL=0 时仍保留零 seed。
 
 pipeline参数只有在改写成真实 guard、prologue、steady-state、epilogue与buffer-version carry后
 才算实现。未消费 `ScheduleAttr` 或只有一个 depth 字段的module不能进入emission。

@@ -4101,7 +4101,12 @@ public:
           auto target = operation->getParentOfType<riscv::KernelOp>().getTarget();
           auto layout = riscv_internal::projectLayout(builder, narrowType,
                                                        indexValue.getLayout(), target);
-          if (layout && layout == resultValue.getLayout() &&
+          auto narrowValue = layout ? mlir::cast<riscv::ValueType>(
+              riscv_internal::withLayout(narrowType, layout)) : riscv::ValueType();
+          auto suppliedIndex = riscv::ValueType::get(builder.getContext(), element,
+              indexValue.getShape(), indexValue.getAxisIds(), resultValue.getLayout());
+          if (narrowValue &&
+              riscv::hasContiguousRVVTimeRepartition(narrowValue, suppliedIndex) &&
               indexValue.getShape() == resultValue.getShape() &&
               indexValue.getAxisIds() == resultValue.getAxisIds()) {
             llvm::SmallVector<riscv::ValueType> steps;
@@ -4113,6 +4118,23 @@ public:
                   indexValue.getShape(), indexValue.getAxisIds(), indexValue.getLayout());
               auto stepLayout = riscv_internal::projectLayout(builder, stepType,
                                                                indexValue.getLayout(), target);
+              const int64_t numerator =
+                  indexValue.getLayout().getLmulEighths() * stepBits;
+              const int64_t sourceBits = indexValue.getLayout().getSew();
+              auto replicas = stepLayout ? riscv_internal::staticProduct(
+                  stepLayout.getReplicaFactors().asArrayRef()) : std::optional<int64_t>();
+              if (!stepLayout || numerator % sourceBits || !replicas) {
+                steps.clear();
+                break;
+              }
+              const int64_t stepWidth = numerator / sourceBits;
+              stepLayout = riscv::LayoutAttr::get(builder.getContext(), "rvv",
+                  stepLayout.getAxisIds(), stepLayout.getTimeFactors(),
+                  stepLayout.getLaneFactors(), stepLayout.getReplicaFactors(),
+                  stepLayout.getFragmentFactors(), stepLayout.getLocalFactors(),
+                  stepBits, stepWidth, stepLayout.getVl(),
+                  ((stepWidth + 7) / 8) * *replicas, stepLayout.getValidity(),
+                  stepLayout.getReplicaGroup());
               if (!stepLayout || !riscv::supportsRVVLayout(target, stepLayout)) {
                 steps.clear();
                 break;
@@ -4129,6 +4151,17 @@ public:
               riscv_internal::copyOrigin(operation, narrowed);
               gatherIndex = narrowed;
               indexValue = stepType;
+            }
+            if (indexValue.getElementType() == element &&
+                indexValue.getLayout() != suppliedIndex.getLayout()) {
+              auto conversion = riscv::ConvertLayoutOp::create(rewriter,
+                  operation.getLoc(), suppliedIndex, gatherIndex,
+                  riscv_internal::layoutConversion(builder,
+                      indexValue.getLayout(), suppliedIndex.getLayout()),
+                  riscv::AccessAttr(), riscv_internal::unselectedLeaf(builder));
+              riscv_internal::copyOrigin(operation, conversion);
+              gatherIndex = conversion;
+              indexValue = suppliedIndex;
             }
             operation.getIndicesMutable().assign(gatherIndex);
           }
