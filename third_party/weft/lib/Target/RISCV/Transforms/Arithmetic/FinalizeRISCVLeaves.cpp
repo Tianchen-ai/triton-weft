@@ -650,6 +650,30 @@ void selectSharedReductionSeeds(mlir::ModuleOp module) {
         reduce, {reduce.getInput(), reduce.getResult()});
     const int64_t independentGroups = input.getResourceGroups() +
         reduce.getResult().getType().getResourceGroups() + 1;
+    // Keep indexed producers visible to the machine scheduler when the full
+    // independent live set fits. An opaque reduction group prevents latency
+    // overlap with table loads, even when sharing VTYPE would save instructions.
+    llvm::SmallVector<mlir::Value, 16> pending{reduce.getInput()};
+    llvm::SmallPtrSet<mlir::Operation *, 32> visited;
+    bool indexedSupply = false;
+    while (!pending.empty() && visited.size() < 32) {
+      auto *producer = pending.pop_back_val().getDefiningOp();
+      if (!producer || !visited.insert(producer).second)
+        continue;
+      if (mlir::isa<riscv::RVVIndexedEntryLoadOp>(producer)) {
+        indexedSupply = true;
+        break;
+      }
+      for (mlir::Value operand : llvm::reverse(producer->getOperands()))
+        if (mlir::isa<riscv::ValueType, riscv::PartialSetType>(operand.getType()))
+          pending.push_back(operand);
+    }
+    if (indexedSupply && outside &&
+        *outside + independentGroups <= kernel.getTarget().getVectorRegisters()) {
+      reduce->setAttr("weft.riscv.reduction_schedule_reason",
+                      builder.getStringAttr("indexed-producer-overlap"));
+      return;
+    }
     // Two independent reductions can expose useful scheduling freedom. Larger
     // groups also pay for repeated seed/result versus input VTYPE settings:
     // the shared sequence saves two state changes for every additional slot,

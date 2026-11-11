@@ -1700,6 +1700,11 @@ slot pack统一使用最终VL：每次slide保留已构造前缀，未构造lane
 可减少重复的输入／结果 VTYPE 切换，即使两者的寄存器均能容纳也参与选择。
 所选 op 的 `weft.riscv.reduction_state_cost` 记录独立与共享序列的有界结构成本，
 不改变各 slot 的数值分组、覆盖许可或最终资源验证。
+索引供给还需要保留工具链交错访存和归约的机会：在至多 32 个 typed numeric
+producer 的有界查询中确认 `rvv_indexed_entry_load`，且完整独立活跃集合法时，
+保留独立 intrinsic，并写入 `weft.riscv.reduction_schedule_reason =
+"indexed-producer-overlap"`。该查询不移动读取、不改变 Level 或整数 partial，
+不能用未找到 witness 推断不存在索引供给。
 可scalar-rematerialize的供应以无vector extract的成本下界比较。供应搜索最多32个节点，
 包括静态一维`iota`：同逻辑range/axis的scalar replica使用既有`register.iota`，
 不能因初始vector坐标表示漏掉这条合法供应；查询与物化接受相同的producer集合。
