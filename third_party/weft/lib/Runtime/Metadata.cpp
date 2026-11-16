@@ -77,7 +77,8 @@ weft_dtype dtype(const std::string &name) {
       {"", WEFT_DTYPE_NONE}, {"i1", WEFT_I1}, {"i8", WEFT_I8}, {"u8", WEFT_U8},
       {"i16", WEFT_I16}, {"u16", WEFT_U16}, {"i32", WEFT_I32}, {"u32", WEFT_U32},
       {"i64", WEFT_I64}, {"u64", WEFT_U64}, {"f16", WEFT_F16}, {"bf16", WEFT_BF16},
-      {"f32", WEFT_F32}, {"f64", WEFT_F64}, {"index", WEFT_INDEX}};
+      {"f32", WEFT_F32}, {"f64", WEFT_F64}, {"index", WEFT_INDEX},
+      {"f8E4M3FN", WEFT_F8E4M3FN}, {"f8E5M2", WEFT_F8E5M2}};
   auto found = types.find(name);
   require(found != types.end(), WEFT_UNSUPPORTED, "unsupported ABI dtype: " + name);
   return found->second;

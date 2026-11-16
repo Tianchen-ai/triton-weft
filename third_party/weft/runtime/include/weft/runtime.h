@@ -34,7 +34,8 @@ typedef enum weft_dtype {
     WEFT_DTYPE_NONE = 0,
     WEFT_I1, WEFT_I8, WEFT_U8, WEFT_I16, WEFT_U16,
     WEFT_I32, WEFT_U32, WEFT_I64, WEFT_U64,
-    WEFT_F16, WEFT_BF16, WEFT_F32, WEFT_F64, WEFT_INDEX
+    WEFT_F16, WEFT_BF16, WEFT_F32, WEFT_F64, WEFT_INDEX,
+    WEFT_F8E4M3FN, WEFT_F8E5M2
 } weft_dtype;
 
 typedef enum weft_access {
