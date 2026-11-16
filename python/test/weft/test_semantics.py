@@ -2,7 +2,8 @@
 import numpy as np
 import pytest
 from semantic_programs import (semantics_composition, static_births,
-    invalid_body_capture, invalid_sibling_capture, invalid_stage_update)
+    invalid_body_capture, invalid_sibling_capture, invalid_stage_update,
+    dense_index_conversion)
 from semantic_reference import composition_reference
 
 
@@ -46,3 +47,11 @@ def test_invalid_initialization_and_snapshot_write_are_rejected(function):
     output = np.empty_like(value)
     with pytest.raises((CompilationError, ValueError)):
         function[(1,)](value, output, num_cpu_threads=1)
+
+
+@pytest.mark.parametrize("size", [1, 64, 65, 137])
+def test_dense_index_conversion_preserves_tail(size):
+    output = np.empty(size, dtype=np.int64)
+    dense_index_conversion[(1,)](output, num_cpu_threads=1)
+    expected = (np.arange(size, dtype=np.int64) % 64) * 4294967291 + 17
+    np.testing.assert_array_equal(output, expected)

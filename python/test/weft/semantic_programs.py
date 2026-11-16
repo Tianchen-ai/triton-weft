@@ -105,3 +105,11 @@ def mismatched_windows(X:tl.View[tl.i32,(M,)],Y:tl.View[tl.i32,(M,)],COUNT:tl.i3
 @triton.jit(model="weft")
 def static_window_copy(X:tl.View[tl.i32,(M,)],Y:tl.View[tl.i32,(M,)],*,M:tl.constexpr):
     copy_window(X,Y)
+
+
+@triton.jit(model="weft")
+def dense_index_conversion(Y:tl.View[tl.i64,(N,)]):
+    with tl.level.blocks(N,extent=64) as n:
+        indices=tl.arange(0,64,dtype=tl.index,axis="n")
+        converted=tl.i64(indices)
+        tl.store(Y[n],converted*tl.i64(4294967291)+tl.i64(17))

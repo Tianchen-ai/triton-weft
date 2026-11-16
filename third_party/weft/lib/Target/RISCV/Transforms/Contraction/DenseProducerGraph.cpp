@@ -73,8 +73,10 @@ bool DenseProducerGraph::projects(riscv::ValueType type) const {
 bool DenseProducerGraph::collect(Value value) {
   auto type = dyn_cast<riscv::ValueType>(value.getType());
   if (!type) return isa<IntegerType, FloatType, IndexType>(value.getType());
-  if (!projects(type) || !isa<IntegerType, FloatType>(type.getElementType())) {
+  if (!projects(type) || !isa<IntegerType, FloatType, IndexType>(type.getElementType())) {
     failureReason = "producer coordinates or element type leave the consumer domain";
+    llvm::raw_string_ostream details(failureReason);
+    details << ": producer=" << type << "; consumer=" << domain;
     return false;
   }
   // Once an observed value is an input, another path through a shared DAG
@@ -496,6 +498,13 @@ bool DenseProducerGraph::analyze(bool required, bool allowGuards) {
     if (auto load = dyn_cast<riscv::LoadOp>(producer)) {
       auto point = originPoint(load.getRegion(), axis);
       return point && dominance.dominates(point.getActive(), root) ? point.getActive() : Value();
+    }
+    if (auto load = dyn_cast<riscv::RVVTileLoadOp>(producer)) {
+      auto found = llvm::find(type.getAxisIds().asArrayRef(), axis);
+      unsigned position = found - type.getAxisIds().asArrayRef().begin();
+      if (position >= load.getExtents().size()) return {};
+      Value extent = load.getExtents()[position];
+      return dominance.dominates(extent, root) ? extent : Value();
     }
     if (auto reshape = dyn_cast<riscv::ReshapeOp>(producer)) {
       auto positions = riscv::reshapeAxisPositions(reshape.getInput().getType(), type, reshape.getOrder());
