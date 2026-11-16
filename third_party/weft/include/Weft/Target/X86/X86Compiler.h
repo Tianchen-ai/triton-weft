@@ -12,6 +12,8 @@ void registerX86Passes();
 std::unique_ptr<mlir::Pass> createX86MathPass();
 std::unique_ptr<mlir::Pass> createX86LocalFloatingFusionPass();
 std::unique_ptr<mlir::Pass> createX86HalfCarrierPass();
+std::unique_ptr<mlir::Pass> createX86LowPrecisionPass();
+std::unique_ptr<mlir::Pass> createX86FloatPayloadPass();
 std::unique_ptr<mlir::Pass> createX86VectorProjectionPass();
 std::unique_ptr<mlir::Pass> createX86ProjectionLoopPass();
 std::unique_ptr<mlir::Pass> createX86IntegerReductionPass();

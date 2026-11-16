@@ -92,6 +92,12 @@ bool unsignedType(Type type) {
   auto integer = dyn_cast<IntegerType>(element(type));
   return integer && integer.isUnsigned();
 }
+bool encodedFloat(Type type) {
+  return isa<BFloat16Type, Float8E4M3FNType, Float8E5M2Type>(type);
+}
+Type floatStorage(Type type) {
+  return IntegerType::get(type.getContext(), type.getIntOrFloatBitWidth());
+}
 SmallVector<int64_t> logicalShape(Type type) {
   return llvm::to_vector(wk::logicalShape(type));
 }
@@ -118,6 +124,8 @@ Type denseElement(Type type) {
   StringRef family = dense.getFamily();
   if (family == "f16") return Float16Type::get(context);
   if (family == "bf16") return BFloat16Type::get(context);
+  if (family == "f8E4M3FN") return Float8E4M3FNType::get(context);
+  if (family == "f8E5M2") return Float8E5M2Type::get(context);
   if (family == "f32") return Float32Type::get(context);
   if (family == "f64") return Float64Type::get(context);
   unsigned bits;
@@ -279,14 +287,16 @@ public:
     for (auto [index, old] : llvm::enumerate(kernel.getBody().front().getArguments())) {
       auto record = std::move(*(*interface.getArray("arguments"))[index].getAsObject());
       bool pointer = isa<wk::PointerType>(old.getType()) || memoryType(old.getType());
-      Type type = packedType(old.getType()) ? Type(b.getIntegerType(8, IntegerType::Unsigned)) : memoryType(old.getType()) ? denseElement(old.getType()) :
+      Type type = packedType(old.getType()) ? Type(IntegerType::get(b.getContext(), 8, IntegerType::Unsigned)) : memoryType(old.getType()) ? denseElement(old.getType()) :
           pointer ? cast<wk::PointerType>(old.getType()).getElementType() : old.getType();
+      if (!type) return unsupported(kernel, "x86 C ABI has no element type for ") << old.getType();
       std::string ctype;
       if (type.isIndex()) ctype = "size_t";
       else if (type.isF32()) ctype = "float";
       else if (type.isF64()) ctype = "double";
       else if (type.isF16() && pointer) ctype = "_Float16";
       else if (type.isBF16() && pointer) ctype = "uint16_t";
+      else if (isa<Float8E4M3FNType, Float8E5M2Type>(type) && pointer) ctype = "uint8_t";
       else if (auto integer = dyn_cast<IntegerType>(type))
         ctype = integer.getWidth() == 1 ? "bool" :
             (integer.isUnsigned() ? "uint" : "int") + std::to_string(integer.getWidth()) + "_t";
@@ -524,8 +534,8 @@ private:
   }
   Value zero(Location loc, Type type) { return constant(loc, type, b.getI64IntegerAttr(0)); }
   Value permute(Location loc, Value value, ArrayRef<int64_t> indices, Type result) {
-    if (scalar(value.getType()).isBF16()) {
-      Type bitsType = b.getI16Type(), resultBits = b.getI16Type();
+    if (encodedFloat(scalar(value.getType()))) {
+      Type bitsType = floatStorage(scalar(value.getType())), resultBits = bitsType;
       if (auto vector = dyn_cast<VectorType>(value.getType())) bitsType = vector.clone(bitsType);
       if (auto vector = dyn_cast<VectorType>(result)) resultBits = vector.clone(resultBits);
       Value bits = operation(loc, "arith.bitcast", bitsType, value);
@@ -832,7 +842,7 @@ private:
     Type elementType = scalar(domain), pointer = LLVM::LLVMPointerType::get(b.getContext());
     Type vectorType = physicalType(domain);
     bool booleanStorage = elementType.isInteger(1);
-    bool bfloatStorage = elementType.isBF16();
+    bool encodedStorage = encodedFloat(elementType);
     Type storageType = vectorType;
     if (booleanStorage) {
       // CPU bool storage is byte-addressed. LLVM <N x i1> memory would pack
@@ -841,11 +851,10 @@ private:
       storageType = isa<VectorType>(vectorType) ? Type(VectorType::get(cast<VectorType>(vectorType).getShape(), elementType)) : elementType;
       data = operation(loc, "arith.extui", storageType, data);
     }
-    if (bfloatStorage) {
-      // Storage is an exact 16-bit payload. LLVM's BF16 gather legalization
-      // otherwise goes through scalar float values and may introduce a
-      // __truncsfbf2 libcall even when the source only loads and widens.
-      elementType = b.getI16Type();
+    if (encodedStorage) {
+      // Transfer exact bits. LLVM's BF16 gather can introduce conversion
+      // libcalls; FP8 has no native LLVM memory element type on x86.
+      elementType = floatStorage(elementType);
       storageType = isa<VectorType>(vectorType) ? Type(cast<VectorType>(vectorType).clone(elementType)) : elementType;
       data = operation(loc, "arith.bitcast", storageType, data);
     }
@@ -916,7 +925,7 @@ private:
     if (load) {
       if (booleanStorage)
         result = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, result, zero(loc, storageType));
-      if (bfloatStorage) result = operation(loc, "arith.bitcast", vectorType, result);
+      if (encodedStorage) result = operation(loc, "arith.bitcast", vectorType, result);
     }
     return result;
   }
@@ -947,9 +956,10 @@ private:
       Value value = access(loc, base, partOffsets, partMask, partData,
                            packet, load, true);
       if (load) {
-        if (vector.getElementType().isBF16()) {
-          Value bits = operation(loc, "arith.bitcast", vector.clone(b.getI16Type()), result);
-          Value chunk = operation(loc, "arith.bitcast", VectorType::get({run}, b.getI16Type()), value);
+        if (encodedFloat(vector.getElementType())) {
+          Type storage = floatStorage(vector.getElementType());
+          Value bits = operation(loc, "arith.bitcast", vector.clone(storage), result);
+          Value chunk = operation(loc, "arith.bitcast", VectorType::get({run}, storage), value);
           bits = vector::InsertStridedSliceOp::create(b, loc, chunk, bits,
               ArrayRef<int64_t>{begin}, ArrayRef<int64_t>{1});
           result = operation(loc, "arith.bitcast", vector, bits);
@@ -1014,7 +1024,7 @@ private:
         auto packet = wk::ValueType::get(b.getContext(), element(domain),
             b.getDenseI64ArrayAttr({run}), b.getDenseI64ArrayAttr({axes(domain).back()}));
         auto payload = VectorType::get({run}, vector.getElementType());
-        auto helperPayload = vector.getElementType().isBF16() ? payload.clone(b.getI16Type()) : payload;
+        auto helperPayload = encodedFloat(vector.getElementType()) ? payload.clone(floatStorage(vector.getElementType())) : payload;
         auto predicate = VectorType::get({run}, b.getI1Type());
         std::string elementName;
         llvm::raw_string_ostream stream(elementName);
@@ -1062,8 +1072,8 @@ private:
           if (helperPayload != payload) incoming = operation(loc, "arith.bitcast", helperPayload, incoming);
           auto call = func::CallOp::create(b, loc, helper, ValueRange{
               base, first, step, permute(loc, mask, lanes, predicate), incoming});
-          if (vector.getElementType().isBF16()) {
-            Value bits = operation(loc, "arith.bitcast", vector.clone(b.getI16Type()), result);
+          if (encodedFloat(vector.getElementType())) {
+            Value bits = operation(loc, "arith.bitcast", vector.clone(floatStorage(vector.getElementType())), result);
             bits = vector::InsertStridedSliceOp::create(b, loc, call.getResult(0), bits,
                 ArrayRef<int64_t>{begin}, ArrayRef<int64_t>{1});
             result = operation(loc, "arith.bitcast", vector, bits);
@@ -1154,9 +1164,10 @@ private:
       }
       if (load) {
         Value chunk = branch.getResult(0);
-        if (vector.getElementType().isBF16()) {
-          Value bits = operation(loc, "arith.bitcast", vector.clone(b.getI16Type()), result);
-          Value partBits = operation(loc, "arith.bitcast", VectorType::get({run}, b.getI16Type()), chunk);
+        if (encodedFloat(vector.getElementType())) {
+          Type storage = floatStorage(vector.getElementType());
+          Value bits = operation(loc, "arith.bitcast", vector.clone(storage), result);
+          Value partBits = operation(loc, "arith.bitcast", VectorType::get({run}, storage), chunk);
           bits = vector::InsertStridedSliceOp::create(b, loc, partBits, bits, ArrayRef<int64_t>{begin}, ArrayRef<int64_t>{1});
           result = operation(loc, "arith.bitcast", vector, bits);
         } else result = vector::InsertStridedSliceOp::create(b, loc, chunk, result, ArrayRef<int64_t>{begin}, ArrayRef<int64_t>{1});
@@ -1798,7 +1809,7 @@ private:
               arith::ConstantOp::create(b, loc, addressType, DenseIntElementsAttr::get(addressType, positions)),
               vector::BroadcastOp::create(b, loc, addressType, packetBase));
           Value mask = permute(loc, active, predicates, packetType.clone(b.getI1Type()));
-          auto packetDomain = wk::ValueType::get(b.getContext(), b.getIntegerType(8, IntegerType::Unsigned),
+          auto packetDomain = wk::ValueType::get(b.getContext(), IntegerType::get(b.getContext(), 8, IntegerType::Unsigned),
               b.getDenseI64ArrayAttr({end - begin}), b.getDenseI64ArrayAttr({axes(region.getType()).back()}));
           Value payload = input ? permute(loc, input, predicates, packetType) : zero(loc, packetType);
           Value packet = access(loc, view.base, address, mask, payload, packetDomain, !input, true);
@@ -1842,7 +1853,7 @@ private:
         Value mask = input ? permute(loc, active, selected, packetType.clone(b.getI1Type())) :
                             Value(vector::BroadcastOp::create(b, loc, packetType.clone(b.getI1Type()), live));
         auto packetDomain = wk::ValueType::get(b.getContext(),
-            b.getIntegerType(8, IntegerType::Unsigned), b.getDenseI64ArrayAttr({end - begin}),
+            IntegerType::get(b.getContext(), 8, IntegerType::Unsigned), b.getDenseI64ArrayAttr({end - begin}),
             b.getDenseI64ArrayAttr({axes(region.getType()).back()}));
         Value payload = input ? permute(loc, input, selected, packetType) : zero(loc, packetType);
         Value packet = access(loc, view.base, address, mask, payload, packetDomain, !input, true);
@@ -1919,7 +1930,7 @@ private:
       recordLimit = b.createOrFold<arith::DivUIOp>(loc, view.limits.back(),
                                                  indexConstant(loc, layout->elements()));
       sizes.back() = sizes.back() / layout->elements() * layout->bytes();
-      domain = wk::ValueType::get(b.getContext(), b.getIntegerType(8, IntegerType::Unsigned), b.getDenseI64ArrayAttr(sizes), b.getDenseI64ArrayAttr(axes(domain)));
+      domain = wk::ValueType::get(b.getContext(), IntegerType::get(b.getContext(), 8, IntegerType::Unsigned), b.getDenseI64ArrayAttr(sizes), b.getDenseI64ArrayAttr(axes(domain)));
       auto convert = [&](Value value) { return Value(arith::MulIOp::create(b, loc,
           arith::DivUIOp::create(b, loc, value, indexConstant(loc, layout->elements())), indexConstant(loc, layout->bytes()))); };
       view.offset = convert(view.offset);
@@ -2023,16 +2034,45 @@ private:
     }
     return success();
   }
+  LLVM::AtomicOrdering atomicOrdering(StringRef ordering) {
+    return ordering == "relaxed" ? LLVM::AtomicOrdering::monotonic :
+        ordering == "acquire" ? LLVM::AtomicOrdering::acquire :
+        ordering == "release" ? LLVM::AtomicOrdering::release :
+        ordering == "seq_cst" ? LLVM::AtomicOrdering::seq_cst : LLVM::AtomicOrdering::acq_rel;
+  }
+  LogicalResult atomic(wk::AtomicRMWOp op) {
+    Location loc = op.getLoc();
+    auto found = memories.find(op.getRegion());
+    if (found == memories.end()) return unsupported(op, "x86 atomic update requires a memory-backed scalar slice");
+    const Memory &view = found->second;
+    if (!matchPattern(view.storageMapped, m_Zero()))
+      return unsupported(op, "x86 atomic update requires directly addressed dense storage");
+    Type type = scalar(op.getResult().getType());
+    Value active = arith::AndIOp::create(b, loc, view.guard, valid(op.getValue(), loc));
+    auto branch = scf::IfOp::create(b, loc, TypeRange{type}, active, true);
+    {
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(&branch.getThenRegion().front());
+      Value offset = arith::IndexCastUIOp::create(b, loc, b.getI64Type(), view.offset);
+      Value pointer = LLVM::GEPOp::create(b, loc, LLVM::LLVMPointerType::get(b.getContext()),
+          type, view.base, ValueRange{offset});
+      Value old = LLVM::AtomicRMWOp::create(b, loc, LLVM::AtomicBinOp::add, pointer,
+          mapped(op.getValue()), atomicOrdering(op.getOrdering()), "", type.getIntOrFloatBitWidth() / 8);
+      scf::YieldOp::create(b, loc, old);
+      b.setInsertionPointToStart(&branch.getElseRegion().front());
+      scf::YieldOp::create(b, loc, zero(loc, type));
+    }
+    values.map(op.getResult(), branch.getResult(0));
+    masks[op.getResult()] = active;
+    return success();
+  }
   LogicalResult atomic(wk::PointerAtomicOp op) {
     Location loc = op.getLoc();
     Type domain = op.getResult().getType(), type = physicalType(domain), elem = scalar(domain);
     Value logical = arith::AndIOp::create(b, loc, validAs(op.getOffsets(), domain, loc), validAs(op.getMask(), domain, loc));
     logical = arith::AndIOp::create(b, loc, logical, validAs(op.getValue(), domain, loc));
     if (op.getKind() == "cas") logical = arith::AndIOp::create(b, loc, logical, validAs(op.getCompare(), domain, loc));
-    auto order = op.getOrdering() == "relaxed" ? LLVM::AtomicOrdering::monotonic :
-        op.getOrdering() == "acquire" ? LLVM::AtomicOrdering::acquire :
-        op.getOrdering() == "release" ? LLVM::AtomicOrdering::release :
-        op.getOrdering() == "seq_cst" ? LLVM::AtomicOrdering::seq_cst : LLVM::AtomicOrdering::acq_rel;
+    auto order = atomicOrdering(op.getOrdering());
     auto lane = [&](Value offset, Value mask, Value update, Value comparison) -> Value {
       auto branch = scf::IfOp::create(b, loc, TypeRange{elem}, mask, true);
       OpBuilder::InsertionGuard guard(b);
@@ -2588,7 +2628,7 @@ private:
         unsigned width = 8;
         while (width < integer.getWidth()) width *= 2;
         storageElement = b.getIntegerType(width);
-      } else if (elem.isBF16()) storageElement = b.getI16Type();
+      } else if (encodedFloat(elem)) storageElement = floatStorage(elem);
       Value payload = snapshot(mapped(op.getTable()), storageElement);
       Value tableValid = valid(op.getTable(), loc);
       auto maskConstant = tableValid.getDefiningOp<arith::ConstantOp>();
@@ -2754,7 +2794,7 @@ private:
         return wk::ValueType::get(b.getContext(), elementType, shaped.getShape(), shaped.getAxisIds());
       return elementType;
     };
-    Type addressDomain = asDomain(b.getIntegerType(64, IntegerType::Unsigned));
+    Type addressDomain = asDomain(IntegerType::get(b.getContext(), 64, IntegerType::Unsigned));
     Type addressType = physicalType(addressDomain), predicateType = physicalMask(domain);
     auto splat = [&](Value value, Type type) -> Value {
       return isa<VectorType>(type) ? Value(vector::BroadcastOp::create(b, loc, type, value)) : value;
@@ -4029,7 +4069,7 @@ private:
     Location loc = op.getLoc(); Memory view = memories.at(region);
     Value domain = input ? input : op.getResult(0);
     auto extents = storageExtents(domain, loc); auto ids = axes(domain.getType()), memoryAxes = axes(region.getType());
-    Type elementType = packedType(domain.getType()) ? Type(b.getIntegerType(8, IntegerType::Unsigned)) : element(domain.getType());
+    Type elementType = packedType(domain.getType()) ? Type(IntegerType::get(b.getContext(), 8, IntegerType::Unsigned)) : element(domain.getType());
     if (auto encoding = packedType(domain.getType())) {
       auto layout = weft::analysis::encodingBytes(sourceModule, encoding);
       view.offset = recordBytes(loc, view.offset, domain.getType());
@@ -4515,9 +4555,10 @@ private:
           Value data = vector::MaskedLoadOp::create(b, loc, packetType, mapped(source), ValueRange{address}, active, zero(loc, packetType));
           Value bytes = vector::MaskedLoadOp::create(b, loc, byteType, valid(source, loc), ValueRange{address}, active, zero(loc, byteType));
           Value mask = arith::TruncIOp::create(b, loc, predicateType, bytes);
-          if (resultType.getElementType().isBF16()) {
-            Value bits = arith::BitcastOp::create(b, loc, resultType.clone(b.getI16Type()), payload);
-            Value chunk = arith::BitcastOp::create(b, loc, packetType.clone(b.getI16Type()), data);
+          if (encodedFloat(resultType.getElementType())) {
+            Type storage = floatStorage(resultType.getElementType());
+            Value bits = arith::BitcastOp::create(b, loc, resultType.clone(storage), payload);
+            Value chunk = arith::BitcastOp::create(b, loc, packetType.clone(storage), data);
             bits = vector::InsertStridedSliceOp::create(b, loc, chunk, bits,
                 ArrayRef<int64_t>{row * rowWidth + start}, ArrayRef<int64_t>{1});
             payload = arith::BitcastOp::create(b, loc, resultType, bits);
@@ -4960,7 +5001,7 @@ private:
       auto type = cast<VectorType>(physicalType(iota.getResult().getType()));
       SmallVector<APInt> numbers;
       for (int64_t i = iota.getStart(); i < iota.getEnd(); ++i)
-        numbers.emplace_back(type.getElementTypeBitWidth(), i);
+        numbers.emplace_back(type.getElementType().isIndex() ? 64 : type.getElementTypeBitWidth(), i);
       values.map(iota.getResult(), arith::ConstantOp::create(b, loc, type, DenseElementsAttr::get(type, numbers)));
       return success();
     }
@@ -4977,6 +5018,7 @@ private:
     if (isa<wk::PointerLoadOp>(op)) return memory(op, true);
     if (isa<wk::PointerStoreOp>(op)) return memory(op, false);
     if (auto update = dyn_cast<wk::PointerAtomicOp>(op)) return atomic(update);
+    if (auto update = dyn_cast<wk::AtomicRMWOp>(op)) return atomic(update);
     if (auto bin = dyn_cast<wk::BinaryOp>(op)) return binary(bin);
     if (auto reduction = dyn_cast<wk::ReduceOp>(op)) return reduce(reduction);
     if (auto reduction = dyn_cast<wk::ReduceRegionOp>(op)) return regionReduction(reduction);

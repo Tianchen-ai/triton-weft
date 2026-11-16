@@ -9,6 +9,7 @@ add_library(WeftX86Target STATIC
   Transforms/Contraction/AMXTransfers.cpp
   Transforms/Memory/StreamPrefetch.cpp
   Transforms/Arithmetic/Math.cpp
+  Transforms/Arithmetic/LowPrecision.cpp
   Transforms/Arithmetic/VectorProjections.cpp
   Transforms/Control/ProjectionLoops.cpp
   Transforms/Control/FullTiles.cpp

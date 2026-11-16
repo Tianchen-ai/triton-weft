@@ -23,7 +23,8 @@ constexpr uint64_t stackBudget = weft::x86::privateStorageBudget;
 constexpr uint64_t slotAlignment = 64;
 
 Type storageBits(Type type) {
-  if (type.isBF16()) return IntegerType::get(type.getContext(), 16);
+  if (isa<BFloat16Type, Float8E4M3FNType, Float8E5M2Type>(type))
+    return IntegerType::get(type.getContext(), type.getIntOrFloatBitWidth());
   if (auto integer = dyn_cast<IntegerType>(type)) {
     unsigned width = llvm::PowerOf2Ceil(std::max<unsigned>(8, integer.getWidth()));
     if (width != integer.getWidth()) return IntegerType::get(type.getContext(), width);
@@ -43,7 +44,7 @@ Type bufferBits(Type type) {
 // Array descriptors address individual native storage elements. A vector load
 // from memref<i1/i4> must not pack several of those elements into one byte.
 // Keep their exact bits in native integer carriers and restore the numerical
-// width at uses. BF16 similarly uses I16 to avoid numeric conversion libcalls.
+// width at uses. Low-precision floats likewise transfer integer bit payloads.
 void legalizePayloadStorage(ModuleOp module, IRRewriter &b) {
   SmallVector<Operation *> operations;
   module.walk([&](Operation *op) { operations.push_back(op); });
@@ -75,7 +76,7 @@ void legalizePayloadStorage(ModuleOp module, IRRewriter &b) {
       Type original = payload->get().getType(), bits = storageBits(original);
       if (original != bits) {
         Type element = isa<VectorType>(original) ? cast<VectorType>(original).getElementType() : original;
-        Value converted = element.isBF16() ? Value(arith::BitcastOp::create(b, op->getLoc(), bits, payload->get())) :
+        Value converted = isa<FloatType>(element) ? Value(arith::BitcastOp::create(b, op->getLoc(), bits, payload->get())) :
                                             Value(arith::ExtUIOp::create(b, op->getLoc(), bits, payload->get()));
         payload->set(converted);
       }
@@ -87,7 +88,7 @@ void legalizePayloadStorage(ModuleOp module, IRRewriter &b) {
     result.setType(bits);
     b.setInsertionPointAfter(op);
     Type element = isa<VectorType>(original) ? cast<VectorType>(original).getElementType() : original;
-    Value restored = element.isBF16() ? Value(arith::BitcastOp::create(b, op->getLoc(), original, result)) :
+    Value restored = isa<FloatType>(element) ? Value(arith::BitcastOp::create(b, op->getLoc(), original, result)) :
                                       Value(arith::TruncIOp::create(b, op->getLoc(), original, result));
     result.replaceAllUsesExcept(restored, restored.getDefiningOp());
   }

@@ -16,6 +16,7 @@ using namespace mlir;
 
 void weft::registerX86Passes() {
   for (auto factory : {createX86MathPass, createX86LocalFloatingFusionPass, createX86HalfCarrierPass,
+       createX86LowPrecisionPass, createX86FloatPayloadPass,
        createX86VectorProjectionPass, createX86ProjectionLoopPass,
        createX86IntegerReductionPass, createX86IntegerReductionGroupPass, createX86IntegerProductPass,
        createX86SnapshotLoadPass, createX86LookupProjectionPass,
@@ -59,6 +60,7 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   pm.addPass(createBindSourceParametersPass(bindings));
   pm.addPass(createNormalizeCanonicalControlPass());
   pm.addPass(x86::createCanonicalConversionPass(target, tuneCPU));
+  pm.addPass(createX86LowPrecisionPass());
   pm.addPass(createX86MathPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
@@ -205,6 +207,7 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   PassManager control(source.getContext());
   control.addPass(createSCFToControlFlowPass());
   control.addPass(createX86VectorCarryPass());
+  control.addPass(createX86FloatPayloadPass());
   recordPipeline(control);
   if (failed(control.run(*module))) return failure();
   (*module)->setAttr("weft.x86.pipelines", ArrayAttr::get(source.getContext(), pipelines));

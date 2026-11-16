@@ -125,6 +125,17 @@ class WeftBackend(BaseBackend):
             bindings = asdict(options)
             metadata["interface"] = weft.interface(module)
             interface = metadata["interface"]["interface"]
+            if "launch_args" not in metadata:
+                # Canonical IR has no Python AST signature. Its verified ABI
+                # still defines an ordinary callable, in declared argument order.
+                import inspect
+                from triton.runtime.weft.signature import encode_signature
+                names = [argument["name"] for argument in interface["arguments"]]
+                metadata["launch_args"] = names
+                metadata["public_signature"] = encode_signature(inspect.Signature([
+                    inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                    for name in names
+                ]))
             names = set(interface["source_parameters"]) | set(interface["shape_parameters"])
             bindings["meta"] = {name: value for name, value in options.meta.items() if name in names}
             bindings.update(march=self.target.march, abi=self.target.abi, vlen_bits=self.target.vlen_bits)

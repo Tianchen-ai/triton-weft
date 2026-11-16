@@ -55,3 +55,125 @@ def test_dense_index_conversion_preserves_tail(size):
     dense_index_conversion[(1,)](output, num_cpu_threads=1)
     expected = (np.arange(size, dtype=np.int64) % 64) * 4294967291 + 17
     np.testing.assert_array_equal(output, expected)
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.uint32, np.int64, np.uint64])
+@pytest.mark.parametrize("ordering", ["relaxed", "acquire", "release", "acq_rel", "seq_cst"])
+def test_canonical_scalar_atomic_returns_previous_value(tmp_path, dtype, ordering):
+    import triton
+    from triton.backends.weft.driver import WeftDriver
+    bits = np.dtype(dtype).itemsize * 8
+    signed = np.issubdtype(dtype, np.signedinteger)
+    family = ("i" if signed else "u") + str(bits)
+    element = ("si" if signed else "ui") + str(bits)
+    encoding = f'!weft_kernel.encoding<"{family}", "dense", "dense.{family}", []>'
+    view = f'!weft_kernel.view<{encoding}, [1], [1]>'
+    region = f'!weft_kernel.slice<{encoding}, [], []>'
+    source = tmp_path / "atomic.weftir"
+    source.write_text(f'''module {{
+      "weft_kernel.kernel"() <{{arg_access = ["readwrite", "write"],
+        arg_alias_sets = array<i64: 0, 0>, arg_names = ["X", "Y"],
+        shape_symbols = [], strided_args = [], source = "canonical regression", sym_name = "scalar_atomic"}}> ({{
+      ^bb0(%x: {view}, %y: {view}):
+        %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
+        %index = arith.constant 0 : index
+        %value = "weft_kernel.constant"() <{{value = 7 : {element}}}> : () -> {element}
+        %xs = "weft_kernel.slice"(%x, %index) <{{selectors = ["index"]}}> : ({view}, index) -> {region}
+        %ys = "weft_kernel.slice"(%y, %index) <{{selectors = ["index"]}}> : ({view}, index) -> {region}
+        %old = "weft_kernel.atomic_rmw"(%value, %xs) <{{kind = "add", ordering = "{ordering}"}}> : ({element}, {region}) -> {element}
+        "weft_kernel.commit"(%old, %ys) : ({element}, {region}) -> ()
+        "weft_kernel.return"() : () -> ()
+      }}) : () -> ()
+    }}''')
+    kernel = triton.compile(str(source), target=WeftDriver().get_current_target(),
+                            options={"num_cpu_threads": 1})
+    value = np.array([np.iinfo(dtype).max - 3], dtype=dtype)
+    original = value.copy()
+    output = np.empty_like(value)
+    kernel[(1,)](value, output)
+    np.testing.assert_array_equal(output, original)
+    np.testing.assert_array_equal(value, original + np.array([7], dtype=dtype))
+    second, second_output = np.array([19], dtype=dtype), np.empty_like(value)
+    kernel[(1,)](X=second, Y=second_output)
+    np.testing.assert_array_equal(second, [26])
+    np.testing.assert_array_equal(second_output, [19])
+
+
+@pytest.mark.parametrize("format", ["f8E4M3FN", "f8E5M2"])
+def test_canonical_fp8_widening_all_encodings(tmp_path, format):
+    import triton
+    from triton.backends.weft.driver import WeftDriver
+    source = tmp_path / "fp8.weftir"
+    source.write_text(f'''module {{
+      "weft_kernel.kernel"() <{{arg_access = ["read", "write"],
+        arg_alias_sets = array<i64: 0, 0>, arg_names = ["X", "Y"],
+        shape_symbols = [], strided_args = [], source = "canonical regression", sym_name = "fp8_widen"}}> ({{
+      ^bb0(%x: !weft_kernel.view<!weft_kernel.encoding<"u8", "dense", "dense.u8", []>, [256], [1]>,
+           %y: !weft_kernel.view<!weft_kernel.encoding<"f32", "dense", "dense.f32", []>, [256], [1]>):
+        %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
+        %bits = "weft_kernel.admit"(%x) : (!weft_kernel.view<!weft_kernel.encoding<"u8", "dense", "dense.u8", []>, [256], [1]>) -> !weft_kernel.value<ui8, [256], [1]>
+        %small = "weft_kernel.bitcast"(%bits) : (!weft_kernel.value<ui8, [256], [1]>) -> !weft_kernel.value<{format}, [256], [1]>
+        %wide = "weft_kernel.cast"(%small) : (!weft_kernel.value<{format}, [256], [1]>) -> !weft_kernel.value<f32, [256], [1]>
+        "weft_kernel.commit"(%wide, %y) : (!weft_kernel.value<f32, [256], [1]>, !weft_kernel.view<!weft_kernel.encoding<"f32", "dense", "dense.f32", []>, [256], [1]>) -> ()
+        "weft_kernel.return"() : () -> ()
+      }}) : () -> ()
+    }}''')
+    kernel = triton.compile(str(source), target=WeftDriver().get_current_target(),
+                            options={"num_cpu_threads": 1})
+    bits = np.arange(256, dtype=np.uint8)
+    output = np.empty(256, dtype=np.float32)
+    kernel[(1,)](bits, output)
+    mantissa, bias = (3, 7) if format == "f8E4M3FN" else (2, 15)
+    expected = []
+    for byte in range(256):
+        exponent = (byte & 127) >> mantissa
+        fraction = byte & ((1 << mantissa) - 1)
+        value = np.ldexp(fraction / (1 << mantissa) + bool(exponent),
+                         max(1, exponent) - bias)
+        if format == "f8E4M3FN" and (byte & 127) == 127:
+            value = np.nan
+        if format == "f8E5M2" and exponent == 31:
+            value = np.inf if fraction == 0 else np.nan
+        expected.append(-value if byte & 128 else value)
+    expected = np.asarray(expected, dtype=np.float32)
+    np.testing.assert_array_equal(output, expected)
+    np.testing.assert_array_equal(np.signbit(output[~np.isnan(expected)]),
+                                  np.signbit(expected[~np.isnan(expected)]))
+
+
+def test_canonical_bfloat_arithmetic_preserves_rounding(tmp_path):
+    import triton
+    from triton.backends.weft.driver import WeftDriver
+    source = tmp_path / "bfloat.weftir"
+    source.write_text('''module {
+      "weft_kernel.kernel"() <{arg_access = ["read", "read", "write"],
+        arg_alias_sets = array<i64: 0, 0, 0>, arg_names = ["X", "Y", "Z"],
+        shape_symbols = [], strided_args = [], source = "canonical regression", sym_name = "bfloat_product"}> ({
+      ^bb0(%x: !weft_kernel.view<!weft_kernel.encoding<"u16", "dense", "dense.u16", []>, [32], [1]>,
+           %y: !weft_kernel.view<!weft_kernel.encoding<"u16", "dense", "dense.u16", []>, [32], [1]>,
+           %z: !weft_kernel.view<!weft_kernel.encoding<"u16", "dense", "dense.u16", []>, [32], [1]>):
+        %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
+        %a = "weft_kernel.admit"(%x) : (!weft_kernel.view<!weft_kernel.encoding<"u16", "dense", "dense.u16", []>, [32], [1]>) -> !weft_kernel.value<ui16, [32], [1]>
+        %b = "weft_kernel.admit"(%y) : (!weft_kernel.view<!weft_kernel.encoding<"u16", "dense", "dense.u16", []>, [32], [1]>) -> !weft_kernel.value<ui16, [32], [1]>
+        %af = "weft_kernel.bitcast"(%a) : (!weft_kernel.value<ui16, [32], [1]>) -> !weft_kernel.value<bf16, [32], [1]>
+        %bf = "weft_kernel.bitcast"(%b) : (!weft_kernel.value<ui16, [32], [1]>) -> !weft_kernel.value<bf16, [32], [1]>
+        %product = "weft_kernel.binary"(%af, %bf) <{kind = "mul"}> : (!weft_kernel.value<bf16, [32], [1]>, !weft_kernel.value<bf16, [32], [1]>) -> !weft_kernel.value<bf16, [32], [1]>
+        %result = "weft_kernel.bitcast"(%product) : (!weft_kernel.value<bf16, [32], [1]>) -> !weft_kernel.value<ui16, [32], [1]>
+        "weft_kernel.commit"(%result, %z) : (!weft_kernel.value<ui16, [32], [1]>, !weft_kernel.view<!weft_kernel.encoding<"u16", "dense", "dense.u16", []>, [32], [1]>) -> ()
+        "weft_kernel.return"() : () -> ()
+      }) : () -> ()
+    }''')
+    kernel = triton.compile(str(source), target=WeftDriver().get_current_target(),
+                            options={"num_cpu_threads": 1})
+    left = np.array([0, 1, 0x007f, 0x0080, 0x3f80, 0x3f81, 0x3fff, 0x4001,
+                     0x7f7f, 0x7f80, 0x7fc1, 0x8000, 0x8001, 0xbf81, 0xff80, 0xffc1] * 2, dtype=np.uint16)
+    right = np.array([0x3f80, 0x3f00, 0x3f81, 0x4000] * 8, dtype=np.uint16)
+    output = np.empty_like(left)
+    kernel[(1,)](left, right, output)
+    with np.errstate(over="ignore", invalid="ignore"):
+        product = (left.astype(np.uint32) << 16).view(np.float32) * (right.astype(np.uint32) << 16).view(np.float32)
+    raw = product.view(np.uint32)
+    expected = ((raw + 0x7fff + ((raw >> 16) & 1)) >> 16).astype(np.uint16)
+    finite = ~np.isnan(product)
+    np.testing.assert_array_equal(output[finite], expected[finite])
+    assert np.isnan((output[~finite].astype(np.uint32) << 16).view(np.float32)).all()
