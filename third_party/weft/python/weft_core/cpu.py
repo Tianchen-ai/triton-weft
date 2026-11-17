@@ -98,6 +98,29 @@ def _bind_cpus(selected):
         raise RuntimeError(f"OS did not retain requested CPU set {sorted(selected)}; allowed set is {sorted(observed)}")
 
 
+def bind_cpus(cpus):
+    """Select local execution cores, performing their discovered OS startup.
+
+    Invoke before creating application worker threads. This chooses execution
+    resources only; compilation still discovers ISA, VLEN and extensions there.
+    """
+    selected = set(cpus)
+    if not selected or any(type(cpu) is not int or cpu < 0 for cpu in selected):
+        raise ValueError("CPU selection requires nonnegative integer IDs")
+    current = set(os.sched_getaffinity(0))
+    if not selected <= current:
+        inventory = devices()
+        matches = [group for group in inventory["groups"] if selected <= set(group["cpus"])]
+        if len(matches) != 1:
+            raise RuntimeError(f"requested CPUs {sorted(selected)} are not one available homogeneous group: {inventory}")
+        startup = matches[0]["startup"]
+        if startup == "register-ai-before-affinity":
+            _register_ai_thread()
+        elif startup != "affinity":
+            raise NotImplementedError(f"unknown CPU startup requirement: {startup}")
+    _bind_cpus(selected)
+
+
 def devices():
     """Return homogeneous CPU groups and observed startup requirements.
 

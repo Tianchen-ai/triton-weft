@@ -7,13 +7,16 @@
 
 ```sh
 python -m triton.tools.cpu --list
-python -m triton.tools.cpu --profile k3-a100 --cpus 8-15 application.py
-python -m triton.tools.cpu --profile k3-x100 --cpus 0-7 application.py
+python -m triton.tools.cpu --cpus 8-15 application.py
+python -m triton.tools.cpu --cpus 0-7 application.py
 ```
 
 K3 A100 启动器先通过 `/proc/set_ai_thread` 注册 PID，再设置 CPU affinity，
 最后启动应用。目标发现基于选定的核心组。
 K3 X100 的 VLEN 为 256，A100 为 1024，应选择同质核心集合。
+启动器按请求的 CPU 集合发现必要的 OS 启动步骤，不要求填写编译 profile。
+`cpu.bind_cpus(cpus)` 提供同一选择能力，应在创建应用工作线程之前调用。
+`--exec -- command ...` 可在注册与绑定之后启动非 Python 程序或另一个解释器。
 
 ## 构造编译目标
 

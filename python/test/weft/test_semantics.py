@@ -1,6 +1,53 @@
 """Source semantics regressions independent of the benchmark harness."""
 import numpy as np
 import pytest
+
+
+def test_cpu_selection_registers_before_binding(monkeypatch):
+    from weft_core import cpu
+    observed, calls = {0, 1}, []
+    monkeypatch.setattr(cpu.os, "sched_getaffinity", lambda _: observed.copy())
+    monkeypatch.setattr(cpu, "devices", lambda: {"groups": [
+        {"cpus": [8, 9], "startup": "register-ai-before-affinity"}], "unavailable": []})
+
+    def register():
+        calls.append("register")
+        observed.update({8, 9})
+
+    def bind(_, cpus):
+        assert cpus <= observed
+        calls.append(("bind", cpus))
+        observed.intersection_update(cpus)
+
+    monkeypatch.setattr(cpu, "_register_ai_thread", register)
+    monkeypatch.setattr(cpu.os, "sched_setaffinity", bind)
+    cpu.bind_cpus([8, 9])
+    assert calls == ["register", ("bind", {8, 9})]
+    assert observed == {8, 9}
+
+
+def test_cpu_selection_rejects_mixed_or_missing_group(monkeypatch):
+    from weft_core import cpu
+    monkeypatch.setattr(cpu.os, "sched_getaffinity", lambda _: {0, 1})
+    monkeypatch.setattr(cpu, "devices", lambda: {"groups": [
+        {"cpus": [0, 1], "startup": "affinity"},
+        {"cpus": [8, 9], "startup": "register-ai-before-affinity"}], "unavailable": []})
+    monkeypatch.setattr(cpu, "_register_ai_thread", lambda: pytest.fail("must reject before startup"))
+    monkeypatch.setattr(cpu.os, "sched_setaffinity", lambda *_: pytest.fail("must reject before binding"))
+    with pytest.raises(RuntimeError, match="homogeneous"):
+        cpu.bind_cpus([0, 8])
+    with pytest.raises(RuntimeError, match="homogeneous"):
+        cpu.bind_cpus([10])
+
+
+def test_cpu_selection_keeps_available_affinity_local(monkeypatch):
+    from weft_core import cpu
+    selected = {0, 1}
+    monkeypatch.setattr(cpu.os, "sched_getaffinity", lambda _: selected.copy())
+    monkeypatch.setattr(cpu.os, "sched_setaffinity", lambda _, cpus: selected.intersection_update(cpus))
+    monkeypatch.setattr(cpu, "devices", lambda: pytest.fail("an available selection needs no whole-machine probe"))
+    cpu.bind_cpus([1])
+    assert selected == {1}
 from semantic_programs import (semantics_composition, static_births,
     invalid_body_capture, invalid_sibling_capture, invalid_stage_update,
     dense_index_conversion)

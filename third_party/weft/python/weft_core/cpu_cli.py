@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--profile", choices=["native", *cpu.profiles()], default="native")
     parser.add_argument("--cpus")
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--exec", dest="execute_command", action="store_true",
+                        help="execute an arbitrary command after CPU startup, instead of a Python script")
     parser.add_argument("--probe", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--inventory", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--register-ai", action="store_true", help=argparse.SUPPRESS)
@@ -46,17 +48,20 @@ def main():
     program = args.program[1:] if args.program[:1] == ["--"] else args.program
     if not program:
         parser.error("provide a Python script or use --list")
-    if args.profile == "k3-a100":
+    if args.profile == "k3-a100" and not args.cpus:
         cpu._register_ai_thread()
     if args.cpus:
         selected = _cpus(args.cpus)
-        cpu._bind_cpus(selected)
+        cpu.bind_cpus(selected)
     from weft_core import compiler as weft
     facts = weft.native_target()
     selected_target = cpu._validate_execution(args.profile, facts)
     print(json.dumps({"target": asdict(selected_target), "cpus": sorted(os.sched_getaffinity(0))}), file=sys.stderr)
     os.environ["WEFT_CPU_PROFILE"] = args.profile
-    os.execv(sys.executable, [sys.executable, *program])
+    if args.execute_command:
+        os.execvp(program[0], program)
+    else:
+        os.execv(sys.executable, [sys.executable, *program])
 
 
 if __name__ == "__main__":

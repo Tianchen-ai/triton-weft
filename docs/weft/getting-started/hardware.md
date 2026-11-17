@@ -7,13 +7,17 @@ instructions compilation may use**, and **which route a contraction requests**.
 
 ```sh
 python -m triton.tools.cpu --list
-python -m triton.tools.cpu --profile k3-a100 --cpus 8-15 application.py
-python -m triton.tools.cpu --profile k3-x100 --cpus 0-7 application.py
+python -m triton.tools.cpu --cpus 8-15 application.py
+python -m triton.tools.cpu --cpus 0-7 application.py
 ```
 
 The K3 A100 launcher registers its PID through `/proc/set_ai_thread`, sets CPU
 affinity, then starts the application. Target discovery runs on the selected core
 group. K3 X100 has VLEN 256; A100 has VLEN 1024. Select a homogeneous group.
+The launcher discovers required OS startup for the requested CPUs; a named
+compilation profile is optional. `cpu.bind_cpus(cpus)` exposes the same selection
+before application threads are created. Use `--exec -- command ...` to start a
+non-Python executable or a separate interpreter after registration and binding.
 
 ## Construct a compilation target
 
