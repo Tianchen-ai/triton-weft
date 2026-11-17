@@ -9,6 +9,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Types.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/Config/llvm-config.h"
 
 #include "Weft/Dialect/Kernel/IR/KernelOpsDialect.h.inc"
 
@@ -23,14 +24,22 @@ class FunctionControlResource
     : public mlir::SideEffects::Resource::Base<FunctionControlResource> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FunctionControlResource)
-  llvm::StringRef getName() const final { return "weft.function-control"; }
+  llvm::StringRef getName()
+#if LLVM_VERSION_MAJOR != 20
+      const
+#endif
+      final { return "weft.function-control"; }
 };
 
 class LocalShapeResource
     : public mlir::SideEffects::Resource::Base<LocalShapeResource> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LocalShapeResource)
-  llvm::StringRef getName() const final { return "weft.local-shape-binding"; }
+  llvm::StringRef getName()
+#if LLVM_VERSION_MAJOR != 20
+      const
+#endif
+      final { return "weft.local-shape-binding"; }
 };
 
 bool isUnitAxisProjection(llvm::ArrayRef<int64_t> inputShape,

@@ -57,6 +57,18 @@ python -m examples.weft.quickstart
 
 ## 显式选择工具链
 
+需要构造 Canonical IR 的外部 MLIR 编译器，可以只构建类型、操作及 verifier，
+并链接与自身相同的 MLIR 20 SDK：
+
+```sh
+cmake -S third_party/weft -B /path/to/canonical-build -G Ninja \
+  -DWEFT_CANONICAL_ONLY=ON -DCMAKE_BUILD_TYPE=Release \
+  -DMLIR_DIR=/path/to/mlir/cmake -DLLVM_DIR=/path/to/llvm/cmake
+cmake --build /path/to/canonical-build --target WeftKernelDialect
+```
+
+这只提供 IR 构造库；原生 JIT 仍使用完整 Triton–Weft 安装及其固定编译器 SDK。
+
 GCC 编译扩展，随包的 Clang 23 编译生成的 kernel。
 资源头和 OpenMP 使用相同 dispatch ABI。组件分开安装时可指定：
 

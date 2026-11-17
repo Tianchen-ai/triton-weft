@@ -59,6 +59,19 @@ For editable installation run `bash scripts/build-weft.sh -e`.
 
 ## Explicit toolchain paths
 
+An embedding MLIR compiler can build only the Canonical dialect, including its
+types, operations and verifiers, against its own MLIR 20 SDK:
+
+```sh
+cmake -S third_party/weft -B /path/to/canonical-build -G Ninja \
+  -DWEFT_CANONICAL_ONLY=ON -DCMAKE_BUILD_TYPE=Release \
+  -DMLIR_DIR=/path/to/mlir/cmake -DLLVM_DIR=/path/to/llvm/cmake
+cmake --build /path/to/canonical-build --target WeftKernelDialect
+```
+
+This supplies an IR construction library, not an execution runtime. Native JIT
+still uses the full Triton–Weft installation and its pinned compiler SDK.
+
 GCC builds the extension; bundled Clang 23 compiles generated kernels.
 Resource headers and OpenMP use the same dispatch ABI. Separately installed
 components can be selected explicitly:
