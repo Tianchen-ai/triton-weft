@@ -104,6 +104,14 @@ def test_dense_index_conversion_preserves_tail(size):
     np.testing.assert_array_equal(output, expected)
 
 
+def test_loop_invariant_math_preserves_frontend_value_protocol():
+    from semantic_programs import loop_invariant_logical_math
+    value = np.linspace(-2, 2, 9, dtype=np.float32)
+    output = np.empty_like(value)
+    loop_invariant_logical_math[(1,)](value, output, num_cpu_threads=1)
+    np.testing.assert_allclose(output, 4 * np.exp(value), rtol=2e-6, atol=1e-6)
+
+
 @pytest.mark.parametrize("control", ["for", "while"])
 def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     import triton

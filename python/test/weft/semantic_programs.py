@@ -113,3 +113,13 @@ def dense_index_conversion(Y:tl.View[tl.i64,(N,)]):
         indices=tl.arange(0,64,dtype=tl.index,axis="n")
         converted=tl.i64(indices)
         tl.store(Y[n],converted*tl.i64(4294967291)+tl.i64(17))
+
+
+@triton.jit(model="weft")
+def loop_invariant_logical_math(X: tl.View[tl.f32, (N,)], Y: tl.View[tl.f32, (N,)]):
+    for row in range(N):
+        probability = tl.exp(tl.load(X[row]))
+        total = tl.f32(0)
+        for repeat in range(4):
+            total += probability
+        tl.store(Y[row], total)

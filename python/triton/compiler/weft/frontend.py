@@ -70,6 +70,8 @@ class CanonicalSemantic(TritonSemantic):
             # Ordinary and explicit-model values can name the same Canonical
             # scalar/axes. Reconstruct the existing frontend protocol; no cast,
             # axis rewrite, or numerical operation is permitted at this join.
+            if type(reference) is tl.tensor:
+                return tl.tensor(value.handle, reference.type)
             return reference.type._unflatten_ir([value.handle], 0)[0]
         return value
 
