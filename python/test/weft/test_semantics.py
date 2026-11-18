@@ -186,6 +186,40 @@ def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     np.testing.assert_array_equal(saved, original)
 
 
+def test_full_update_replaces_validity_and_preserves_snapshot(tmp_path):
+    import triton
+    from triton.backends.weft.driver import WeftDriver
+
+    view = '!weft_kernel.view<!weft_kernel.encoding<"f32", "dense", "dense.f32", []>, [4], [1]>'
+    tile = '!weft_kernel.value<f32, [4], [1]>'
+    indices = '!weft_kernel.value<ui64, [4], [1]>'
+    source = tmp_path / "replace.weftir"
+    source.write_text(f'''module {{
+      "weft_kernel.kernel"() <{{arg_access = ["read", "write", "write"],
+        arg_alias_sets = array<i64: 0, 0, 0>, arg_names = ["X", "Y", "Old"],
+        shape_symbols = [], strided_args = [], source = "canonical regression", sym_name = "replace"}}> ({{
+      ^bb0(%x: {view}, %out: {view}, %old: {view}):
+        %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
+        %original = "weft_kernel.admit"(%x) : ({view}) -> {tile}
+        %positions = "weft_kernel.iota"() <{{start = 2 : i64, end = 6 : i64}}> : () -> {indices}
+        %part = "weft_kernel.extract"(%original, %positions) <{{selectors = ["gather"]}}> : ({tile}, {indices}) -> {tile}
+        %whole = "weft_kernel.update"(%original, %part) <{{selectors = ["all"]}}> : ({tile}, {tile}) -> {tile}
+        %copy = "weft_kernel.extract"(%whole) <{{selectors = ["all"]}}> : ({tile}) -> {tile}
+        "weft_kernel.commit"(%copy, %out) : ({tile}, {view}) -> ()
+        "weft_kernel.commit"(%original, %old) : ({tile}, {view}) -> ()
+        "weft_kernel.return"() : () -> ()
+      }}) : () -> ()
+    }}''')
+    kernel = triton.compile(str(source), target=WeftDriver().get_current_target(),
+                            options={"num_cpu_threads": 1})
+    original = np.arange(4, dtype=np.float32)
+    output = np.full_like(original, -7)
+    saved = np.empty_like(original)
+    kernel[(1,)](original, output, saved)
+    np.testing.assert_array_equal(output, [2, 3, -7, -7])
+    np.testing.assert_array_equal(saved, original)
+
+
 @pytest.mark.parametrize("dtype", [np.int32, np.uint32, np.int64, np.uint64])
 @pytest.mark.parametrize("ordering", ["relaxed", "acquire", "release", "acq_rel", "seq_cst"])
 def test_canonical_scalar_atomic_returns_previous_value(tmp_path, dtype, ordering):

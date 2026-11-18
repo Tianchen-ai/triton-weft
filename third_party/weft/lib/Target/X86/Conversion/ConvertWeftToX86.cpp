@@ -3456,6 +3456,18 @@ private:
     auto outputShape = shape(projected), outputAxes = axes(projected);
     Type outputType = physicalType(op.getResult(0).getType());
     auto sourceOrigins = origins(source, loc);
+    if (projected == source.getType() && indices.empty() && !packedType(projected) &&
+        llvm::all_of(selectors, [](Attribute selector) {
+          return cast<StringAttr>(selector).getValue() == "all";
+        })) {
+      // Every destination lane is selected, including invalid incoming lanes.
+      // Partial writes elsewhere in the loop still see the owner's origins.
+      Value incoming = update ? update : source;
+      values.map(op.getResult(0), mapped(incoming));
+      masks[op.getResult(0)] = valid(incoming, loc);
+      valueOrigins[op.getResult(0)] = sourceOrigins;
+      return success();
+    }
     SmallVector<Value> outputOrigins;
     for (int64_t axis : outputAxes) {
       auto found = llvm::find(sourceAxes, axis);
