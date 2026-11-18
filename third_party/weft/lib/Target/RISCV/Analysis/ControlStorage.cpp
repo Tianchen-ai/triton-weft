@@ -6,6 +6,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Dominance.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseSet.h"
 
 using namespace mlir;
@@ -87,8 +88,15 @@ public:
         }
       }
     }
-    llvm::DenseSet<Operation *> selected;
-    bool unsupported = false;
+    // While's backedge and condition have independent signatures. Other
+    // controls have a single set of joined slots.
+    struct Escapes { llvm::BitVector joined, backedge; };
+    llvm::DenseMap<Operation *, Escapes> selected;
+    SmallVector<Value> pending;
+    llvm::DenseSet<Value> scheduled;
+    auto enqueue = [&](Value value) {
+      if (scheduled.insert(value).second) pending.push_back(value);
+    };
     module.walk([&](Operation *birth) {
       bool numericalBirth = false;
       if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(birth))
@@ -97,39 +105,38 @@ public:
       if (auto staged = dyn_cast<riscv::MaterializeOp>(birth)) numericalBirth = true;
       if (!numericalBirth || birth->getNumResults() != 1 || !localNumeric(birth->getResult(0).getType()) ||
           riscv::storageAliasesRemainInScope(birth->getResult(0), birth->getBlock())) return;
-      SmallVector<Value> pending;
-      llvm::DenseSet<Value> scheduled;
-      auto enqueue = [&](Value value) {
-        if (scheduled.insert(value).second) pending.push_back(value);
-      };
       enqueue(birth->getResult(0));
-      for (unsigned cursor = 0; cursor < pending.size(); ++cursor) {
-        if (pending.size() > 512) {
-          birth->emitError("local control ownership exceeds the bounded SSA query");
-          unsupported = true;
-          break;
-        }
-        Value value = pending[cursor];
-        for (OpOperand &use : value.getUses()) {
-          Operation *user = use.getOwner();
-          if (isa<scf::YieldOp, scf::ConditionOp, riscv::YieldOp>(user)) {
-            Operation *control = user->getParentOp();
-            if (isa<scf::ForOp, scf::WhileOp, scf::IfOp, riscv::LoopOp>(control)) {
-              selected.insert(control);
-              for (Value result : control->getResults()) if (localNumeric(result.getType())) enqueue(result);
-              continue;
-            }
-          }
-          SmallVector<Value> aliases;
-          riscv::appendStorageAliases(use, aliases);
-          for (Value alias : aliases) enqueue(alias);
-          if (!aliases.empty() || !user->hasTrait<OpTrait::IsTerminator>()) continue;
-          birth->emitError("local numerical representation has an unsupported non-control escape");
-          unsupported = true;
-        }
-      }
     });
-    if (unsupported) return failure();
+    // Different births often reach the same loop or branch. Discover their
+    // union once; cycles terminate at already-visited SSA values.
+    while (!pending.empty()) {
+      Value value = pending.pop_back_val();
+      for (OpOperand &use : value.getUses()) {
+        Operation *user = use.getOwner();
+        if (isa<scf::YieldOp, scf::ConditionOp, riscv::YieldOp>(user)) {
+          Operation *control = user->getParentOp();
+          if (isa<scf::ForOp, scf::WhileOp, scf::IfOp, riscv::LoopOp>(control)) {
+            if (localNumeric(value.getType())) {
+              bool condition = isa<scf::ConditionOp>(user);
+              unsigned position = use.getOperandNumber() - (condition ? 1 : 0);
+              auto &escapes = selected[control];
+              auto &slots = isa<scf::WhileOp>(control) && !condition ? escapes.backedge : escapes.joined;
+              if (slots.size() <= position) slots.resize(position + 1);
+              slots.set(position);
+            }
+            SmallVector<Value> outgoing;
+            riscv::appendStorageAliases(use, outgoing);
+            for (Value alias : outgoing) enqueue(alias);
+            continue;
+          }
+        }
+        SmallVector<Value> aliases;
+        riscv::appendStorageAliases(use, aliases);
+        for (Value alias : aliases) enqueue(alias);
+        if (aliases.empty() && user->hasTrait<OpTrait::IsTerminator>())
+          return user->emitError("local numerical representation has an unsupported non-control escape");
+      }
+    }
     SmallVector<Operation *> controls;
     // First close lexical escapes from outside in. Copies are emitted only
     // after every edge names its actual slot, so nested joins expose precise
@@ -140,6 +147,7 @@ public:
     SmallVector<ControlFrame, 4> frames;
     for (Operation *control : controls) {
       ControlFrame frame{control, {}, {}, {}};
+      const auto &escapes = selected.find(control)->second;
       auto close = [&](Operation *terminator, ValueRange values, ArrayRef<StorageSlot> slots,
                        unsigned offset, ArrayRef<unsigned> unchanged = {}) {
         frame.edges.push_back({terminator, llvm::to_vector(values), llvm::to_vector(slots),
@@ -148,7 +156,7 @@ public:
           terminator->setOperand(offset + slot.position, slot.storage);
       };
       if (auto loop = dyn_cast<scf::ForOp>(control)) {
-        auto slots = allocate(loop, loop.getInitArgs().getTypes(), loop.getInitArgs());
+        auto slots = allocate(loop, escapes.joined, loop.getInitArgs().getTypes(), loop.getInitArgs());
         if (failed(slots)) return failure();
         frame.incoming = llvm::to_vector(loop.getInitArgs());
         frame.initial = *slots;
@@ -156,7 +164,7 @@ public:
         close(yield, yield.getOperands(), *slots, 0);
         for (const auto &slot : *slots) loop.getInitArgsMutable()[slot.position].set(slot.storage);
       } else if (auto loop = dyn_cast<riscv::LoopOp>(control)) {
-        auto slots = allocate(loop, loop.getCarried().getTypes(), loop.getCarried());
+        auto slots = allocate(loop, escapes.joined, loop.getCarried().getTypes(), loop.getCarried());
         if (failed(slots)) return failure();
         frame.incoming = llvm::to_vector(loop.getCarried());
         frame.initial = *slots;
@@ -164,14 +172,14 @@ public:
         close(yield, yield.getValues(), *slots, 0);
         for (const auto &slot : *slots) loop.getCarriedMutable()[slot.position].set(slot.storage);
       } else if (auto branch = dyn_cast<scf::IfOp>(control)) {
-        auto slots = allocate(branch, branch.getResultTypes());
+        auto slots = allocate(branch, escapes.joined, branch.getResultTypes());
         if (failed(slots)) return failure();
         close(branch.thenYield(), branch.thenYield().getOperands(), *slots, 0);
         close(branch.elseYield(), branch.elseYield().getOperands(), *slots, 0);
       } else if (auto loop = dyn_cast<scf::WhileOp>(control)) {
         // before and after may have different signatures. Keep two explicit
         // sets of objects; condition(false) still supplies the loop results.
-        auto before = allocate(loop, loop.getInits().getTypes(), loop.getInits());
+        auto before = allocate(loop, escapes.backedge, loop.getInits().getTypes(), loop.getInits());
         if (failed(before)) return failure();
         frame.incoming = llvm::to_vector(loop.getInits());
         frame.initial = *before;
@@ -187,7 +195,7 @@ public:
               unchanged.push_back(position);
             }
         }
-        auto after = allocate(loop, loop.getResultTypes(), {}, forwarded);
+        auto after = allocate(loop, escapes.joined, loop.getResultTypes(), {}, forwarded);
         if (failed(after)) return failure();
         auto yield = cast<scf::YieldOp>(loop.getAfterBody()->getTerminator());
         close(condition, condition.getArgs(), *after, 1, unchanged);
@@ -212,13 +220,13 @@ private:
   IRRewriter &b;
   int64_t identity;
 
-  FailureOr<SmallVector<StorageSlot>> allocate(Operation *owner, TypeRange types,
-      ValueRange incoming = {}, ArrayRef<Value> forwarded = {}) {
+  FailureOr<SmallVector<StorageSlot>> allocate(Operation *owner, const llvm::BitVector &selected,
+      TypeRange types, ValueRange incoming = {}, ArrayRef<Value> forwarded = {}) {
     OpBuilder::InsertionGuard guard(b);
     b.setInsertionPoint(owner);
     SmallVector<StorageSlot> slots;
     for (auto [position, type] : llvm::enumerate(types)) {
-      if (!localNumeric(type)) continue;
+      if (position >= selected.size() || !selected.test(position)) continue;
       auto value = cast<riscv::ValueType>(type);
       if (!forwarded.empty() && forwarded[position]) {
         slots.push_back({static_cast<unsigned>(position), forwarded[position]});

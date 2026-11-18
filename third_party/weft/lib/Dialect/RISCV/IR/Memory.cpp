@@ -411,6 +411,15 @@ StorageOrigins weft::riscv::storageOrigins(Value root) {
       appendUnique(result.allocations, value);
       continue;
     }
+    // These are distinct private objects before lowering emits LocalAlloc.
+    // An empty workspace owns storage even though its contents are undefined.
+    // A local-store conversion takes a snapshot of a register value.
+    auto conversion = value.getDefiningOp<ConvertLayoutOp>();
+    if (addressable(value.getType()) && (value.getDefiningOp<EmptyOp>() ||
+        (conversion && conversion.getConversion().getKind() == "local_store"))) {
+      appendUnique(result.allocations, value);
+      continue;
+    }
     if (auto state = value.getDefiningOp<NewOp>();
         state && addressable(value.getType()) &&
         (!state.getInitial() || !addressable(state.getInitial().getType()))) {
@@ -986,8 +995,11 @@ void weft::riscv::appendStorageAliases(OpOperand &use,
     }
   } else {
     for (Value result : user->getResults()) {
-      if (borrowedStorage(result) == use.get()) append(result);
-      else if (addressable(result.getType()) &&
+      if (Value source = borrowedStorage(result)) {
+        if (source == use.get()) append(result);
+        else if (auto load = dyn_cast<LoadOp>(user); load && load.getSnapshotStorage() &&
+                 load.getSnapshotBorrow() && load.getRegion() == use.get()) append(result);
+      } else if (addressable(result.getType()) &&
                mayAliasStorage(result, use.get())) append(result);
     }
   }
