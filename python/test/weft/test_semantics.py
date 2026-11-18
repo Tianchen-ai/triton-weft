@@ -113,7 +113,7 @@ def test_loop_invariant_math_preserves_frontend_value_protocol():
 
 
 @pytest.mark.parametrize("control", ["for", "while", "conditional", "dynamic",
-                                     "full_fork", "window_fork"])
+                                     "full_fork", "window_fork", "independent_slots"])
 def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     import triton
     from triton.backends.weft.driver import WeftDriver
@@ -131,6 +131,23 @@ def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     elif control == "window_fork":
         loop = f'''%changed = "weft_kernel.update"(%original, %two, %zero)
           <{{selectors = ["index"]}}> : ({value}, f32, index) -> {value}'''
+    elif control == "independent_slots":
+        # Each branch births one payload. The other result forwards an
+        # existing version. Both slots stay observable across the join.
+        loop = f'''%pair:2 = scf.for %i = %zero to %end step %one
+          iter_args(%left = %original, %right = %original) -> ({value}, {value}) {{
+          %first = "weft_kernel.compare"(%i, %one)
+            <{{predicate = "lt"}}> : (index, index) -> i1
+          %next:2 = scf.if %first -> ({value}, {value}) {{
+            %fresh = "weft_kernel.new"(%two) <{{initialized = true}}> : (f32) -> {value}
+            scf.yield %fresh, %right : {value}, {value}
+          }} else {{
+            scf.yield %left, %original : {value}, {value}
+          }}
+          scf.yield %next#0, %next#1 : {value}, {value}
+        }}
+        %changed = "weft_kernel.binary"(%pair#0, %pair#1)
+          <{{kind = "add"}}> : ({value}, {value}) -> {value}'''
     elif control == "conditional":
         loop = f'''%changed = scf.for %i = %zero to %end step %one
           iter_args(%state = %original) -> ({value}) {{
@@ -191,6 +208,8 @@ def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     expected = original.copy()
     count = {"conditional": 256, "window_fork": 1}.get(control, 512)
     expected[:count] = 2
+    if control == "independent_slots":
+        expected += original
     np.testing.assert_array_equal(result, expected)
     np.testing.assert_array_equal(saved, original)
 

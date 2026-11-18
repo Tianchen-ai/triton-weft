@@ -1,5 +1,6 @@
 #include "Weft/Dialect/Kernel/Transforms/SourceSpecialization.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
+#include "Weft/Dialect/Kernel/IR/TypeQueries.h"
 #include "Weft/Analysis/IntegerFacts.h"
 #include "Weft/Analysis/IndexRelations.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -115,16 +116,19 @@ public:
   }
 };
 
-class NormalizeScalarSelect : public OpRewritePattern<arith::SelectOp> {
+class NormalizeControlSelect : public OpRewritePattern<arith::SelectOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(arith::SelectOp select,
                                PatternRewriter &rewriter) const override {
+    Type type = select.getType();
     if (!select.getCondition().getType().isInteger(1) ||
-        !isa<IntegerType, IndexType, FloatType>(select.getType()))
+        !(isa<IntegerType, IndexType, FloatType>(type) ||
+          (isa<weft::kernel::ValueType>(type) &&
+           isa<IntegerType, IndexType, FloatType>(weft::kernel::logicalElement(type)))))
       return failure();
-    // SCF's upstream canonicalization can replace a pure scalar if/yield with
-    // arith.select. Keep that simplification inside the Canonical value model.
+    // SCF folds individual if/yield slots, including shaped numerical values.
+    // Keep the selected branch's complete payload and validity in Canonical IR.
     rewriter.replaceOpWithNewOp<weft::kernel::SelectOp>(
         select, select.getType(), select.getCondition(), select.getTrueValue(),
         select.getFalseValue());
@@ -668,7 +672,7 @@ public:
     patterns.add<PushCoordinateRename, FoldScalarProjection, FoldFullSelect, FoldStaticSubviewOffsets,
                  FoldDescriptorExtent,
                  FoldIdentitySlice, FoldScalarInteger, FoldScalarIntegerCompare,
-                 FoldConstantIf, NormalizeScalarSelect, NormalizeBoundedGather,
+                 FoldConstantIf, NormalizeControlSelect, NormalizeBoundedGather,
                  FoldIdentityLookup, FoldIdentityTileGather,
                  EraseUnusedEmpty, EraseUnusedHelperResults>(&getContext());
     // Dead control carries can be the only extra consumer of a coordinate
