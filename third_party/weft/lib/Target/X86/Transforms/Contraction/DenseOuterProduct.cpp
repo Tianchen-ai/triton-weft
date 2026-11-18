@@ -63,14 +63,14 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
     return vector::ShuffleOp::create(b, loc, v, v, order);
   };
   Value a = snapshot(inputs[0]), weights = snapshot(arrangeRight(inputs[1]));
-  Value av = maskSnapshot(masks[0]), bv = maskSnapshot(arrangeRight(masks[1]));
   auto rowType = VectorType::get({cols}, b.getF32Type());
   auto maskType = rowType.clone(b.getI1Type());
   Value noValues = zero(rowType), noLanes = zero(maskType);
   Value allLanes = arith::ConstantOp::create(b, loc, maskType, DenseElementsAttr::get(maskType, true));
-  auto accumulate = [&](int64_t first, int64_t count) {
+  auto accumulate = [&](int64_t first, int64_t count, Value av, Value bv) {
+    bool masked = av || bv;
     SmallVector<Value> initial(count, noValues);
-    initial.append(count, noLanes);
+    if (masked) initial.append(count, noLanes);
     auto loop = scf::ForOp::create(b, loc, start, index(depth), index(1), initial);
     OpBuilder::InsertionGuard guard(b);
     b.setInsertionPointToStart(loop.getBody());
@@ -94,22 +94,18 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
         live = arith::AndIOp::create(b, loc, rightLive, vector::BroadcastOp::create(b, loc, maskType, valid));
       }
       // Mask both factors: zero times a NaN in an inactive pair must not leak.
-      Value x = arith::SelectOp::create(b, loc, live, lhs, noValues);
-      Value y = arith::SelectOp::create(b, loc, live, rhs, noValues);
-      sums.push_back(math::FmaOp::create(b, loc, x, y, loop.getRegionIterArgs()[m]));
-      validity.push_back(arith::OrIOp::create(b, loc, live, loop.getRegionIterArgs()[count + m]));
+      Value right = rhs;
+      if (masked) {
+        lhs = arith::SelectOp::create(b, loc, live, lhs, noValues);
+        right = arith::SelectOp::create(b, loc, live, rhs, noValues);
+        validity.push_back(arith::OrIOp::create(b, loc, live, loop.getRegionIterArgs()[count + m]));
+      }
+      sums.push_back(math::FmaOp::create(b, loc, lhs, right, loop.getRegionIterArgs()[m]));
     }
     sums.append(validity);
     scf::YieldOp::create(b, loc, sums);
     return loop;
   };
-  SmallVector<Value> results, resultMasks;
-  for (int64_t first = 0; first < rows; first += rowGroup) {
-    int64_t count = std::min(rowGroup, rows - first);
-    auto loop = accumulate(first, count);
-    llvm::append_range(results, loop.getResults().take_front(count));
-    llvm::append_range(resultMasks, loop.getResults().drop_front(count));
-  }
   auto join = [&](Type element, ValueRange pieces) {
     Value flat = zero(VectorType::get({rows * cols}, element));
     for (auto [i, piece] : llvm::enumerate(pieces))
@@ -117,7 +113,35 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
           ArrayRef<int64_t>{int64_t(i) * cols}, ArrayRef<int64_t>{1});
     return flat;
   };
-  Value result = join(b.getF32Type(), results);
-  Value valid = join(b.getI1Type(), resultMasks);
-  return std::make_pair(result, valid);
+  auto multiply = [&](Value av, Value bv) {
+    SmallVector<Value> results, resultMasks;
+    for (int64_t first = 0; first < rows; first += rowGroup) {
+      int64_t count = std::min(rowGroup, rows - first);
+      auto loop = accumulate(first, count, av, bv);
+      llvm::append_range(results, loop.getResults().take_front(count));
+      if (av || bv) llvm::append_range(resultMasks, loop.getResults().drop_front(count));
+      else resultMasks.append(count, allLanes);
+    }
+    return std::make_pair(join(b.getF32Type(), results), join(b.getI1Type(), resultMasks));
+  };
+  Value complete;
+  for (Value mask : masks) {
+    if (matchPattern(mask, m_One())) continue;
+    Value all = vector::ReductionOp::create(b, loc, vector::CombiningKind::AND, mask);
+    complete = complete ? b.createOrFold<arith::AndIOp>(loc, complete, all) : all;
+  }
+  if (!complete) return multiply({}, {});
+  // Check each input once. Interior tiles need just the FP32 accumulators;
+  // mixed tiles retain pairwise masking, including nonfinite inactive lanes.
+  auto shape = VectorType::get({rows * cols}, b.getF32Type());
+  auto choice = scf::IfOp::create(b, loc, TypeRange{shape, shape.clone(b.getI1Type())}, complete, true);
+  OpBuilder::InsertionGuard insertion(b);
+  b.setInsertionPointToStart(choice.thenBlock());
+  auto full = multiply({}, {});
+  scf::YieldOp::create(b, loc, ValueRange{full.first, full.second});
+  b.setInsertionPointToStart(choice.elseBlock());
+  Value av = maskSnapshot(masks[0]), bv = maskSnapshot(arrangeRight(masks[1]));
+  auto tail = multiply(av, bv);
+  scf::YieldOp::create(b, loc, ValueRange{tail.first, tail.second});
+  return std::make_pair(choice.getResult(0), choice.getResult(1));
 }

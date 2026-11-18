@@ -418,7 +418,8 @@ def test_canonical_bfloat_arithmetic_preserves_rounding(tmp_path):
 
 @pytest.mark.parametrize("precision", ["bf16", "f16"])
 @pytest.mark.parametrize("transpose_rhs", [False, True])
-def test_strided_outer_product_preserves_narrow_values(tmp_path, precision, transpose_rhs):
+@pytest.mark.parametrize("masked_tail", [False, True])
+def test_strided_outer_product_preserves_narrow_values(tmp_path, precision, transpose_rhs, masked_tail):
     import triton
     from triton.backends.weft.driver import WeftDriver
 
@@ -436,6 +437,14 @@ def test_strided_outer_product_preserves_narrow_values(tmp_path, precision, tran
     raw_a, raw_b = value("ui16", [m,k], [1,2]), value("ui16", *rhs)
     narrow_a, narrow_b = value(precision, [m,k], [1,2]), value(precision, *rhs)
     wide_a, wide_b, product = value("f32", [m,k], [1,2]), value("f32", *rhs), value("f32", [m,n], [1,3])
+    rhs_value = "%y"
+    shift = ""
+    if masked_tail:
+        coordinates = value("ui64", [k], [2])
+        selectors = '["all", "gather"]' if transpose_rhs else '["gather", "all"]'
+        shift = f'''%pos = "weft_kernel.iota"() <{{start = 1 : i64, end = {k+1} : i64}}> : () -> {coordinates}
+        %shifted = "weft_kernel.extract"(%y, %pos) <{{selectors = {selectors}}}> : ({raw_b}, {coordinates}) -> {raw_b}'''
+        rhs_value = "%shifted"
     source = tmp_path / "strided_outer.weftir"
     source.write_text(f'''module {{
       "weft_kernel.kernel"() <{{arg_access = ["read", "read", "write"],
@@ -446,7 +455,8 @@ def test_strided_outer_product_preserves_narrow_values(tmp_path, precision, tran
         %x = "weft_kernel.admit"(%a) : ({a}) -> {raw_a}
         %y = "weft_kernel.admit"(%b) : ({b}) -> {raw_b}
         %nx = "weft_kernel.bitcast"(%x) : ({raw_a}) -> {narrow_a}
-        %ny = "weft_kernel.bitcast"(%y) : ({raw_b}) -> {narrow_b}
+        {shift}
+        %ny = "weft_kernel.bitcast"({rhs_value}) : ({raw_b}) -> {narrow_b}
         %fx = "weft_kernel.cast"(%nx) : ({narrow_a}) -> {wide_a}
         %fy = "weft_kernel.cast"(%ny) : ({narrow_b}) -> {wide_b}
         %sum = "weft_kernel.outer_contract"(%fx, %fy) <{{acc_type = f32, over = array<i64: 2>}}> : ({wide_a}, {wide_b}) -> {product}
@@ -460,7 +470,9 @@ def test_strided_outer_product_preserves_narrow_values(tmp_path, precision, tran
     left = np.full((m,k+3), 0x7fff, np.uint16)[:, :k]
     right = np.full((k,n+5), 0x7fff, np.uint16)[:, :n]
     left.fill(0)
-    left[:, -1] = np.resize(np.array([one, one | 0x8000, 1], np.uint16), m)
+    left[:, -2 if masked_tail else -1] = np.resize(np.array([one, one | 0x8000, 1], np.uint16), m)
+    if masked_tail:
+        left[:, -1] = 0x7fff  # Its paired RHS lane is invalid.
     right[:] = one
     right[-1, ::2] |= 0x8000
     actual = np.empty((m,n), np.float32)
