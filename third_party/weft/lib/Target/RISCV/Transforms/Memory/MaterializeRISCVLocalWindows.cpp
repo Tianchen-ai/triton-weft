@@ -156,6 +156,17 @@ public:
   StringRef getDescription() const override { return "Expose bounded private state windows as ordinary descriptor memory edges"; }
   void runOnOperation() override {
     IRRewriter b(&getContext());
+    // Test numerical versions before phi lowering introduces reads and yields
+    // of the physical slots themselves. A yield of a slot after an update
+    // forwards its current contents; it is not an observation of the old SSA
+    // value. Control lowering can additionally isolate a formerly live input.
+    DenseMap<Operation *, bool> exclusiveVersions;
+    DominanceInfo sourceDominance(getOperation());
+    getOperation().walk([&](riscv::UpdateOp update) {
+      Operation *observer = nullptr;
+      exclusiveVersions[update] = riscv_internal::hasExclusiveLocalVersion(
+          update.getInput(), update, sourceDominance, observer);
+    });
     if (failed(riscv_internal::materializeControlStorage(getOperation(), b))) {
       signalPassFailure();
       return;
@@ -164,17 +175,18 @@ public:
       signalPassFailure();
       return;
     }
+    int64_t identity = riscv_internal::lastLocalIdentity(getOperation());
     SmallVector<Operation *> operations;
     getOperation().walk([&](Operation *op) {
       if (isa<riscv::ExtractOp, riscv::UpdateOp>(op)) operations.push_back(op);
       else if (auto conversion = dyn_cast<riscv::ConvertLayoutOp>(op);
           conversion && conversion.getConversion().getKind() == "local_load") operations.push_back(op);
     });
-    DenseMap<Operation *, bool> exclusiveVersions;
     DenseMap<Operation *, Location> unprovenUses;
     DominanceInfo dominance(getOperation());
     for (Operation *op : operations)
       if (auto update = dyn_cast<riscv::UpdateOp>(op)) {
+        if (exclusiveVersions.lookup(op)) continue;
         Operation *unproven = nullptr;
         exclusiveVersions[op] = riscv_internal::hasExclusiveLocalVersion(update.getInput(), op, dominance, unproven);
         if (unproven) unprovenUses.try_emplace(op, unproven->getLoc());
@@ -199,6 +211,24 @@ public:
       }
       auto extract = dyn_cast<riscv::ExtractOp>(op);
       auto update = dyn_cast<riscv::UpdateOp>(op);
+      bool fork = update && !exclusiveVersions.lookup(op);
+      if (fork && riscv::storageAliasesRemainInScope(update.getResult(), op->getBlock())) {
+        // This is a genuine numerical fork with a closed lifetime. The
+        // existing owner stays observable. Copy it only for partial updates.
+        bool whole = update.coversWholeState() && update.getValue().getType() == type;
+        auto fresh = riscv_internal::allocateLocalValue(b, type, op, identity);
+        if (failed(fresh) || failed(riscv_internal::initializeLocalValue(
+                b, *fresh, whole ? update.getValue() : source, op))) {
+          signalPassFailure(); return;
+        }
+        if (whole) {
+          b.replaceOp(op, *fresh);
+          continue;
+        }
+        update.getInputMutable().assign(*fresh);
+        source = *fresh;
+        exclusiveVersions[op] = true;
+      }
       if (update && update.getValue().getType() == source.getType() &&
           update.getIndices().empty() && llvm::all_of(update.getSelectors(), [](Attribute selector) {
             return cast<StringAttr>(selector).getValue() == "all";

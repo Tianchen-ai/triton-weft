@@ -1285,9 +1285,16 @@ Roles rolesFor(mlir::Value value) {
   auto element = riscv_internal::logicalElement(value.getType());
   if (mlir::isa<kernel::EncodingType>(element))
     return roles;
-  if (auto update = value.getDefiningOp<riscv::UpdateOp>(); update && !update.coversWholeState()) {
-    roles.local = true;
-    return roles;
+  if (auto update = value.getDefiningOp<riscv::UpdateOp>()) {
+    auto kernel = update->getParentOfType<riscv::KernelOp>();
+    auto extent = riscv_internal::staticProduct(update.getResult().getType().getShape().asArrayRef());
+    bool exceedsRegisters = kernel && extent &&
+        *extent > int64_t(kernel.getTarget().getVectorRegisters()) * kernel.getTarget().getVlenBits() /
+                    std::max<int64_t>(8, riscv_internal::logicalBitWidth(value.getType()));
+    if (!update.coversWholeState() || (exceedsRegisters && canPlaceStateLocally(update.getInput()))) {
+      roles.local = true;
+      return roles;
+    }
   }
   if (auto converted = fragmentConversionRoles(value)) return *converted;
 

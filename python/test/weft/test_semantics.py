@@ -112,7 +112,8 @@ def test_loop_invariant_math_preserves_frontend_value_protocol():
     np.testing.assert_allclose(output, 4 * np.exp(value), rtol=2e-6, atol=1e-6)
 
 
-@pytest.mark.parametrize("control", ["for", "while", "conditional", "dynamic"])
+@pytest.mark.parametrize("control", ["for", "while", "conditional", "dynamic",
+                                     "full_fork", "window_fork"])
 def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     import triton
     from triton.backends.weft.driver import WeftDriver
@@ -123,7 +124,14 @@ def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
         value, view, region = (t.replace("[512]", "[-1]") for t in (value, view, region))
     update = f'''%next = "weft_kernel.update"(%state, %two, %i)
         <{{selectors = ["index"]}}> : ({value}, f32, index) -> {value}'''
-    if control == "conditional":
+    if control == "full_fork":
+        loop = f'''%replacement = "weft_kernel.new"(%two) <{{initialized = true}}> : (f32) -> {value}
+          %changed = "weft_kernel.update"(%original, %replacement)
+          <{{selectors = ["all"]}}> : ({value}, {value}) -> {value}'''
+    elif control == "window_fork":
+        loop = f'''%changed = "weft_kernel.update"(%original, %two, %zero)
+          <{{selectors = ["index"]}}> : ({value}, f32, index) -> {value}'''
+    elif control == "conditional":
         loop = f'''%changed = scf.for %i = %zero to %end step %one
           iter_args(%state = %original) -> ({value}) {{
           %middle = arith.constant 256 : index
@@ -181,7 +189,8 @@ def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     result, saved = np.empty_like(original), np.empty_like(original)
     kernel[(1,)](original, result, saved)
     expected = original.copy()
-    expected[:256 if control == "conditional" else 512] = 2
+    count = {"conditional": 256, "window_fork": 1}.get(control, 512)
+    expected[:count] = 2
     np.testing.assert_array_equal(result, expected)
     np.testing.assert_array_equal(saved, original)
 
