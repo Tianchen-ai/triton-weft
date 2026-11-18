@@ -65,6 +65,16 @@ FailureOr<DenseTransferWindow> riscv_internal::denseTransferWindow(
 }
 
 namespace {
+riscv::ValueType denseStorageType(riscv::ValueType value, riscv::MemDescType memory) {
+  if (!value.getElementType().isIndex()) return value;
+  // RV64 locals store index bits in dense.i64. Select the signed memory
+  // instruction and reinterpret the bits in the index register afterwards.
+  auto word = IntegerType::get(value.getContext(), 64, IntegerType::Signed);
+  if (!riscv::tileMemoryElementMatches(memory, word)) return value;
+  return riscv::ValueType::get(value.getContext(), word, value.getShape(),
+                               value.getAxisIds(), value.getLayout());
+}
+
 std::optional<int64_t> laneAxis(riscv::ValueType type) {
   std::optional<int64_t> result;
   for (auto [axis, lanes] : llvm::zip(type.getAxisIds().asArrayRef(), type.getLayout().getLaneFactors().asArrayRef()))
@@ -87,6 +97,8 @@ FailureOr<Value> riscv_internal::loadDenseWindow(IRRewriter &b,
   auto memory = cast<riscv::MemDescType>(window.memory.getType());
   if (numeric.getAxisIds() != memory.getAxisIds())
     return origin->emitError("dense issue read has inconsistent logical axes"), failure();
+  auto requested = numeric;
+  numeric = denseStorageType(requested, memory);
   Operation *operation;
   if (numeric.getLayout().getCarrier() == "scalar") {
     operation = riscv::ScalarTileLoadOp::create(b, origin->getLoc(), numeric, window.memory, window.extents,
@@ -101,6 +113,9 @@ FailureOr<Value> riscv_internal::loadDenseWindow(IRRewriter &b,
             0, numeric.getLayout().getRegisterGroups(), 0, 0, "none", "exact"));
   }
   copyOrigin(origin, operation);
+  if (numeric != requested)
+    return riscv::BitcastOp::create(b, origin->getLoc(), requested,
+                                    operation->getResult(0), unselectedLeaf(b)).getResult();
   return operation->getResult(0);
 }
 
@@ -110,6 +125,11 @@ LogicalResult riscv_internal::storeDenseWindow(IRRewriter &b, Value value,
   auto memory = cast<riscv::MemDescType>(window.memory.getType());
   if (!numeric || numeric.getAxisIds() != memory.getAxisIds())
     return origin->emitError("dense issue write requires matching numeric and memory axes");
+  auto storage = denseStorageType(numeric, memory);
+  if (storage != numeric) {
+    value = riscv::BitcastOp::create(b, origin->getLoc(), storage, value, unselectedLeaf(b));
+    numeric = storage;
+  }
   Operation *operation;
   if (numeric.getLayout().getCarrier() == "scalar") {
     operation = riscv::ScalarTileStoreOp::create(b, origin->getLoc(), value, window.memory, window.extents,

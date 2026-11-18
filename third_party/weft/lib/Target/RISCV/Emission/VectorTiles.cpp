@@ -5,6 +5,17 @@
 
 namespace weft::riscv_emission {
 namespace {
+std::optional<std::string> tileAddress(std::optional<std::string> address,
+                                       mlir::Type backing, mlir::Type transfer,
+                                       bool store) {
+  if (!address || backing == transfer) return address;
+  // Local index registers are size_t, while their RV64 dense descriptor
+  // exposes signed 64-bit storage. Both name the same address and bit pattern.
+  if (backing.isIndex() && transfer.isSignedInteger(64))
+    return std::string(store ? "((int64_t *)(" : "((const int64_t *)(") + *address + "))";
+  return std::nullopt;
+}
+
 std::string selectedFullLength(riscv::ValueType type) {
   // The physical program already fixes VL. A fresh hardware VLMAX query is
   // opaque to the system compiler and needlessly changes its VL state between
@@ -67,7 +78,7 @@ mlir::LogicalResult Emitter::compileRVVTileLoad(riscv::RVVTileLoadOp operation) 
     return fail(operation, "vector tile load lost its typed descriptor and part bounds");
   const auto &base = bindings.lookup(source.slice.base);
   auto axis = llvm::find(base.memory.axes, operation.getAxis());
-  if (base.kind != Binding::Kind::Memory || base.memory.elementType != type.getElementType() ||
+  if (base.kind != Binding::Kind::Memory ||
       axis == base.memory.axes.end())
     return fail(operation, "vector tile load lost its exact dense storage stride");
   const auto dimension = axis - base.memory.axes.begin();
@@ -82,7 +93,8 @@ mlir::LogicalResult Emitter::compileRVVTileLoad(riscv::RVVTileLoadOp operation) 
     llvm::SmallVector<std::pair<int64_t, std::string>> offsets;
     for (auto [position, id] : llvm::enumerate(type.getAxisIds().asArrayRef()))
       offsets.emplace_back(id, std::to_string(tile->starts[part][position]));
-    auto address = denseAddress(source.slice, offsets);
+    auto address = tileAddress(denseAddress(source.slice, offsets), base.memory.elementType,
+                               type.getElementType(), false);
     if (!address) return fail(operation, "vector tile load has no exact dense address");
     auto length = full ? selectedFullLength(type) : fresh("tile_vl");
     if (!full) line("size_t " + length + " = " + tileLength(*tile, *extents, part) + ";");
@@ -129,7 +141,7 @@ mlir::LogicalResult Emitter::compileRVVTileSegmentLoad(riscv::RVVTileLoadOp oper
     return fail(operation, "segmented tile load has no exact dense field binding");
   const auto &base = bindings.lookup(source.slice.base);
   auto lane = llvm::find(base.memory.axes, operation.getAxis());
-  if (base.kind != Binding::Kind::Memory || base.memory.elementType != type.getElementType() ||
+  if (base.kind != Binding::Kind::Memory ||
       lane == base.memory.axes.end())
     return fail(operation, "segmented tile load lost its dense byte stride");
   const auto output = operation.getResult();
@@ -152,7 +164,8 @@ mlir::LogicalResult Emitter::compileRVVTileSegmentLoad(riscv::RVVTileLoadOp oper
     llvm::SmallVector<std::pair<int64_t, std::string>> offsets;
     for (auto [position, axis] : llvm::enumerate(type.getAxisIds().asArrayRef()))
       offsets.emplace_back(axis, std::to_string(segments->tile.starts[first][position]));
-    auto address = denseAddress(source.slice, offsets);
+    auto address = tileAddress(denseAddress(source.slice, offsets), base.memory.elementType,
+                               type.getElementType(), false);
     if (!address) return fail(operation, "segmented tile load has no complete address mapping");
     auto length = full ? selectedFullLength(type) : fresh("segment_vl");
     if (!full) line("size_t " + length + " = " + tileLength(segments->tile, *extents, first) + ";");
@@ -244,7 +257,7 @@ mlir::LogicalResult Emitter::compileRVVTileStore(riscv::RVVTileStoreOp operation
     return fail(operation, "vector tile store lost its typed descriptor and part bounds");
   const auto &base = bindings.lookup(destination.slice.base);
   auto axis = llvm::find(base.memory.axes, operation.getAxis());
-  if (base.kind != Binding::Kind::Memory || base.memory.elementType != type.getElementType() ||
+  if (base.kind != Binding::Kind::Memory ||
       axis == base.memory.axes.end())
     return fail(operation, "vector tile store lost its exact dense storage stride");
   const auto dimension = axis - base.memory.axes.begin();
@@ -253,7 +266,8 @@ mlir::LogicalResult Emitter::compileRVVTileStore(riscv::RVVTileStoreOp operation
     llvm::SmallVector<std::pair<int64_t, std::string>> offsets;
     for (auto [position, id] : llvm::enumerate(type.getAxisIds().asArrayRef()))
       offsets.emplace_back(id, std::to_string(tile->starts[part][position]));
-    auto address = denseAddress(destination.slice, offsets);
+    auto address = tileAddress(denseAddress(destination.slice, offsets), base.memory.elementType,
+                               type.getElementType(), true);
     if (!address) return fail(operation, "vector tile store has no exact dense address");
     auto length = full ? selectedFullLength(type) : fresh("tile_vl");
     if (!full) line("size_t " + length + " = " + tileLength(*tile, *extents, part) + ";");
@@ -289,7 +303,7 @@ mlir::LogicalResult Emitter::compileRVVTileSegmentStore(riscv::RVVTileStoreOp op
     return fail(operation, "segmented tile store has no exact tuple binding");
   const auto &base = bindings.lookup(destination.slice.base);
   auto lane = llvm::find(base.memory.axes, operation.getAxis());
-  if (base.kind != Binding::Kind::Memory || base.memory.elementType != type.getElementType() ||
+  if (base.kind != Binding::Kind::Memory ||
       lane == base.memory.axes.end())
     return fail(operation, "segmented tile store lost its dense byte stride");
   auto suffix = vectorSuffix(operation.getInput());
@@ -304,7 +318,8 @@ mlir::LogicalResult Emitter::compileRVVTileSegmentStore(riscv::RVVTileStoreOp op
     llvm::SmallVector<std::pair<int64_t, std::string>> offsets;
     for (auto [position, axis] : llvm::enumerate(type.getAxisIds().asArrayRef()))
       offsets.emplace_back(axis, std::to_string(segments->tile.starts[first][position]));
-    auto address = denseAddress(destination.slice, offsets);
+    auto address = tileAddress(denseAddress(destination.slice, offsets), base.memory.elementType,
+                               type.getElementType(), true);
     if (!address) return fail(operation, "segmented tile store has no complete address mapping");
     auto length = full ? selectedFullLength(type) : fresh("segment_vl");
     if (!full) line("size_t " + length + " = " + tileLength(segments->tile, *extents, first) + ";");
@@ -352,7 +367,7 @@ mlir::LogicalResult Emitter::compileDenseSegmentTransfer(mlir::Operation *operat
     return fail(operation, "dense field transfer lost its proven sibling descriptor geometry");
   const auto &base = bindings.lookup(source.slice.base);
   auto lane = llvm::find(base.memory.axes, axis);
-  if (base.kind != Binding::Kind::Memory || base.memory.elementType != type.getElementType() ||
+  if (base.kind != Binding::Kind::Memory ||
       lane == base.memory.axes.end())
     return fail(operation, "dense field transfer lost its element storage and lane stride");
   auto suffix = vectorSuffix(values.front());
@@ -380,7 +395,8 @@ mlir::LogicalResult Emitter::compileDenseSegmentTransfer(mlir::Operation *operat
     llvm::SmallVector<std::pair<int64_t, std::string>> offsets;
     for (auto [position, id] : llvm::enumerate(type.getAxisIds().asArrayRef()))
       offsets.emplace_back(id, std::to_string(geometry->tile.starts[part][position]));
-    auto address = denseAddress(source.slice, offsets);
+    auto address = tileAddress(denseAddress(source.slice, offsets), base.memory.elementType,
+                               type.getElementType(), store);
     if (!address) return fail(operation, "dense field transfer has no exact first-field address");
     const auto length = fresh("field_vl");
     line("size_t " + length + " = " + tileLength(geometry->tile, *extents, part) + ";");
