@@ -24,7 +24,7 @@ void weft::registerX86Passes() {
        createX86VectorCarryPass, createX86ArrayPacketPass,
        createX86ArrayForwardingPass, createX86ReductionSchedulePass,
        createX86DeferredIntegerReductionPass,
-       createX86UniformValidityPass, createX86IndexedValuePass,
+       createX86UniformValidityPass, createX86IndexedLoopStatePass, createX86IndexedValuePass,
        createX86IndexedPacketPass, createX86ContractionSchedulePass,
        createX86ReductionTreePass, createX86LocalStoragePass,
        createX86StreamingStorePass, createX86StreamPrefetchPass,
@@ -88,6 +88,8 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   pm.addPass(createX86ProjectionLoopPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  pm.addPass(createX86IndexedLoopStatePass());
+  pm.addPass(createCanonicalizerPass());
   pm.addPass(createX86VectorProjectionPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());

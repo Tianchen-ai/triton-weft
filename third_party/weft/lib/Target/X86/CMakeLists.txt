@@ -21,6 +21,7 @@ add_library(WeftX86Target STATIC
   Transforms/Control/DeferredIntegerReductions.cpp
   Transforms/Arithmetic/UniformValidity.cpp
   Transforms/Memory/IndexedValues.cpp
+  Transforms/Memory/IndexedLoopState.cpp
   Transforms/Contraction/ContractionSchedules.cpp
   Transforms/Contraction/ContractionOutputs.cpp
   Transforms/Arithmetic/IntegerReductions.cpp

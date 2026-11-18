@@ -112,16 +112,31 @@ def test_loop_invariant_math_preserves_frontend_value_protocol():
     np.testing.assert_allclose(output, 4 * np.exp(value), rtol=2e-6, atol=1e-6)
 
 
-@pytest.mark.parametrize("control", ["for", "while"])
+@pytest.mark.parametrize("control", ["for", "while", "conditional", "dynamic"])
 def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     import triton
     from triton.backends.weft.driver import WeftDriver
     value = '!weft_kernel.value<f32, [512], [1]>'
     view = '!weft_kernel.view<!weft_kernel.encoding<"f32", "dense", "dense.f32", []>, [512], [1]>'
     region = '!weft_kernel.slice<!weft_kernel.encoding<"f32", "dense", "dense.f32", []>, [512], [1]>'
+    if control == "dynamic":
+        value, view, region = (t.replace("[512]", "[-1]") for t in (value, view, region))
     update = f'''%next = "weft_kernel.update"(%state, %two, %i)
         <{{selectors = ["index"]}}> : ({value}, f32, index) -> {value}'''
-    if control == "for":
+    if control == "conditional":
+        loop = f'''%changed = scf.for %i = %zero to %end step %one
+          iter_args(%state = %original) -> ({value}) {{
+          %middle = arith.constant 256 : index
+          %first = "weft_kernel.compare"(%i, %middle) <{{predicate = "lt"}}> : (index, index) -> i1
+          %selected = scf.if %first -> ({value}) {{
+            {update}
+            scf.yield %next : {value}
+          }} else {{
+            scf.yield %state : {value}
+          }}
+          scf.yield %selected : {value}
+        }}'''
+    elif control in {"for", "dynamic"}:
         loop = f'''%changed = scf.for %i = %zero to %end step %one
           iter_args(%state = %original) -> ({value}) {{
           {update}
@@ -142,7 +157,7 @@ def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     source.write_text(f'''module {{
       "weft_kernel.kernel"() <{{arg_access = ["read", "write", "write"],
         arg_alias_sets = array<i64: 0, 0, 0>, arg_names = ["X", "Y", "Old"],
-        shape_symbols = [], strided_args = [], source = "canonical regression", sym_name = "local_versions"}}> ({{
+        shape_symbols = {('["N"]' if control == 'dynamic' else '[]')}, strided_args = [], source = "canonical regression", sym_name = "local_versions"}}> ({{
       ^bb0(%x: {view}, %y: {view}, %old: {view}):
         %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
         %zero = arith.constant 0 : index
@@ -165,7 +180,9 @@ def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
     original = np.arange(512, dtype=np.float32)
     result, saved = np.empty_like(original), np.empty_like(original)
     kernel[(1,)](original, result, saved)
-    np.testing.assert_array_equal(result, np.full_like(original, 2))
+    expected = original.copy()
+    expected[:256 if control == "conditional" else 512] = 2
+    np.testing.assert_array_equal(result, expected)
     np.testing.assert_array_equal(saved, original)
 
 

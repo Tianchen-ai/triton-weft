@@ -3589,6 +3589,35 @@ private:
     for (Value value : input) llvm::append_range(result, carryValues(value, loc));
     return result;
   }
+  // An array returned directly from one partial update is a recurrence, not a
+  // new full-array snapshot on every iteration. Give the loop its own storage.
+  // Other references to the initial SSA value must still see the old contents.
+  SmallVector<Value> initialCarry(scf::ForOp loop, unsigned position) {
+    Location loc = loop.getLoc();
+    Value initial = loop.getInitArgs()[position];
+    auto fields = carryValues(initial, loc);
+    Value carry = loop.getRegionIterArgs()[position];
+    if (!arrayValue(initial.getType()) || packedType(initial.getType()) ||
+        !carry.hasOneUse()) return fields;
+    auto update = dyn_cast<wk::UpdateOp>(*carry.getUsers().begin());
+    if (!update || update.getInput() != carry || update->getBlock() != loop.getBody() ||
+        !update->hasOneUse() ||
+        loop.getBody()->getTerminator()->getOperand(position) != update.getResult())
+      return fields;
+    if (!initial.getDefiningOp<wk::EmptyOp>() || !initial.hasOneUse() ||
+        initial.getParentBlock() != loop->getBlock()) {
+      // The copy is outside the loop and also handles zero iterations. Only a
+      // fresh Empty born beside this loop is known to have exclusive storage.
+      auto local = weft::x86::allocateArray(b, loc, arrayElement(initial.getType()),
+                                             arrayExtents(initial, loc));
+      memref::CopyOp::create(b, loc, fields[0], local.data);
+      memref::CopyOp::create(b, loc, fields[1], local.valid);
+      fields[0] = local.data;
+      fields[1] = local.valid;
+    }
+    privateArrayUpdates.insert(update);
+    return fields;
+  }
   FailureOr<SmallVector<Type>> flattenTypes(TypeRange types, Operation *owner) {
     SmallVector<Type> result;
     for (Type type : types) {
@@ -3651,7 +3680,8 @@ private:
     llvm::append_range(headerTypes, *types);
     Block *header = cfgBlock(loc, headerTypes), *body = cfgBlock(loc), *exit = cfgBlock(loc, *types);
     SmallVector<Value> initial{begin};
-    llvm::append_range(initial, flatten(op.getInitArgs(), loc));
+    for (unsigned i = 0; i < op.getInitArgs().size(); ++i)
+      llvm::append_range(initial, initialCarry(op, i));
     cf::BranchOp::create(b, loc, header, initial);
     b.setInsertionPointToEnd(header);
     Value induction = header->getArgument(0);
@@ -3969,6 +3999,7 @@ private:
       arrayBirths[result] = &*std::prev(b.getInsertionPoint());
   }
   DenseMap<Value, Operation *> arrayBirths;
+  llvm::SmallPtrSet<Operation *, 8> privateArrayUpdates;
   DenseMap<Value, std::pair<int64_t, Value>> bfloatGuards;
   FailureOr<SmallVector<Value>> scalarOperation(Operation &op, ValueRange operands, ValueRange validity) {
     auto outerValues = values; auto outerMasks = masks;
@@ -4573,8 +4604,11 @@ private:
       arrayShapes[result] = arrayExtents(result, loc);
       return success();
     }
-    auto output = weft::x86::allocateArray(b, loc, elementType, update ? ValueRange(sourceShape) : ValueRange(outputShape));
-    if (update && failed(weft::x86::forArray(b, loc, sourceShape, [&](Value index, ValueRange) {
+    bool inplace = privateArrayUpdates.contains(&op);
+    auto output = inplace
+        ? weft::x86::ArrayStorage{mapped(source), valid(source, loc), sourceShape}
+        : weft::x86::allocateArray(b, loc, elementType, update ? ValueRange(sourceShape) : ValueRange(outputShape));
+    if (update && !inplace && failed(weft::x86::forArray(b, loc, sourceShape, [&](Value index, ValueRange) {
       memref::StoreOp::create(b, loc, arrayLane(loc, mapped(source), index), output.data, index);
       storeArrayMask(loc, arrayMask(loc, valid(source, loc), index), output.valid, index);
       return success();
@@ -5249,6 +5283,7 @@ private:
       unsigned structural = isa<scf::ForOp>(op) ? 3 : isa<scf::IfOp, scf::ConditionOp>(op) ? 1 : 0;
       for (auto [index, operand] : llvm::enumerate(op.getOperands())) {
         if (index < structural) state.addOperands(mapped(operand));
+        else if (auto loop = dyn_cast<scf::ForOp>(op)) state.addOperands(initialCarry(loop, index - structural));
         else state.addOperands(carryValues(operand, loc));
       }
       for (Type type : op.getResultTypes()) {

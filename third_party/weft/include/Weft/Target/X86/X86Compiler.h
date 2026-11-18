@@ -33,6 +33,7 @@ std::unique_ptr<mlir::Pass> createX86ReductionSchedulePass();
 std::unique_ptr<mlir::Pass> createX86DeferredIntegerReductionPass();
 std::unique_ptr<mlir::Pass> createX86UniformValidityPass();
 std::unique_ptr<mlir::Pass> createX86IndexedValuePass();
+std::unique_ptr<mlir::Pass> createX86IndexedLoopStatePass();
 std::unique_ptr<mlir::Pass> createX86IndexedPacketPass();
 std::unique_ptr<mlir::Pass> createX86ContractionSchedulePass();
 std::unique_ptr<mlir::Pass> createX86ReductionTreePass();
