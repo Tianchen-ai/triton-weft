@@ -2,6 +2,7 @@
 #include "Transforms/Memory/FieldStores.h"
 #include "Analysis/LocalMemory.h"
 #include "Weft/Analysis/StorageBytes.h"
+#include "Weft/Dialect/RISCV/IR/Memory.h"
 
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -161,7 +162,13 @@ mlir::LogicalResult riscv_internal::materializeFieldStoreView(
   // Early memory planning precedes the lowering of Level point coordinates.
   mlir::Value recordBase;
   mlir::Value cursor = field.getOwner();
-  while (auto slice = cursor.getDefiningOp<riscv::SliceOp>()) {
+  while (cursor) {
+    if (auto subview = cursor.getDefiningOp<riscv::SubviewOp>()) {
+      cursor = subview.getBase();
+      continue;
+    }
+    auto slice = cursor.getDefiningOp<riscv::SliceOp>();
+    if (!slice) break;
     size_t index = 0;
     for (auto [axis, selector] : llvm::zip(slice.getBase().getType().getAxisIds().asArrayRef(), slice.getSelectors())) {
       auto kind = mlir::cast<mlir::StringAttr>(selector).getValue();
@@ -177,13 +184,10 @@ mlir::LogicalResult riscv_internal::materializeFieldStoreView(
     if (recordBase) break;
     cursor = slice.getBase();
   }
-  for (mlir::Value base = field.getOwner();;) {
-    if (base.getDefiningOp<riscv::SubviewOp>())
-      return operation.emitError("projected field store does not support a subview of the encoded record owner");
-    auto slice = base.getDefiningOp<riscv::SliceOp>();
-    if (!slice) break;
-    base = slice.getBase();
-  }
+  // Outer record coordinates remain in the descriptor address chain, including
+  // dynamic task-private workspace rows. The field-local origin is unchanged.
+  if (!riscv::preservesRecordFieldOrigin(field.getOwner(), type.getAxisIds()[0]))
+    return operation.emitError("projected field store requires an unchanged encoded element-axis origin");
   rewriter.setInsertionPoint(operation);
   if (!field.getOwner().getDefiningOp<riscv::SliceOp>()) {
     auto sliceType = riscv::MemDescType::get(rewriter.getContext(), owner.getEncoding(), owner.getShape(),

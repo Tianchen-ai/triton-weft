@@ -224,3 +224,52 @@ def test_canonical_bfloat_arithmetic_preserves_rounding(tmp_path):
     finite = ~np.isnan(product)
     np.testing.assert_array_equal(output[finite], expected[finite])
     assert np.isnan((output[~finite].astype(np.uint32) << 16).view(np.float32)).all()
+
+
+@pytest.mark.parametrize("row", [0, 2])
+@pytest.mark.parametrize("offset", [0, 8])
+def test_canonical_field_store_through_record_subview(tmp_path, row, offset):
+    import triton
+    import triton.language as tl
+    from triton.backends.weft.driver import WeftDriver
+    from triton.integrations import ggml_formats as formats
+
+    encoded = '!weft_kernel.encoding<"Q8_0", "base", "Q8_0", []>'
+    dense = '!weft_kernel.encoding<"i8", "dense", "dense.i8", []>'
+    view = f'!weft_kernel.view<{encoded}, [3, 2, 32], [1, 2, 3]>'
+    selected = f'!weft_kernel.slice<{encoded}, [1, 2, 32], [1, 2, 3]>'
+    record = f'!weft_kernel.slice<{encoded}, [32], [3]>'
+    field = f'!weft_kernel.slice<{dense}, [32], [3]>'
+    piece = f'!weft_kernel.slice<{dense}, [8], [3]>'
+    value = '!weft_kernel.value<si8, [8], [3]>'
+    source = tmp_path / 'record_subview.weftir'
+    source.write_text(f'''module {{
+      "weft_kernel.encoding_decl"() <{{alignment = 2 : i64, bit_order = "lsb_first", byte_order = "little",
+        elements = 32 : i64, field_bit_offsets = array<i64: 0, 16>, field_layouts = [[{{kind = "natural"}}], [{{kind = "natural"}}]],
+        field_names = ["d", "q"], field_shapes = [array<i64>, array<i64: 32>], field_storage_bits = array<i64: 16, 256>,
+        field_types = [f16, si8], kind = "base", layout_identity = "Q8_0", padding = array<i64>,
+        storage_bits = 272 : i64, sym_name = "Q8_0"}}> : () -> ()
+      "weft_kernel.kernel"() <{{arg_access = ["read", "readwrite"], arg_alias_sets = array<i64: 0, 0>,
+        arg_names = ["X", "Y"], shape_symbols = [], strided_args = [], source = "canonical regression", sym_name = "record_subview"}}> ({{
+      ^bb0(%x: !weft_kernel.view<{dense}, [8], [3]>, %y: {view}):
+        %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
+        %row = arith.constant {row} : index
+        %zero = arith.constant 0 : index
+        %one = arith.constant 1 : index
+        %window = "weft_kernel.subview"(%y, %row) <{{offsets = array<i64: -1, 0, 0>, extents = array<i64: 1, 2, 32>}}> : ({view}, index) -> {selected}
+        %record = "weft_kernel.slice"(%window, %zero, %one) <{{selectors = ["index", "index", "all"]}}> : ({selected}, index, index) -> {record}
+        %field = "weft_kernel.field"(%record) <{{name = "q"}}> : ({record}) -> {field}
+        %part = "weft_kernel.subview"(%field) <{{offsets = array<i64: {offset}>, extents = array<i64: 8>}}> : ({field}) -> {piece}
+        %input = "weft_kernel.admit"(%x) : (!weft_kernel.view<{dense}, [8], [3]>) -> {value}
+        "weft_kernel.commit"(%input, %part) : ({value}, {piece}) -> ()
+        "weft_kernel.return"() : () -> ()
+      }}) : () -> ()
+    }}''')
+    kernel = triton.compile(str(source), target=WeftDriver().get_current_target(),
+                            options={"num_cpu_threads": 1})
+    source_bytes = np.arange(-8, 0, dtype=np.int8)
+    storage = np.full((3, 2, 34), 77, dtype=np.uint8)
+    expected = storage.copy()
+    expected[row, 1, 2 + offset:10 + offset] = source_bytes.view(np.uint8)
+    kernel[(1,)](source_bytes, tl.View(storage, encoding=formats.Q8_0, shape=(3, 2, 32)))
+    np.testing.assert_array_equal(storage, expected)

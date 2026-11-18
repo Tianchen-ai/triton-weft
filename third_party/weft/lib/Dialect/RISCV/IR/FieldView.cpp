@@ -39,6 +39,21 @@ bool riscv::isContiguousRecordField(Value value) {
   return owner.getElements() > 0 && owner.getShape().asArrayRef().back() % owner.getElements() == 0;
 }
 
+bool riscv::preservesRecordFieldOrigin(Value owner, int64_t elementAxis) {
+  while (owner) {
+    if (auto subview = owner.getDefiningOp<SubviewOp>()) {
+      auto axes = subview.getBase().getType().getAxisIds().asArrayRef();
+      auto axis = llvm::find(axes, elementAxis);
+      if (axis == axes.end() || subview.getOffsets()[axis - axes.begin()] != 0)
+        return false;
+      owner = subview.getBase();
+    } else if (auto slice = owner.getDefiningOp<SliceOp>()) {
+      owner = slice.getBase();
+    } else break;
+  }
+  return true;
+}
+
 LogicalResult riscv::FieldViewOp::verify() {
   auto field = getField().getDefiningOp<FieldOp>();
   auto source = getField().getType(), result = getResult().getType();
@@ -76,16 +91,17 @@ LogicalResult riscv::FieldViewOp::verify() {
       result.getOrigins().asArrayRef() != ArrayRef<int64_t>{-1})
     return emitOpError("field view must preserve storage identity and expose unit stride with an explicit origin");
   const int64_t divisor = owner.getElements() / source.getShape()[0];
-  for (Value base = field.getOwner();;) {
-    if (base.getDefiningOp<SubviewOp>())
-      return emitOpError("field view does not support a subview of the encoded record owner");
-    auto slice = base.getDefiningOp<SliceOp>();
-    if (!slice) break;
-    base = slice.getBase();
-  }
+  if (!preservesRecordFieldOrigin(field.getOwner(), source.getAxisIds()[0]))
+    return emitOpError("field view requires an unchanged encoded element-axis origin");
   Value expected;
   Value cursor = field.getOwner();
-  while (auto slice = cursor.getDefiningOp<SliceOp>()) {
+  while (cursor) {
+    if (auto subview = cursor.getDefiningOp<SubviewOp>()) {
+      cursor = subview.getBase();
+      continue;
+    }
+    auto slice = cursor.getDefiningOp<SliceOp>();
+    if (!slice) break;
     size_t index = 0;
     for (auto [axis, selector] : llvm::zip(slice.getBase().getType().getAxisIds().asArrayRef(), slice.getSelectors())) {
       auto kind = cast<StringAttr>(selector).getValue();

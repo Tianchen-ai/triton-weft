@@ -36,6 +36,9 @@ bool hasContiguousDenseStorage(MemDescType memory);
 // A natural field occupying every byte of each record in a complete,
 // contiguous memory view has the same address map as its dense element view.
 bool isContiguousRecordField(mlir::Value field);
+// Outer record subviews select an address without shifting the encoded element
+// axis used to derive record-local field coordinates.
+bool preservesRecordFieldOrigin(mlir::Value owner, int64_t elementAxis);
 std::optional<int64_t> contiguousLocalElements(mlir::Value memory);
 bool isStorageMetadataUse(mlir::OpOperand &use);
 // Original read through coordinate-preserving projections and representations.
