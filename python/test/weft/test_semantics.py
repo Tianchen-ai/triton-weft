@@ -308,6 +308,58 @@ def test_canonical_bfloat_arithmetic_preserves_rounding(tmp_path):
     assert np.isnan((output[~finite].astype(np.uint32) << 16).view(np.float32)).all()
 
 
+@pytest.mark.parametrize("precision", ["bf16", "f16"])
+def test_strided_outer_product_preserves_narrow_values(tmp_path, precision):
+    import triton
+    from triton.backends.weft.driver import WeftDriver
+
+    target = WeftDriver().get_current_target()
+    if target.arch != "x86_64":
+        pytest.skip("x86 dense contraction lowering")
+    m, k, n = 3, 65, 16
+    def view(dtype, shape, axes):
+        return f'!weft_kernel.view<!weft_kernel.encoding<"{dtype}", "dense", "dense.{dtype}", []>, {shape}, {axes}>'
+    def value(dtype, shape, axes):
+        return f'!weft_kernel.value<{dtype}, {shape}, {axes}>'
+
+    a, b, out = view("u16", [m,k], [1,2]), view("u16", [k,n], [2,3]), view("f32", [m,n], [1,3])
+    raw_a, raw_b = value("ui16", [m,k], [1,2]), value("ui16", [k,n], [2,3])
+    narrow_a, narrow_b = value(precision, [m,k], [1,2]), value(precision, [k,n], [2,3])
+    wide_a, wide_b, product = value("f32", [m,k], [1,2]), value("f32", [k,n], [2,3]), value("f32", [m,n], [1,3])
+    source = tmp_path / "strided_outer.weftir"
+    source.write_text(f'''module {{
+      "weft_kernel.kernel"() <{{arg_access = ["read", "read", "write"],
+        arg_alias_sets = array<i64: 0, 0, 0>, arg_names = ["A", "B", "C"],
+        shape_symbols = [], strided_args = ["A", "B"], source = "canonical regression", sym_name = "strided_outer"}}> ({{
+      ^bb0(%a: {a}, %b: {b}, %out: {out}):
+        %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
+        %x = "weft_kernel.admit"(%a) : ({a}) -> {raw_a}
+        %y = "weft_kernel.admit"(%b) : ({b}) -> {raw_b}
+        %nx = "weft_kernel.bitcast"(%x) : ({raw_a}) -> {narrow_a}
+        %ny = "weft_kernel.bitcast"(%y) : ({raw_b}) -> {narrow_b}
+        %fx = "weft_kernel.cast"(%nx) : ({narrow_a}) -> {wide_a}
+        %fy = "weft_kernel.cast"(%ny) : ({narrow_b}) -> {wide_b}
+        %sum = "weft_kernel.outer_contract"(%fx, %fy) <{{acc_type = f32, over = array<i64: 2>}}> : ({wide_a}, {wide_b}) -> {product}
+        "weft_kernel.commit"(%sum, %out) : ({product}, {out}) -> ()
+        "weft_kernel.return"() : () -> ()
+      }}) : () -> ()
+    }}''')
+    compiled = triton.compile(str(source), target=target, options={"num_cpu_threads": 1})
+    # Nonparticipating padding contains NaNs. Every live product is exact.
+    one = 0x3f80 if precision == "bf16" else 0x3c00
+    left = np.full((m,k+3), 0x7fff, np.uint16)[:, :k]
+    right = np.full((k,n+5), 0x7fff, np.uint16)[:, :n]
+    left.fill(0)
+    left[:, -1] = [one, one | 0x8000, 1]
+    right[:] = one
+    right[-1, ::2] |= 0x8000
+    actual = np.empty((m,n), np.float32)
+    compiled[(1,)](left, right, actual)
+    tiny = np.ldexp(np.float32(1), -133 if precision == "bf16" else -24)
+    expected = np.array([1, -1, tiny], dtype=np.float32)[:, None] * np.where(np.arange(n)%2, 1, -1)
+    np.testing.assert_array_equal(actual, expected)
+
+
 @pytest.mark.parametrize("row", [0, 2])
 @pytest.mark.parametrize("offset", [0, 8])
 def test_canonical_field_store_through_record_subview(tmp_path, row, offset):

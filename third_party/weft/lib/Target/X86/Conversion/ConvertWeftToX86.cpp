@@ -12,6 +12,7 @@
 #include "Transforms/Arithmetic/Lookups.h"
 #include "Transforms/Contraction/AMXContractions.h"
 #include "Transforms/Contraction/ContractionEngines.h"
+#include "Transforms/Contraction/DenseOuterProduct.h"
 #include "Transforms/Arithmetic/Math.h"
 #include "Weft/Analysis/IndexRelations.h"
 #include "Weft/Dialect/Kernel/IR/TypeQueries.h"
@@ -940,7 +941,7 @@ private:
     // complete flattened tile is contiguous or that its tail is in bounds.
     auto packet = wk::ValueType::get(b.getContext(), element(domain),
         b.getDenseI64ArrayAttr({run}), b.getDenseI64ArrayAttr({axes(domain).back()}));
-    Value result = data;
+    SmallVector<Value> chunks;
     for (int64_t begin = 0; begin < vector.getNumElements(); begin += run) {
       SmallVector<int64_t> lanes(run);
       std::iota(lanes.begin(), lanes.end(), begin);
@@ -956,18 +957,29 @@ private:
       Value value = access(loc, base, partOffsets, partMask, partData,
                            packet, load, true);
       if (load) {
-        if (encodedFloat(vector.getElementType())) {
-          Type storage = floatStorage(vector.getElementType());
-          Value bits = operation(loc, "arith.bitcast", vector.clone(storage), result);
-          Value chunk = operation(loc, "arith.bitcast", VectorType::get({run}, storage), value);
-          bits = vector::InsertStridedSliceOp::create(b, loc, chunk, bits,
-              ArrayRef<int64_t>{begin}, ArrayRef<int64_t>{1});
-          result = operation(loc, "arith.bitcast", vector, bits);
-        } else result = vector::InsertStridedSliceOp::create(b, loc, value, result,
-            ArrayRef<int64_t>{begin}, ArrayRef<int64_t>{1});
+        if (encodedFloat(vector.getElementType()))
+          value = operation(loc, "arith.bitcast",
+                            VectorType::get({run}, floatStorage(vector.getElementType())), value);
+        chunks.push_back(value);
       }
     }
-    return load ? result : Value();
+    if (!load) return {};
+    // Each masked load includes its own passthrough lanes. Join adjacent rows
+    // without rebuilding the entire tile for every row.
+    while (chunks.size() > 1) {
+      SmallVector<Value> joined;
+      for (size_t i = 0; i < chunks.size(); i += 2) {
+        if (i + 1 == chunks.size()) { joined.push_back(chunks[i]); break; }
+        int64_t width = cast<VectorType>(chunks[i].getType()).getNumElements() +
+                        cast<VectorType>(chunks[i + 1].getType()).getNumElements();
+        SmallVector<int64_t> lanes(width);
+        std::iota(lanes.begin(), lanes.end(), 0);
+        joined.push_back(vector::ShuffleOp::create(b, loc, chunks[i], chunks[i + 1], lanes));
+      }
+      chunks = std::move(joined);
+    }
+    return encodedFloat(vector.getElementType())
+        ? operation(loc, "arith.bitcast", vector, chunks.front()) : chunks.front();
   }
   Value accessRuntimeRuns(Location loc, Value base, Value offsets, Value mask,
                           Value data, Type domain, bool load, int64_t run, Value stride) {
@@ -2978,6 +2990,22 @@ private:
     return success();
   }
   LogicalResult simdContraction(Operation &op) {
+    if (isa<wk::OuterContractOp>(op) && element(op.getResult(0).getType()).isF32()) {
+      SmallVector<Value> inputs, predicates;
+      for (Value v : op.getOperands()) {
+        if (auto cast = v.getDefiningOp<wk::CastOp>(); cast && element(v.getType()).isF32()) {
+          auto from = element(cast.getInput().getType());
+          if (from.isF16() || from.isBF16()) v = cast.getInput();
+        }
+        inputs.push_back(mapped(v));
+        predicates.push_back(valid(v, op.getLoc()));
+      }
+      if (auto tile = weft::x86::emitDenseOuterProduct(b, op, target, inputs, predicates)) {
+        values.map(op.getResult(0), tile->first);
+        masks[op.getResult(0)] = tile->second;
+        return success();
+      }
+    }
     auto over = op.getAttrOfType<DenseI64ArrayAttr>("over");
     Type result = op.getResult(0).getType();
     auto outputShape = shape(result), outputAxes = axes(result);
