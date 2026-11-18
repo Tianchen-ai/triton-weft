@@ -1,9 +1,11 @@
 #include "Analysis/ControlStorage.h"
 #include "Analysis/LocalMemory.h"
+#include "Analysis/LocalLifetime.h"
 #include "Transforms/Support/RISCVPhysicalSupport.h"
 #include "Weft/Dialect/RISCV/IR/Layout.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/Dominance.h"
 #include "llvm/ADT/DenseSet.h"
 
 using namespace mlir;
@@ -47,6 +49,44 @@ public:
       : module(module), b(b), identity(lastLocalIdentity(module)) {}
 
   LogicalResult run() {
+    // A local value can remain within its lexical scope while its old version
+    // is observed after a later loop. Copy its incoming state once at the loop
+    // boundary; updates then retain their ordinary versioned SSA handoff.
+    SmallVector<Operation *> loops;
+    module.walk<WalkOrder::PreOrder>([&](Operation *operation) {
+      if (isa<scf::ForOp, scf::WhileOp>(operation)) loops.push_back(operation);
+    });
+    DominanceInfo dominance(module);
+    for (Operation *operation : loops) {
+      auto isolate = [&](OpOperand &operand, bool unchanged) -> LogicalResult {
+        Value incoming = operand.get();
+        if (unchanged || !localNumeric(incoming.getType())) return success();
+        Operation *unproven = nullptr;
+        if (hasExclusiveLocalVersion(incoming, operation, dominance, unproven)) return success();
+        OpBuilder::InsertionGuard guard(b);
+        b.setInsertionPoint(operation);
+        auto storage = allocateLocalValue(b, cast<riscv::ValueType>(incoming.getType()),
+                                         operation, identity, false, "control-value");
+        if (failed(storage) || failed(initializeLocalValue(b, *storage, incoming, operation)))
+          return failure();
+        operand.set(*storage);
+        return success();
+      };
+      if (auto loop = dyn_cast<scf::ForOp>(operation)) {
+        for (auto [position, operand] : llvm::enumerate(loop.getInitArgsMutable()))
+          if (failed(isolate(operand, loop.getYieldedValues()[position] ==
+                                      loop.getRegionIterArgs()[position]))) return failure();
+      } else if (auto loop = dyn_cast<scf::WhileOp>(operation)) {
+        auto condition = loop.getConditionOp();
+        auto yielded = cast<scf::YieldOp>(loop.getAfterBody()->getTerminator());
+        for (auto [position, operand] : llvm::enumerate(loop.getInitsMutable())) {
+          bool unchanged = position < condition.getArgs().size() &&
+              condition.getArgs()[position] == loop.getBeforeBody()->getArgument(position) &&
+              yielded.getOperand(position) == loop.getAfterBody()->getArgument(position);
+          if (failed(isolate(operand, unchanged))) return failure();
+        }
+      }
+    }
     llvm::DenseSet<Operation *> selected;
     bool unsupported = false;
     module.walk([&](Operation *birth) {

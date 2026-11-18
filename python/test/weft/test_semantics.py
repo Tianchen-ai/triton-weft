@@ -104,6 +104,63 @@ def test_dense_index_conversion_preserves_tail(size):
     np.testing.assert_array_equal(output, expected)
 
 
+@pytest.mark.parametrize("control", ["for", "while"])
+def test_canonical_loop_keeps_previous_local_value(tmp_path, control):
+    import triton
+    from triton.backends.weft.driver import WeftDriver
+    value = '!weft_kernel.value<f32, [512], [1]>'
+    view = '!weft_kernel.view<!weft_kernel.encoding<"f32", "dense", "dense.f32", []>, [512], [1]>'
+    region = '!weft_kernel.slice<!weft_kernel.encoding<"f32", "dense", "dense.f32", []>, [512], [1]>'
+    update = f'''%next = "weft_kernel.update"(%state, %two, %i)
+        <{{selectors = ["index"]}}> : ({value}, f32, index) -> {value}'''
+    if control == "for":
+        loop = f'''%changed = scf.for %i = %zero to %end step %one
+          iter_args(%state = %original) -> ({value}) {{
+          {update}
+          scf.yield %next : {value}
+        }}'''
+    else:
+        loop = f'''%position, %changed = scf.while (%i = %zero, %state = %original)
+          : (index, {value}) -> (index, {value}) {{
+          %active = "weft_kernel.compare"(%i, %end) <{{predicate = "lt"}}> : (index, index) -> i1
+          scf.condition(%active) %i, %state : index, {value}
+        }} do {{
+        ^bb0(%i: index, %state: {value}):
+          {update}
+          %advance = "weft_kernel.binary"(%i, %one) <{{kind = "add"}}> : (index, index) -> index
+          scf.yield %advance, %next : index, {value}
+        }}'''
+    source = tmp_path / "local_versions.weftir"
+    source.write_text(f'''module {{
+      "weft_kernel.kernel"() <{{arg_access = ["read", "write", "write"],
+        arg_alias_sets = array<i64: 0, 0, 0>, arg_names = ["X", "Y", "Old"],
+        shape_symbols = [], strided_args = [], source = "canonical regression", sym_name = "local_versions"}}> ({{
+      ^bb0(%x: {view}, %y: {view}, %old: {view}):
+        %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
+        %zero = arith.constant 0 : index
+        %one = arith.constant 1 : index
+        %end = arith.constant 512 : index
+        %two = arith.constant 2.0 : f32
+        %xs = "weft_kernel.slice"(%x) <{{selectors = ["all"]}}> : ({view}) -> {region}
+        %input = "weft_kernel.admit"(%xs) : ({region}) -> {value}
+        %original = "weft_kernel.new"(%input) <{{initialized = true}}> : ({value}) -> {value}
+        {loop}
+        %ys = "weft_kernel.slice"(%y) <{{selectors = ["all"]}}> : ({view}) -> {region}
+        %saved = "weft_kernel.slice"(%old) <{{selectors = ["all"]}}> : ({view}) -> {region}
+        "weft_kernel.commit"(%changed, %ys) : ({value}, {region}) -> ()
+        "weft_kernel.commit"(%original, %saved) : ({value}, {region}) -> ()
+        "weft_kernel.return"() : () -> ()
+      }}) : () -> ()
+    }}''')
+    kernel = triton.compile(str(source), target=WeftDriver().get_current_target(),
+                            options={"num_cpu_threads": 1})
+    original = np.arange(512, dtype=np.float32)
+    result, saved = np.empty_like(original), np.empty_like(original)
+    kernel[(1,)](original, result, saved)
+    np.testing.assert_array_equal(result, np.full_like(original, 2))
+    np.testing.assert_array_equal(saved, original)
+
+
 @pytest.mark.parametrize("dtype", [np.int32, np.uint32, np.int64, np.uint64])
 @pytest.mark.parametrize("ordering", ["relaxed", "acquire", "release", "acq_rel", "seq_cst"])
 def test_canonical_scalar_atomic_returns_previous_value(tmp_path, dtype, ordering):
