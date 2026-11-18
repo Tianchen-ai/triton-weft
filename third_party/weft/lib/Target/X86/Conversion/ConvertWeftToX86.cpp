@@ -8,6 +8,7 @@
 #include "Weft/Analysis/StorageBytes.h"
 #include "Transforms/Memory/Arrays.h"
 #include "Transforms/Memory/ArrayPackets.h"
+#include "Transforms/Memory/RowSnapshots.h"
 #include "Transforms/Arithmetic/IntegerReductions.h"
 #include "Transforms/Arithmetic/Lookups.h"
 #include "Transforms/Contraction/AMXContractions.h"
@@ -1958,6 +1959,26 @@ private:
       view.fieldElements = indexConstant(loc, layout->bytes());
     }
     auto sizes = shape(domain), ids = axes(domain), memoryAxes = axes(region.getType());
+    auto flat = dyn_cast<VectorType>(physicalType(domain));
+    if (!input && !recordLimit && flat && memoryAxes == ids && sizes.size() == 2 &&
+        view.storageMap.getDefiningOp<LLVM::ZeroOp>() && matchPattern(view.storageMapped, m_Zero()) &&
+        isa<FloatType>(flat.getElementType()) &&
+        flat.getElementTypeBitWidth() >= 16 &&
+        sizes.front() >= target.vectorRegisters() && sizes.back() >= 2 &&
+        sizes.back() * flat.getElementTypeBitWidth() <= 4 * target.vectorBits &&
+        flat.getNumElements() * flat.getElementTypeBitWidth() > target.vectorRegisters() * target.vectorBits) {
+      auto row = wk::ValueType::get(b.getContext(), element(domain),
+          b.getDenseI64ArrayAttr({sizes.back()}), b.getDenseI64ArrayAttr({ids.back()}));
+      Value fill = zero(loc, physicalType(row));
+      auto [data, live] = weft::x86::loadRowSnapshot(b, loc, flat, sizes.back(), view.offset,
+          view.guard, view.strides, view.limits, [&](Value offsets, Value mask) {
+            return accessRuntimeRuns(loc, view.base, offsets, mask, fill, row, true, sizes.back(), view.strides.back());
+          });
+      values.map(op.getResult(0), data);
+      masks[op.getResult(0)] = live;
+      valueOrigins[op.getResult(0)] = view.origins;
+      return success();
+    }
     Type offsetsType = b.getIndexType(), mask = b.getI1Type();
     if (!sizes.empty()) { offsetsType = VectorType::get({volume(sizes)}, b.getIndexType()); mask = VectorType::get({volume(sizes)}, b.getI1Type()); }
     auto splat = [&](Value value, Type type) -> Value {
@@ -3456,6 +3477,16 @@ private:
     auto outputShape = shape(projected), outputAxes = axes(projected);
     Type outputType = physicalType(op.getResult(0).getType());
     auto sourceOrigins = origins(source, loc);
+    if (update && !packedType(projected) && indices.size() == 1) {
+      if (auto result = weft::x86::updateRowWindow(b, cast<wk::UpdateOp>(op), mapped(indices.front()),
+              valid(indices.front(), loc), mapped(source), valid(source, loc),
+              mapped(update), valid(update, loc))) {
+        values.map(op.getResult(0), result->first);
+        masks[op.getResult(0)] = result->second;
+        valueOrigins[op.getResult(0)] = sourceOrigins;
+        return success();
+      }
+    }
     if (projected == source.getType() && indices.empty() && !packedType(projected) &&
         llvm::all_of(selectors, [](Attribute selector) {
           return cast<StringAttr>(selector).getValue() == "all";

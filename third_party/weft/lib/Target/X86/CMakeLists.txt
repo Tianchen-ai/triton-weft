@@ -16,6 +16,7 @@ add_library(WeftX86Target STATIC
   Transforms/Control/FullTiles.cpp
   Transforms/Memory/StreamingStores.cpp
   Transforms/Memory/ArrayPackets.cpp
+  Transforms/Memory/RowSnapshots.cpp
   Transforms/Memory/ArrayForwarding.cpp
   Analysis/Resources.cpp
   Transforms/Control/ReductionSchedules.cpp

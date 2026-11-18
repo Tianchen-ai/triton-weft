@@ -7,6 +7,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Matchers.h"
+#include "llvm/ADT/bit.h"
 #include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
@@ -18,17 +19,23 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
   auto left = op.getOperand(0).getType(), right = op.getOperand(1).getType();
   auto la = wk::logicalAxes(left), ra = wk::logicalAxes(right);
   auto over = op.getAttrOfType<DenseI64ArrayAttr>("over").asArrayRef();
-  if (la.size() != 2 || ra.size() != 2 || over.size() != 1 ||
-      la[1] != over[0] || ra[0] != over[0] || la[0] == ra[1]) return {};
+  if (la.size() != 2 || ra.size() != 2 || over.size() != 1 || la[1] != over[0]) return {};
+  bool transposed = ra[1] == over[0];
+  if (!transposed && ra[0] != over[0]) return {};
+  auto outputAxes = wk::logicalAxes(op.getResult(0).getType());
+  if (outputAxes.size() != 2 || outputAxes[0] != la[0] || outputAxes[1] != ra[transposed ? 0 : 1])
+    return {};
   for (Value input : inputs) {
     auto v = dyn_cast<VectorType>(input.getType());
     if (!v || !(v.getElementType().isF32() || v.getElementType().isF16() || v.getElementType().isBF16()))
       return {};
   }
   int64_t rows = wk::logicalShape(left)[0], depth = wk::logicalShape(left)[1];
-  int64_t cols = wk::logicalShape(right)[1], lanes = target.vectorBits / 32;
-  if (rows <= 0 || cols < lanes || depth < 2 * lanes ||
-      (2 * rows + 4) * llvm::divideCeil(cols, lanes) > target.vectorRegisters()) return {};
+  int64_t cols = wk::logicalShape(right)[transposed ? 0 : 1], lanes = target.vectorBits / 32;
+  if (rows <= 0 || cols < lanes || depth < 2 * lanes) return {};
+  int64_t registers = target.vectorRegisters() / llvm::divideCeil(cols, lanes);
+  if (registers < 6) return {};
+  int64_t rowGroup = std::min(rows, int64_t(llvm::bit_floor(uint64_t((registers - 4) / 2))));
 
   Location loc = op.getLoc();
   auto index = [&](int64_t v) { return arith::ConstantIndexOp::create(b, loc, v).getResult(); };
@@ -46,16 +53,25 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
     auto bytes = cast<VectorType>(mask.getType()).clone(b.getI8Type());
     return snapshot(arith::ExtUIOp::create(b, loc, bytes, mask));
   };
-  Value a = snapshot(inputs[0]), weights = snapshot(inputs[1]);
-  Value av = maskSnapshot(masks[0]), bv = maskSnapshot(masks[1]);
+  auto arrangeRight = [&](Value v) -> Value {
+    if (!transposed || matchPattern(v, m_One())) return v;
+    // Store one K-major snapshot, shared by every output row group.
+    SmallVector<int64_t> order;
+    for (int64_t k = 0; k < depth; ++k)
+      for (int64_t n = 0; n < cols; ++n)
+        order.push_back(n * depth + k);
+    return vector::ShuffleOp::create(b, loc, v, v, order);
+  };
+  Value a = snapshot(inputs[0]), weights = snapshot(arrangeRight(inputs[1]));
+  Value av = maskSnapshot(masks[0]), bv = maskSnapshot(arrangeRight(masks[1]));
   auto rowType = VectorType::get({cols}, b.getF32Type());
   auto maskType = rowType.clone(b.getI1Type());
   Value noValues = zero(rowType), noLanes = zero(maskType);
   Value allLanes = arith::ConstantOp::create(b, loc, maskType, DenseElementsAttr::get(maskType, true));
-  SmallVector<Value> initial(rows, noValues);
-  initial.append(rows, noLanes);
-  auto loop = scf::ForOp::create(b, loc, start, index(depth), index(1), initial);
-  {
+  auto accumulate = [&](int64_t first, int64_t count) {
+    SmallVector<Value> initial(count, noValues);
+    initial.append(count, noLanes);
+    auto loop = scf::ForOp::create(b, loc, start, index(depth), index(1), initial);
     OpBuilder::InsertionGuard guard(b);
     b.setInsertionPointToStart(loop.getBody());
     Value k = loop.getInductionVar();
@@ -67,8 +83,8 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
     if (bv) rightLive = arith::TruncIOp::create(b, loc, maskType,
         vector::LoadOp::create(b, loc, rowType.clone(b.getI8Type()), bv, base));
     SmallVector<Value> sums, validity;
-    for (int64_t m = 0; m < rows; ++m) {
-      Value offset = arith::AddIOp::create(b, loc, index(m * depth), k);
+    for (int64_t m = 0; m < count; ++m) {
+      Value offset = arith::AddIOp::create(b, loc, index((first + m) * depth), k);
       Value lhs = memref::LoadOp::create(b, loc, a, offset);
       if (!lhs.getType().isF32()) lhs = arith::ExtFOp::create(b, loc, b.getF32Type(), lhs);
       lhs = vector::BroadcastOp::create(b, loc, rowType, lhs);
@@ -81,10 +97,18 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
       Value x = arith::SelectOp::create(b, loc, live, lhs, noValues);
       Value y = arith::SelectOp::create(b, loc, live, rhs, noValues);
       sums.push_back(math::FmaOp::create(b, loc, x, y, loop.getRegionIterArgs()[m]));
-      validity.push_back(arith::OrIOp::create(b, loc, live, loop.getRegionIterArgs()[rows + m]));
+      validity.push_back(arith::OrIOp::create(b, loc, live, loop.getRegionIterArgs()[count + m]));
     }
     sums.append(validity);
     scf::YieldOp::create(b, loc, sums);
+    return loop;
+  };
+  SmallVector<Value> results, resultMasks;
+  for (int64_t first = 0; first < rows; first += rowGroup) {
+    int64_t count = std::min(rowGroup, rows - first);
+    auto loop = accumulate(first, count);
+    llvm::append_range(results, loop.getResults().take_front(count));
+    llvm::append_range(resultMasks, loop.getResults().drop_front(count));
   }
   auto join = [&](Type element, ValueRange pieces) {
     Value flat = zero(VectorType::get({rows * cols}, element));
@@ -93,7 +117,7 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
           ArrayRef<int64_t>{int64_t(i) * cols}, ArrayRef<int64_t>{1});
     return flat;
   };
-  Value result = join(b.getF32Type(), loop.getResults().take_front(rows));
-  Value valid = join(b.getI1Type(), loop.getResults().drop_front(rows));
+  Value result = join(b.getF32Type(), results);
+  Value valid = join(b.getI1Type(), resultMasks);
   return std::make_pair(result, valid);
 }

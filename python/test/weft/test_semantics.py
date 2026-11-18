@@ -220,6 +220,80 @@ def test_full_update_replaces_validity_and_preserves_snapshot(tmp_path):
     np.testing.assert_array_equal(saved, original)
 
 
+def test_row_window_updates_clip_and_wrap_each_row(tmp_path):
+    import triton
+    from triton.backends.weft.driver import WeftDriver
+
+    target = WeftDriver().get_current_target()
+    if target.arch != "x86_64":
+        pytest.skip("x86 packet window lowering")
+    view = '!weft_kernel.view<!weft_kernel.encoding<"f32", "dense", "dense.f32", []>, [2, 8], [1, 2]>'
+    tile = '!weft_kernel.value<f32, [2, 8], [1, 2]>'
+    part = '!weft_kernel.value<f32, [2, 4], [1, 2]>'
+    indices = '!weft_kernel.value<ui8, [4], [2]>'
+    byte = '!weft_kernel.view<!weft_kernel.encoding<"u8", "dense", "dense.u8", []>, [1], [1]>'
+    scalar = '!weft_kernel.slice<!weft_kernel.encoding<"u8", "dense", "dense.u8", []>, [], []>'
+    source = tmp_path / "row_window.weftir"
+    source.write_text(f'''module {{
+      "weft_kernel.kernel"() <{{arg_access = ["read", "read", "write"],
+        arg_alias_sets = array<i64: 0, 0, 0>, arg_names = ["X", "Offset", "Y"],
+        shape_symbols = [], strided_args = [], source = "canonical regression", sym_name = "row_window"}}> ({{
+      ^bb0(%x: {view}, %offset: {byte}, %y: {view}):
+        %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
+        %zero = arith.constant 0 : index
+        %slice = "weft_kernel.slice"(%offset, %zero) <{{selectors = ["index"]}}> : ({byte}, index) -> {scalar}
+        %shift = "weft_kernel.admit"(%slice) : ({scalar}) -> ui8
+        %original = "weft_kernel.admit"(%x) : ({view}) -> {tile}
+        %iota = "weft_kernel.iota"() <{{start = 0 : i64, end = 4 : i64}}> : () -> {indices}
+        %positions = "weft_kernel.binary"(%iota, %shift) <{{kind = "add"}}> : ({indices}, ui8) -> {indices}
+        %first = "weft_kernel.extract"(%original, %iota) <{{selectors = ["all", "gather"]}}> : ({tile}, {indices}) -> {part}
+        %result = "weft_kernel.update"(%original, %first, %positions) <{{selectors = ["all", "gather"]}}> : ({tile}, {part}, {indices}) -> {tile}
+        "weft_kernel.commit"(%result, %y) : ({tile}, {view}) -> ()
+        "weft_kernel.return"() : () -> ()
+      }}) : () -> ()
+    }}''')
+    kernel = triton.compile(str(source), target=target, options={"num_cpu_threads": 1})
+    x = np.arange(16, dtype=np.float32).reshape(2, 8)
+    for shift in (0, 3, 6, 12, 254):
+        y = np.empty_like(x)
+        kernel[(1,)](x, np.array([shift], dtype=np.uint8), y)
+        expected = x.copy()
+        for column in range(4):
+            target_column = (shift + column) % 256
+            if target_column < 8:
+                expected[:, target_column] = x[:, column]
+        np.testing.assert_array_equal(y, expected)
+
+
+def test_dense_snapshot_with_runtime_row_and_column_strides(tmp_path):
+    import triton
+    from triton.backends.weft.driver import WeftDriver
+
+    target = WeftDriver().get_current_target()
+    if target.arch != "x86_64":
+        pytest.skip("x86 row snapshot lowering")
+    view = '!weft_kernel.view<!weft_kernel.encoding<"f32", "dense", "dense.f32", []>, [67, 32], [1, 2]>'
+    tile = '!weft_kernel.value<f32, [67, 32], [1, 2]>'
+    source = tmp_path / "strided_snapshot.weftir"
+    source.write_text(f'''module {{
+      "weft_kernel.kernel"() <{{arg_access = ["read", "write"], arg_alias_sets = array<i64: 0, 0>,
+        arg_names = ["X", "Y"], shape_symbols = [], strided_args = ["X"],
+        source = "canonical regression", sym_name = "strided_snapshot"}}> ({{
+      ^bb0(%x: {view}, %y: {view}):
+        %root = "weft_kernel.root_domain"() : () -> !weft_kernel.domain<"root", 0, -1, 0, "root", "exact">
+        %snapshot = "weft_kernel.admit"(%x) : ({view}) -> {tile}
+        "weft_kernel.commit"(%snapshot, %y) : ({tile}, {view}) -> ()
+        "weft_kernel.return"() : () -> ()
+      }}) : () -> ()
+    }}''')
+    kernel = triton.compile(str(source), target=target, options={"num_cpu_threads": 1})
+    data = np.arange(67 * 65, dtype=np.float32).reshape(67, 65)
+    for x in (data[:, 1:33], data[:, 1::2]):
+        y = np.full((67, 32), np.nan, dtype=np.float32)
+        kernel[(1,)](x, y)
+        np.testing.assert_array_equal(y, x)
+
+
 @pytest.mark.parametrize("dtype", [np.int32, np.uint32, np.int64, np.uint64])
 @pytest.mark.parametrize("ordering", ["relaxed", "acquire", "release", "acq_rel", "seq_cst"])
 def test_canonical_scalar_atomic_returns_previous_value(tmp_path, dtype, ordering):
@@ -343,23 +417,25 @@ def test_canonical_bfloat_arithmetic_preserves_rounding(tmp_path):
 
 
 @pytest.mark.parametrize("precision", ["bf16", "f16"])
-def test_strided_outer_product_preserves_narrow_values(tmp_path, precision):
+@pytest.mark.parametrize("transpose_rhs", [False, True])
+def test_strided_outer_product_preserves_narrow_values(tmp_path, precision, transpose_rhs):
     import triton
     from triton.backends.weft.driver import WeftDriver
 
     target = WeftDriver().get_current_target()
     if target.arch != "x86_64":
         pytest.skip("x86 dense contraction lowering")
-    m, k, n = 3, 65, 16
+    m, k, n = 17 if transpose_rhs else 3, 65, 16
     def view(dtype, shape, axes):
         return f'!weft_kernel.view<!weft_kernel.encoding<"{dtype}", "dense", "dense.{dtype}", []>, {shape}, {axes}>'
     def value(dtype, shape, axes):
         return f'!weft_kernel.value<{dtype}, {shape}, {axes}>'
 
-    a, b, out = view("u16", [m,k], [1,2]), view("u16", [k,n], [2,3]), view("f32", [m,n], [1,3])
-    raw_a, raw_b = value("ui16", [m,k], [1,2]), value("ui16", [k,n], [2,3])
-    narrow_a, narrow_b = value(precision, [m,k], [1,2]), value(precision, [k,n], [2,3])
-    wide_a, wide_b, product = value("f32", [m,k], [1,2]), value("f32", [k,n], [2,3]), value("f32", [m,n], [1,3])
+    rhs = ([n,k], [3,2]) if transpose_rhs else ([k,n], [2,3])
+    a, b, out = view("u16", [m,k], [1,2]), view("u16", *rhs), view("f32", [m,n], [1,3])
+    raw_a, raw_b = value("ui16", [m,k], [1,2]), value("ui16", *rhs)
+    narrow_a, narrow_b = value(precision, [m,k], [1,2]), value(precision, *rhs)
+    wide_a, wide_b, product = value("f32", [m,k], [1,2]), value("f32", *rhs), value("f32", [m,n], [1,3])
     source = tmp_path / "strided_outer.weftir"
     source.write_text(f'''module {{
       "weft_kernel.kernel"() <{{arg_access = ["read", "read", "write"],
@@ -384,13 +460,13 @@ def test_strided_outer_product_preserves_narrow_values(tmp_path, precision):
     left = np.full((m,k+3), 0x7fff, np.uint16)[:, :k]
     right = np.full((k,n+5), 0x7fff, np.uint16)[:, :n]
     left.fill(0)
-    left[:, -1] = [one, one | 0x8000, 1]
+    left[:, -1] = np.resize(np.array([one, one | 0x8000, 1], np.uint16), m)
     right[:] = one
     right[-1, ::2] |= 0x8000
     actual = np.empty((m,n), np.float32)
-    compiled[(1,)](left, right, actual)
+    compiled[(1,)](left, right.T if transpose_rhs else right, actual)
     tiny = np.ldexp(np.float32(1), -133 if precision == "bf16" else -24)
-    expected = np.array([1, -1, tiny], dtype=np.float32)[:, None] * np.where(np.arange(n)%2, 1, -1)
+    expected = np.resize(np.array([1, -1, tiny], np.float32), m)[:, None] * np.where(np.arange(n)%2, 1, -1)
     np.testing.assert_array_equal(actual, expected)
 
 

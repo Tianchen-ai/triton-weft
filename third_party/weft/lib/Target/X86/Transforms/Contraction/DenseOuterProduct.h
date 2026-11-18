@@ -5,7 +5,7 @@
 #include <optional>
 
 namespace weft::x86 {
-// Map a row-major [M,K] × [K,N] region to register-resident FP32 rows.
+// Accumulate [M,K] against [K,N] or [N,K] in register-sized row groups.
 std::optional<std::pair<mlir::Value, mlir::Value>> emitDenseOuterProduct(
     mlir::OpBuilder &b, mlir::Operation &op, const X86Target &target,
     mlir::ValueRange inputs, mlir::ValueRange masks);
