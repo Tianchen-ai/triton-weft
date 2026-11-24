@@ -32,7 +32,7 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
   }
   int64_t rows = wk::logicalShape(left)[0], depth = wk::logicalShape(left)[1];
   int64_t cols = wk::logicalShape(right)[transposed ? 0 : 1], lanes = target.vectorBits / 32;
-  if (rows <= 0 || cols < lanes || depth < 2 * lanes) return {};
+  if (rows <= 0 || cols < lanes || depth < 4) return {};
   int64_t registers = target.vectorRegisters() / llvm::divideCeil(cols, lanes);
   if (registers < 6) return {};
   int64_t rowGroup = std::min(rows, int64_t(llvm::bit_floor(uint64_t((registers - 4) / 2))));
@@ -53,16 +53,90 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
     auto bytes = cast<VectorType>(mask.getType()).clone(b.getI8Type());
     return snapshot(arith::ExtUIOp::create(b, loc, bytes, mask));
   };
-  auto arrangeRight = [&](Value v) -> Value {
-    if (!transposed || matchPattern(v, m_One())) return v;
-    // Store one K-major snapshot, shared by every output row group.
+  auto transposeRightSnapshot = [&](Value v) -> Value {
+    if (!transposed) return snapshot(v);
+    auto vTy = cast<VectorType>(v.getType());
+    Type elemTy = vTy.getElementType();
+    if (llvm::isPowerOf2_64(uint64_t(lanes)) && cols % lanes == 0 &&
+        depth % lanes == 0 && (elemTy.isF32() || elemTy.isF16() || elemTy.isBF16())) {
+      Value srcBuf = snapshot(v);
+      Value dstBuf = memref::AllocOp::create(
+          b, loc, MemRefType::get({depth * cols}, b.getF32Type()));
+      auto rawTileTy = VectorType::get({lanes}, elemTy);
+      auto f32TileTy = VectorType::get({lanes}, b.getF32Type());
+      auto kbLoop = scf::ForOp::create(b, loc, start, index(depth), index(lanes));
+      {
+        OpBuilder::InsertionGuard kg(b);
+        b.setInsertionPointToStart(kbLoop.getBody());
+        Value kb = kbLoop.getInductionVar();
+        for (int64_t nb = 0; nb < cols; nb += lanes) {
+          SmallVector<Value, 16> tile(lanes);
+          for (int64_t r = 0; r < lanes; ++r) {
+            Value srcOff = arith::AddIOp::create(
+                b, loc, index((nb + r) * depth), kb);
+            Value rowVec = vector::LoadOp::create(b, loc, rawTileTy, srcBuf, srcOff);
+            if (rawTileTy != f32TileTy)
+              rowVec = arith::ExtFOp::create(b, loc, f32TileTy, rowVec);
+            tile[r] = rowVec;
+          }
+          for (int64_t bit = 1; bit < lanes; bit <<= 1) {
+            SmallVector<int64_t, 16> maskLo(lanes), maskHi(lanes);
+            for (int64_t c = 0; c < lanes; ++c) {
+              maskLo[c] = (c & bit) ? (lanes + (c ^ bit)) : c;
+              maskHi[c] = (c & bit) ? (lanes + c) : (c | bit);
+            }
+            SmallVector<Value, 16> next(lanes);
+            for (int64_t r = 0; r < lanes; ++r) {
+              if (r & bit) continue;
+              int64_t rHi = r | bit;
+              next[r] = vector::ShuffleOp::create(b, loc, tile[r], tile[rHi], maskLo);
+              next[rHi] = vector::ShuffleOp::create(b, loc, tile[r], tile[rHi], maskHi);
+            }
+            tile = std::move(next);
+          }
+          for (int64_t kSub = 0; kSub < lanes; ++kSub) {
+            Value kRow = arith::AddIOp::create(b, loc, kb, index(kSub));
+            Value dstOff = arith::AddIOp::create(
+                b, loc, arith::MulIOp::create(b, loc, kRow, index(cols)),
+                index(nb));
+            vector::StoreOp::create(b, loc, tile[kSub], dstBuf, dstOff);
+          }
+        }
+      }
+      return dstBuf;
+    }
     SmallVector<int64_t> order;
     for (int64_t k = 0; k < depth; ++k)
       for (int64_t n = 0; n < cols; ++n)
         order.push_back(n * depth + k);
-    return vector::ShuffleOp::create(b, loc, v, v, order);
+    return snapshot(vector::ShuffleOp::create(b, loc, v, v, order));
   };
-  Value a = snapshot(inputs[0]), weights = snapshot(arrangeRight(inputs[1]));
+  auto transposeMaskSnapshot = [&](Value mask) -> Value {
+    if (matchPattern(mask, m_One())) return {};
+    if (!transposed) return maskSnapshot(mask);
+    auto bytes = cast<VectorType>(mask.getType()).clone(b.getI8Type());
+    Value srcBuf = snapshot(arith::ExtUIOp::create(b, loc, bytes, mask));
+    Value dstBuf = memref::AllocOp::create(
+        b, loc, MemRefType::get({depth * cols}, b.getI8Type()));
+    auto kLoop = scf::ForOp::create(b, loc, start, index(depth), index(1));
+    {
+      OpBuilder::InsertionGuard kg(b);
+      b.setInsertionPointToStart(kLoop.getBody());
+      Value k = kLoop.getInductionVar();
+      auto nLoop = scf::ForOp::create(b, loc, start, index(cols), index(1));
+      OpBuilder::InsertionGuard ng(b);
+      b.setInsertionPointToStart(nLoop.getBody());
+      Value n = nLoop.getInductionVar();
+      Value sOff = arith::AddIOp::create(
+          b, loc, arith::MulIOp::create(b, loc, n, index(depth)), k);
+      Value dOff = arith::AddIOp::create(
+          b, loc, arith::MulIOp::create(b, loc, k, index(cols)), n);
+      Value mByte = memref::LoadOp::create(b, loc, srcBuf, sOff);
+      memref::StoreOp::create(b, loc, mByte, dstBuf, dOff);
+    }
+    return dstBuf;
+  };
+  Value a = snapshot(inputs[0]), weights = transposeRightSnapshot(inputs[1]);
   auto rowType = VectorType::get({cols}, b.getF32Type());
   auto maskType = rowType.clone(b.getI1Type());
   Value noValues = zero(rowType), noLanes = zero(maskType);
@@ -140,7 +214,7 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
   auto full = multiply({}, {});
   scf::YieldOp::create(b, loc, ValueRange{full.first, full.second});
   b.setInsertionPointToStart(choice.elseBlock());
-  Value av = maskSnapshot(masks[0]), bv = maskSnapshot(arrangeRight(masks[1]));
+  Value av = maskSnapshot(masks[0]), bv = transposeMaskSnapshot(masks[1]);
   auto tail = multiply(av, bv);
   scf::YieldOp::create(b, loc, ValueRange{tail.first, tail.second});
   return std::make_pair(choice.getResult(0), choice.getResult(1));
