@@ -105,6 +105,7 @@ struct CallContract {
 
 struct Kernel {
   using Dispatch = void (*)(weft_native_entry, void *const *);
+  using TakeStatus = int (*)(char *, size_t);
   std::shared_ptr<Context> context;
   std::string directory, symbol, march, abi;
   size_t xlen, vlen;
@@ -116,11 +117,13 @@ struct Kernel {
   void *library = nullptr;
   weft_native_entry entry = nullptr;
   Dispatch dispatch = nullptr;
+  TakeStatus takeStatus = nullptr;
   Kernel(std::shared_ptr<Context> context, const std::string &directory);
   Kernel(std::shared_ptr<Context> context, const std::string &libraryPath,
          const llvm::json::Object &manifest);
   ~Kernel();
   Kernel(const Kernel &) = delete;
+  void invoke(void *const *parameters) const;
   DimensionValues bindDimensions(const weft_dimension *values, size_t count) const;
   size_t storageSize(size_t argument, const DimensionValues &values) const;
 };

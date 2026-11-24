@@ -3,6 +3,7 @@ import copy
 
 
 GRID_DECLARATION = """typedef int (*triton_check_thread)(const void *, char *, size_t);
+int weft_kernel_take_status(char *error, size_t error_size);
 int triton_weft_grid(void (*entry)(void), void *const *arguments,
                     size_t grid0, size_t grid1, size_t grid2, int threads,
                     const void *scope, triton_check_thread check, char *error, size_t error_size);"""
@@ -25,15 +26,63 @@ def single_instance_abi(abi):
     return result
 
 
+_WEFT_STATUS_SHIM_NOOP = r'''
+int weft_kernel_take_status(char *error, size_t error_size) {
+  if (error && error_size) error[0] = 0;
+  return 0;
+}
+'''
+
+
 _ONEDNN_BRGEMM_SHIM = r'''
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
 #if defined(__linux__) && defined(__x86_64__)
 #include <asm/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
 #include <oneapi/dnnl/dnnl_ukernel.h>
+
+static _Thread_local int __weft_tls_status = 0;
+static _Thread_local char __weft_tls_error[512];
+
+static inline void __weft_reset_tls_status(void) {
+  __weft_tls_status = 0;
+  __weft_tls_error[0] = 0;
+}
+
+static void __weft_record_error(int status, const char *fmt, ...) {
+  if (__weft_tls_status != 0) return;
+  __weft_tls_status = status ? status : 6;
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(__weft_tls_error, sizeof(__weft_tls_error), fmt, ap);
+  va_end(ap);
+}
+
+int weft_kernel_take_status(char *error, size_t error_size) {
+  int st = __weft_tls_status;
+  if (error && error_size) {
+    if (st != 0 && __weft_tls_error[0]) {
+      strncpy(error, __weft_tls_error, error_size - 1);
+      error[error_size - 1] = 0;
+    } else {
+      error[0] = 0;
+    }
+  }
+  __weft_tls_status = 0;
+  __weft_tls_error[0] = 0;
+  return st;
+}
+
+static inline int __weft_status_from_dnnl(dnnl_status_t st, int fallback) {
+  if (st == dnnl_invalid_arguments) return 1; /* WEFT_INVALID_ARGUMENT */
+  if (st == dnnl_out_of_memory) return 6;     /* WEFT_RESOURCE_ERROR */
+  if (st == dnnl_unimplemented) return 5;     /* WEFT_UNSUPPORTED */
+  return fallback;
+}
 
 struct __weft_brgemm_entry {
   int64_t M, N, K, lda, ldb, ldc;
@@ -44,15 +93,15 @@ struct __weft_brgemm_entry {
   int valid;
 };
 
-static inline dnnl_data_type_t __weft_map_dnnl_dt(int32_t code) {
+static inline int __weft_map_dnnl_dt(int32_t code, dnnl_data_type_t *out) {
   switch (code) {
-    case 0: return dnnl_f32;
-    case 1: return dnnl_f16;
-    case 2: return dnnl_bf16;
-    case 3: return dnnl_s8;
-    case 4: return dnnl_u8;
-    case 5: return dnnl_s32;
-    default: abort();
+    case 0: *out = dnnl_f32; return 0;
+    case 1: *out = dnnl_f16; return 0;
+    case 2: *out = dnnl_bf16; return 0;
+    case 3: *out = dnnl_s8; return 0;
+    case 4: *out = dnnl_u8; return 0;
+    case 5: *out = dnnl_s32; return 0;
+    default: *out = dnnl_data_type_undef; return 1;
   }
 }
 
@@ -61,7 +110,25 @@ void __weft_onednn_brgemm_execute(
     int64_t M, int64_t N, int64_t K,
     int64_t lda, int64_t ldb, int64_t ldc,
     int32_t dt_a, int32_t dt_b, int32_t dt_c, int32_t add_c) {
-  if (M <= 0 || N <= 0 || K <= 0) return;
+  if (__weft_tls_status != 0) return;
+  if (M < 0 || N < 0 || K < 0) {
+    __weft_record_error(1, "Weft oneDNN BRGeMM received negative extent (M=%lld, N=%lld, K=%lld)",
+                        (long long)M, (long long)N, (long long)K);
+    return;
+  }
+  if (M == 0 || N == 0 || K == 0) return;
+  if (!A || !B || !C) {
+    __weft_record_error(1, "Weft oneDNN BRGeMM received null operand pointer");
+    return;
+  }
+  dnnl_data_type_t dnnl_a, dnnl_b, dnnl_c;
+  if (__weft_map_dnnl_dt(dt_a, &dnnl_a) != 0 ||
+      __weft_map_dnnl_dt(dt_b, &dnnl_b) != 0 ||
+      __weft_map_dnnl_dt(dt_c, &dnnl_c) != 0) {
+    __weft_record_error(1, "Weft oneDNN BRGeMM received invalid dtype code (%d/%d/%d)",
+                        dt_a, dt_b, dt_c);
+    return;
+  }
 #if defined(__linux__) && defined(__x86_64__)
   if (dt_a >= 2) {
     static _Thread_local int amx_ready = 0;
@@ -114,27 +181,57 @@ void __weft_onednn_brgemm_execute(
   }
 
   if (!hit) {
+    dnnl_brgemm_t brg = NULL;
+    dnnl_status_t st = dnnl_brgemm_create(
+        &brg, (dnnl_dim_t)M, (dnnl_dim_t)N, (dnnl_dim_t)K, 1,
+        (dnnl_dim_t)lda, (dnnl_dim_t)ldb, (dnnl_dim_t)ldc,
+        dnnl_a, dnnl_b, dnnl_c);
+    if (st != dnnl_success || !brg) {
+      if (brg) dnnl_brgemm_destroy(brg);
+      __weft_record_error(
+          __weft_status_from_dnnl(st, 5),
+          "Weft oneDNN BRGeMM create failed (dnnl_status=%d, M=%lld N=%lld K=%lld lda=%lld ldb=%lld ldc=%lld dt=%d/%d/%d)",
+          (int)st, (long long)M, (long long)N, (long long)K,
+          (long long)lda, (long long)ldb, (long long)ldc, dt_a, dt_b, dt_c);
+      return;
+    }
+    if (add_c) {
+      st = dnnl_brgemm_set_add_C(brg, 1);
+      if (st != dnnl_success) {
+        dnnl_brgemm_destroy(brg);
+        __weft_record_error(__weft_status_from_dnnl(st, 5),
+                            "Weft oneDNN BRGeMM set_add_C failed (dnnl_status=%d)", (int)st);
+        return;
+      }
+    }
+    st = dnnl_brgemm_finalize(brg);
+    if (st != dnnl_success) {
+      dnnl_brgemm_destroy(brg);
+      __weft_record_error(__weft_status_from_dnnl(st, 5),
+                          "Weft oneDNN BRGeMM finalize failed (dnnl_status=%d, M=%lld N=%lld K=%lld)",
+                          (int)st, (long long)M, (long long)N, (long long)K);
+      return;
+    }
+    st = dnnl_brgemm_generate(brg);
+    if (st != dnnl_success) {
+      dnnl_brgemm_destroy(brg);
+      __weft_record_error(__weft_status_from_dnnl(st, 4),
+                          "Weft oneDNN BRGeMM generate failed (dnnl_status=%d, M=%lld N=%lld K=%lld)",
+                          (int)st, (long long)M, (long long)N, (long long)K);
+      return;
+    }
+    size_t sz = 0;
+    st = dnnl_brgemm_get_scratchpad_size(brg, &sz);
+    if (st != dnnl_success || sz > (size_t)PTRDIFF_MAX - 4096u) {
+      dnnl_brgemm_destroy(brg);
+      __weft_record_error(__weft_status_from_dnnl(st, 6),
+                          "Weft oneDNN BRGeMM scratchpad query failed (dnnl_status=%d)", (int)st);
+      return;
+    }
     struct __weft_brgemm_entry *e = &cache[victim];
     if (e->valid && e->brg) {
       dnnl_brgemm_destroy(e->brg);
-      e->brg = NULL;
-      e->valid = 0;
     }
-    dnnl_brgemm_t brg = NULL;
-    if (dnnl_brgemm_create(&brg, (dnnl_dim_t)M, (dnnl_dim_t)N, (dnnl_dim_t)K, 1,
-                           (dnnl_dim_t)lda, (dnnl_dim_t)ldb, (dnnl_dim_t)ldc,
-                           __weft_map_dnnl_dt(dt_a), __weft_map_dnnl_dt(dt_b),
-                           __weft_map_dnnl_dt(dt_c)) != dnnl_success || !brg) {
-      fprintf(stderr, "Weft oneDNN BRGeMM create failed (M=%lld N=%lld K=%lld lda=%lld ldb=%lld ldc=%lld dt=%d/%d/%d)\n",
-              (long long)M, (long long)N, (long long)K, (long long)lda, (long long)ldb, (long long)ldc,
-              dt_a, dt_b, dt_c);
-      abort();
-    }
-    if (add_c && dnnl_brgemm_set_add_C(brg, 1) != dnnl_success) abort();
-    if (dnnl_brgemm_finalize(brg) != dnnl_success) abort();
-    if (dnnl_brgemm_generate(brg) != dnnl_success) abort();
-    size_t sz = 0;
-    if (dnnl_brgemm_get_scratchpad_size(brg, &sz) != dnnl_success) abort();
     e->M = M; e->N = N; e->K = K;
     e->lda = lda; e->ldb = ldb; e->ldc = ldc;
     e->dt_a = dt_a; e->dt_b = dt_b; e->dt_c = dt_c; e->add_c = add_c;
@@ -146,19 +243,33 @@ void __weft_onednn_brgemm_execute(
   hit->stamp = ++clock_tick;
 
   if (hit->scratch_bytes > scratch_cap) {
-    size_t next_cap = ((hit->scratch_bytes + 4095) / 4096) * 4096;
+    size_t next_cap = ((hit->scratch_bytes + 4095u) / 4096u) * 4096u;
     void *next_buf = NULL;
-    if (posix_memalign(&next_buf, 64, next_cap) != 0 || !next_buf) abort();
+    if (posix_memalign(&next_buf, 64, next_cap) != 0 || !next_buf) {
+      __weft_record_error(6, "Weft oneDNN BRGeMM scratchpad allocation failed (%zu bytes)", next_cap);
+      return;
+    }
     free(scratch_ptr);
     scratch_ptr = next_buf;
     scratch_cap = next_cap;
   }
 
   dnnl_dim_t ab_offsets[2] = {0, 0};
-  if (dnnl_brgemm_set_hw_context(hit->brg) != dnnl_success) abort();
-  if (dnnl_brgemm_execute(hit->brg, A, B, ab_offsets, C, scratch_ptr) != dnnl_success) abort();
+  dnnl_status_t st = dnnl_brgemm_set_hw_context(hit->brg);
+  if (st != dnnl_success) {
+    __weft_record_error(__weft_status_from_dnnl(st, 4),
+                        "Weft oneDNN BRGeMM set_hw_context failed (dnnl_status=%d)", (int)st);
+    return;
+  }
+  st = dnnl_brgemm_execute(hit->brg, A, B, ab_offsets, C, scratch_ptr);
   if (dt_a >= 2) {
     (void)dnnl_brgemm_release_hw_context();
+  }
+  if (st != dnnl_success) {
+    __weft_record_error(__weft_status_from_dnnl(st, 6),
+                        "Weft oneDNN BRGeMM execute failed (dnnl_status=%d, M=%lld N=%lld K=%lld)",
+                        (int)st, (long long)M, (long long)N, (long long)K);
+    return;
   }
 }
 '''
@@ -191,7 +302,13 @@ def launch_source(abi):
         declarations.append(f"memcpy(&decoded.value_{index}, arguments[{index}], sizeof(decoded.value_{index}));")
         values.append(f"decoded->value_{index}")
     invocation = f"(({symbol}__weft_entry_type)entry)({', '.join(values)});"
+    uses_brgemm = bool(abi.get("uses_onednn_brgemm"))
+    reset_prefix = "__weft_reset_tls_status(); " if uses_brgemm else ""
     dispatch = dispatch_source(abi).replace('#include "kernel.h"', '')
+    if uses_brgemm:
+        dispatch = dispatch.replace(
+            'void weft_kernel_dispatch(void (*entry)(void), void *const *arguments) {',
+            'void weft_kernel_dispatch(void (*entry)(void), void *const *arguments) {\n    __weft_reset_tls_status();')
     single = single_instance_abi(abi)
     # Private wrapper parameter names must not hide the kernel symbol. Resolve
     # the target in file scope, just as the typed indirect dispatch does.
@@ -212,11 +329,11 @@ def launch_source(abi):
     direct = symbol + "__weft_direct"
     single_body = (f"static {symbol}__weft_entry_type const {direct} = &{symbol};\n"
                    f"void {single['symbol']}({', '.join(parameters) or 'void'}) {{ "
-                   + direct + "(" + ", ".join(single_args) + "); }")
+                   + reset_prefix + direct + "(" + ", ".join(single_args) + "); }")
     instance = symbol + "__weft_launch_instance"
     single_dispatch = dispatch_source(single).replace('#include "kernel.h"', '').replace(
         'void weft_kernel_dispatch(', 'void triton_weft_instance_dispatch(')
-    onednn_shim = _ONEDNN_BRGEMM_SHIM if abi.get("uses_onednn_brgemm") else ""
+    onednn_shim = _ONEDNN_BRGEMM_SHIM if uses_brgemm else _WEFT_STATUS_SHIM_NOOP
     return f'''#include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -247,15 +364,32 @@ struct launch_job {{
   void (*entry)(void);
   const struct launch_arguments *decoded;
   size_t grid0, grid1, grid2;
+  _Atomic(int) status;
+  _Atomic(int) err_ready;
+  char error[512];
 }};
 static void launch_range(void *opaque, size_t begin, size_t end) {{
-  const struct launch_job *job = (const struct launch_job *)opaque;
+  struct launch_job *job = (struct launch_job *)opaque;
+  (void)weft_kernel_take_status(NULL, 0);
   size_t pid0 = begin % job->grid0;
   const size_t row = begin / job->grid0;
   size_t pid1 = row % job->grid1, pid2 = row / job->grid1;
   for (size_t i = begin; i < end; ++i) {{
+    if (atomic_load_explicit(&job->status, memory_order_relaxed) != 0) break;
     {instance}(job->entry, job->decoded, job->grid0, job->grid1, job->grid2,
                pid0, pid1, pid2);
+    char worker_err[512];
+    int worker_st = weft_kernel_take_status(worker_err, sizeof(worker_err));
+    if (worker_st != 0) {{
+      int expected = 0;
+      if (atomic_compare_exchange_strong_explicit(&job->status, &expected, worker_st,
+                                                  memory_order_acq_rel, memory_order_relaxed)) {{
+        strncpy(job->error, worker_err, sizeof(job->error) - 1);
+        job->error[sizeof(job->error) - 1] = 0;
+        atomic_store_explicit(&job->err_ready, 1, memory_order_release);
+      }}
+      break;
+    }}
     if (++pid0 == job->grid0) {{
       pid0 = 0;
       if (++pid1 == job->grid1) {{ pid1 = 0; ++pid2; }}
@@ -272,15 +406,23 @@ int triton_weft_grid(void (*entry)(void), void *const *arguments,
   struct launch_arguments decoded;
   {' '.join(declarations)}
   if (threads == 0) threads = omp_get_max_threads();
-  struct launch_job job = {{entry, &decoded, grid0, grid1, grid2}};
+  struct launch_job job = {{entry, &decoded, grid0, grid1, grid2, 0, 0, {{0}}}};
   if (count == 1 || threads == 1) {{
     int status = check(scope, error, error_size);
     if (status) return status;
-    if (count == 1)
+    (void)weft_kernel_take_status(NULL, 0);
+    if (count == 1) {{
       {instance}(entry, &decoded, grid0, grid1, grid2, 0, 0, 0);
-    else
-      launch_range(&job, 0, count);
-    return 0;
+      return weft_kernel_take_status(error, error_size);
+    }}
+    launch_range(&job, 0, count);
+    int body_st = atomic_load_explicit(&job.status, memory_order_acquire);
+    if (body_st != 0 && error && error_size &&
+        atomic_load_explicit(&job.err_ready, memory_order_acquire)) {{
+      strncpy(error, job.error, error_size - 1);
+      error[error_size - 1] = 0;
+    }}
+    return body_st;
   }}
   triton_parallel_runner executor = atomic_load_explicit(&parallel_executor, memory_order_acquire);
   if (!executor) {{
@@ -290,6 +432,14 @@ int triton_weft_grid(void (*entry)(void), void *const *arguments,
     }}
     return 5;
   }}
-  return executor(count, threads, scope, check, &job, launch_range, error, error_size);
+  int exec_st = executor(count, threads, scope, check, &job, launch_range, error, error_size);
+  if (exec_st != 0) return exec_st;
+  int body_st = atomic_load_explicit(&job.status, memory_order_acquire);
+  if (body_st != 0 && error && error_size) {{
+    while (!atomic_load_explicit(&job.err_ready, memory_order_acquire)) {{}}
+    strncpy(error, job.error, error_size - 1);
+    error[error_size - 1] = 0;
+  }}
+  return body_st;
 }}
 '''

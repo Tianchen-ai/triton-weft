@@ -313,6 +313,9 @@ Kernel::Kernel(std::shared_ptr<Context> context, const std::string &libraryPath,
     dlerror();
     auto bindParallel = reinterpret_cast<BindParallel>(dlsym(handle, "triton_weft_bind_parallel"));
     if (!dlerror() && bindParallel) bindParallel(&weft_parallel_for);
+    dlerror();
+    auto statusFn = reinterpret_cast<TakeStatus>(dlsym(handle, "weft_kernel_take_status"));
+    if (!dlerror() && statusFn) takeStatus = statusFn;
     entry = reinterpret_cast<weft_native_entry>(symbolAddress(handle, symbol));
     dispatch = reinterpret_cast<Dispatch>(symbolAddress(handle, dispatchSymbol));
   } catch (...) {
@@ -320,6 +323,21 @@ Kernel::Kernel(std::shared_ptr<Context> context, const std::string &libraryPath,
     throw;
   }
   library = handle;
+}
+
+void Kernel::invoke(void *const *parameters) const {
+  if (takeStatus) (void)takeStatus(nullptr, 0);
+  dispatch(entry, parameters);
+  if (takeStatus) {
+    char msg[512]{};
+    int st = takeStatus(msg, sizeof(msg));
+    if (st != 0) {
+      weft_status code = (st >= WEFT_INVALID_ARGUMENT && st <= WEFT_RESOURCE_ERROR)
+                             ? static_cast<weft_status>(st)
+                             : WEFT_RESOURCE_ERROR;
+      throw Failure(code, msg[0] ? msg : "Weft kernel execution failed");
+    }
+  }
 }
 
 Kernel::~Kernel() {

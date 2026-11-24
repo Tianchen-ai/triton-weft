@@ -98,7 +98,7 @@ void Sequence::invoke() const {
   // alter affinity/vector state during this synchronous execution scope.
   for (const auto &guard : guards) guard.context->check(guard.extensions);
   for (const auto &call : calls)
-    call->kernel->dispatch(call->kernel->entry, call->parameters.data());
+    call->kernel->invoke(call->parameters.data());
 }
 
 } // namespace weft::runtime

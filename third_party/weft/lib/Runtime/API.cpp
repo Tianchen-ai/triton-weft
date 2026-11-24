@@ -135,7 +135,7 @@ weft_status weft_call_invoke(const weft_call *call, weft_error *error) {
     require(call, WEFT_INVALID_ARGUMENT, "call is null");
     const auto &kernel = call->value->kernel;
     kernel->context->check(kernel->usedExtensions);
-    kernel->dispatch(kernel->entry, call->value->parameters.data());
+    kernel->invoke(call->value->parameters.data());
   });
 }
 
