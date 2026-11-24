@@ -25,8 +25,17 @@ if(NOT TRITON_WEFT_RUNTIME_ONLY)
   add_subdirectory(Transforms)
   add_subdirectory(Target)
 endif()
-add_library(WeftX86Platform STATIC Target/X86/Platform/Target.cpp)
+add_library(WeftX86Platform STATIC Target/X86/Platform/Target.cpp Target/X86/Platform/OneDNN.cpp)
 set_target_properties(WeftX86Platform PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_definitions(WeftX86Platform PUBLIC WEFT_RELEASE_VERSION="${WEFT_RELEASE_VERSION}")
+target_compile_definitions(WeftX86Platform PRIVATE
+  WEFT_ONEDNN_HEADER_AVAILABLE=${WEFT_ONEDNN_HEADER_AVAILABLE}
+  WEFT_ONEDNN_ROOT_DIR="${WEFT_ONEDNN_ROOT}"
+  WEFT_ONEDNN_LIBRARY_PATH="${WEFT_ONEDNN_LIBRARY_PATH}")
+if(WEFT_ONEDNN_HEADER_AVAILABLE)
+  target_include_directories(WeftX86Platform SYSTEM PRIVATE "${WEFT_ONEDNN_ROOT}/include")
+endif()
+target_link_libraries(WeftX86Platform PUBLIC ${CMAKE_DL_LIBS})
 if(LLVM_LINK_LLVM_DYLIB)
   llvm_config(WeftX86Platform USE_SHARED TargetParser Support)
 else()

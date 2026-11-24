@@ -18,6 +18,12 @@ bool X86Target::hasFeature(const std::string &name) const {
   return std::find(features.begin(), features.end(), name) != features.end();
 }
 
+bool X86Target::hasHostFeature(const std::string &name) const {
+  return hasFeature(name) ||
+         std::find(hostAvailableFeatures.begin(), hostAvailableFeatures.end(), name) !=
+             hostAvailableFeatures.end();
+}
+
 bool parseX86Target(const std::string &cpu, const std::string &abi,
                     int64_t vlen, X86Target &result, std::string &error) {
   auto base = cpu.substr(0, cpu.find('+'));
@@ -179,6 +185,7 @@ bool queryNativeX86Target(X86NativeTarget &result, std::string &error) {
   if (allV4 && allAMXTile) result.availableFeatures.emplace_back("amx-tile");
   if (allV4 && allAMXTile && allAMXBF16) result.availableFeatures.emplace_back("amx-bf16");
   if (allV4 && allAMXTile && allAMXInt8) result.availableFeatures.emplace_back("amx-int8");
+  result.target.hostAvailableFeatures = result.availableFeatures;
   return true;
 #else
   error = "native x86 discovery requires x86-64 Linux";
@@ -192,11 +199,19 @@ llvm::json::Object x86TargetJSON(const X86Target &target) {
   llvm::json::Array matrix;
   if (target.hasFeature("amx-bf16")) matrix.push_back("amx-bf16");
   if (target.hasFeature("amx-int8")) matrix.push_back("amx-int8");
-  return llvm::json::Object{{"target", llvm::json::Object{{"arch", "x86_64"}, {"march", target.cpu},
-            {"abi", "sysv"}, {"vlen_bits", 0}, {"vector_bits", target.vectorBits},
-            {"llvm_cpu", target.baseCPU()}}},
-          {"isa_extensions", std::move(features)}, {"matrix_extensions", std::move(matrix)},
-          {"register_file", llvm::json::Object{{"vector_bits", target.vectorBits},
-            {"vector_registers", target.vectorRegisters()}, {"predicate_registers", target.predicateRegisters()}}}};
+#ifndef WEFT_RELEASE_VERSION
+#define WEFT_RELEASE_VERSION "0.2.0"
+#endif
+  return llvm::json::Object{
+      {"weft_version", WEFT_RELEASE_VERSION},
+      {"target", llvm::json::Object{{"arch", "x86_64"}, {"march", target.cpu},
+          {"abi", "sysv"}, {"vlen_bits", 0}, {"vector_bits", target.vectorBits},
+          {"llvm_cpu", target.baseCPU()}}},
+      {"isa_extensions", std::move(features)},
+      {"matrix_extensions", std::move(matrix)},
+      {"onednn_brgemm", oneDNNBrgemmJSON(probeOneDNNBrgemm())},
+      {"register_file", llvm::json::Object{{"vector_bits", target.vectorBits},
+          {"vector_registers", target.vectorRegisters()},
+          {"predicate_registers", target.predicateRegisters()}}}};
 }
 } // namespace weft

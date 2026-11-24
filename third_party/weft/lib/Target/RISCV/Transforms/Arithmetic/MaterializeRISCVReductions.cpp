@@ -49,7 +49,7 @@ private:
     getOperation().walk([&](Operation *op) {
       if (!isa<riscv::DotOp, riscv::ContractOp, riscv::OuterContractOp>(op)) return;
       auto intent = op->getAttrOfType<StringAttr>("engine");
-      if (intent && intent.getValue() == "matrix") return;
+      if (intent && (intent.getValue() == "matrix" || intent.getValue().starts_with("onednn-brgemm"))) return;
       auto result = dyn_cast<riscv::ValueType>(op->getResult(0).getType());
       auto element = dyn_cast<IntegerType>(logicalElement(op->getResult(0).getType()));
       auto lhs = dyn_cast<riscv::ValueType>(op->getOperand(0).getType());

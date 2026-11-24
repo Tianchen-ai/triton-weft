@@ -320,14 +320,28 @@ json::Object lowerX86(ModuleOp source, const json::Object &options, OwningOpRef<
   std::string error;
   if (!weft::parseX86Target(text(options,"march").str(),text(options,"abi").str(),integer(options,"vlen_bits"),target,error))
     throw std::invalid_argument(error);
+#if defined(__linux__) && defined(__x86_64__)
+  {
+    weft::X86NativeTarget hostNative;
+    std::string hostErr;
+    if (weft::queryNativeX86Target(hostNative, hostErr))
+      target.hostAvailableFeatures = std::move(hostNative.availableFeatures);
+  }
+#endif
   auto tune = text(options,"tune_cpu");
+  StringRef contractionBackend = "auto";
+  if (auto cb = options.getString("contraction_backend"))
+    contractionBackend = *cb;
+  require(contractionBackend == "auto" || contractionBackend == "native" ||
+          contractionBackend == "onednn-brgemm",
+          "contraction_backend must be auto, native, or onednn-brgemm");
   auto depth = integer(options,"pipeline_depth");
   require(depth >= 1 && depth <= 4, "pipeline_depth must be one of 1, 2, 3, 4");
   weft::RISCVCompilationReport report;
   report.begin("canonical-to-x86");
   report.startPass("source-specialization-and-physical-lowering","weft-bind-source-parameters","canonical-to-x86");
   ScopedDiagnosticHandler handler(source.getContext(), [&](Diagnostic &diag) { report.capture(diag); return success(); });
-  auto lowered = weft::lowerX86Module(source,target,meta(options),tune,depth);
+  auto lowered = weft::lowerX86Module(source,target,meta(options),tune,depth,contractionBackend);
   report.finishPass(succeeded(lowered));
   if (failed(lowered)) { report.captureFailedIR(source); reportFailure(report); }
   result = std::move(*lowered);
@@ -540,6 +554,11 @@ int weft_compiler_target_info(const char *query, const char *optionsText, char *
       for (const auto &[name, version] : native.isaExtensions)
         extensions[name] = json::Array{version.first, version.second};
       facts["execution_isa_extensions"] = std::move(extensions);
+#ifdef WEFT_RELEASE_VERSION
+      facts["weft_version"] = WEFT_RELEASE_VERSION;
+#else
+      facts["weft_version"] = "0.2.0";
+#endif
       output = std::move(facts);
 #endif
     } else throw std::invalid_argument("unknown Weft target query");

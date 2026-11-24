@@ -13,6 +13,7 @@
 #include "Transforms/Arithmetic/Lookups.h"
 #include "Transforms/Contraction/AMXContractions.h"
 #include "Transforms/Contraction/ContractionEngines.h"
+#include "Transforms/Contraction/OneDNNContractions.h"
 #include "Transforms/Contraction/DenseOuterProduct.h"
 #include "Transforms/Arithmetic/Math.h"
 #include "Weft/Analysis/IndexRelations.h"
@@ -163,7 +164,7 @@ void foldExactGroupedReductions(ModuleOp source) {
     b.setInsertionPoint(reduce);
     auto dot = wk::DotOp::create(b, reduce.getLoc(), reduce.getResult().getType(),
         mac.getLhs(), mac.getRhs(), b.getDenseI64ArrayAttr({partial.getAxisIds().asArrayRef().back()}),
-        TypeAttr::get(wide), b.getStringAttr("vector"));
+        TypeAttr::get(wide), b.getStringAttr("vector"), BoolAttr{});
     b.replaceOp(reduce, dot.getResult());
     b.eraseOp(widen);
     b.eraseOp(mac);
@@ -175,8 +176,9 @@ void foldExactGroupedReductions(ModuleOp source) {
 // does not have to recover the author's broadcasting or memory mask contract.
 class Lowering {
 public:
-  Lowering(ModuleOp module, const weft::X86Target &target)
-      : module(module), target(target), b(module.getContext()) {}
+  Lowering(ModuleOp module, const weft::X86Target &target, llvm::StringRef contractionBackend = "auto")
+      : module(module), target(target), contractionBackend(contractionBackend.str()),
+        b(module.getContext()) {}
 
   LogicalResult run(wk::KernelOp kernel) {
     sourceModule = kernel->getParentOfType<ModuleOp>();
@@ -347,12 +349,15 @@ public:
     if (module.lookupSymbol<func::FuncOp>("llvm.x86.tdpbf16ps")) usedMatrixExtensions.push_back("amx-bf16");
     for (auto name : {"llvm.x86.tdpbssd", "llvm.x86.tdpbsud", "llvm.x86.tdpbusd", "llvm.x86.tdpbuud"})
       if (module.lookupSymbol<func::FuncOp>(name)) { usedMatrixExtensions.push_back("amx-int8"); break; }
+    bool usesOneDNN = static_cast<bool>(module.lookupSymbol<func::FuncOp>("__weft_onednn_brgemm_execute"));
     llvm::json::Object abi{{"symbol", kernel.getSymName()},
         {"declaration", "void " + kernel.getSymName().str() + "(" + llvm::join(declarations, ", ") + ");"},
         {"arch", "x86_64"}, {"march", target.cpu}, {"abi", "sysv"}, {"vlen_bits", 0},
         {"vector_bits", target.vectorBits}, {"isa_extensions", std::move(isa)},
         {"matrix_extensions", std::move(matrixExtensions)},
         {"used_extensions", std::move(usedMatrixExtensions)},
+        {"uses_onednn_brgemm", usesOneDNN},
+        {"onednn_root", usesOneDNN ? weft::probeOneDNNBrgemm().root : std::string()},
         {"required_extensions", llvm::json::Array{}}, {"shape_parameters", std::move(shapeParameters)},
         {"bindings", std::move(selectedParameters)}, {"arguments", std::move(arguments)}};
     module->setAttr("weft.x86.abi", b.getStringAttr(llvm::formatv("{0}", llvm::json::Value(std::move(abi))).str()));
@@ -366,6 +371,7 @@ private:
   ModuleOp module;
   ModuleOp sourceModule;
   const weft::X86Target &target;
+  std::string contractionBackend;
   OpBuilder b;
   IRMapping values;
   // Exact wide implementations of a source integer boundary. Keep the narrow
@@ -433,6 +439,7 @@ private:
   };
   DenseMap<Value, Memory> memories;
   DenseMap<Value, Memory> indexedSnapshots;
+  DenseMap<Value, Memory> directContractionViews;
   llvm::StringMap<Value> dimensions;
   DenseMap<Value, Value> masks;
   DenseMap<Value, SmallVector<Value>> valueOrigins;
@@ -2819,6 +2826,87 @@ private:
     indexedSnapshots[result] = memories.at(admit.getRegion());
     return true;
   }
+  bool selectDirectContractionView(wk::AdmitOp admit) {
+    Value result = admit.getResult();
+    if (result.use_empty() || packedType(result.getType())) return false;
+    auto foundMem = memories.find(admit.getRegion());
+    if (foundMem == memories.end()) return false;
+    const Memory &view = foundMem->second;
+    if (!matchPattern(view.storageMapped, m_Zero())) return false;
+    if (axes(result.getType()) != axes(admit.getRegion().getType()) ||
+        view.extents.size() != axes(result.getType()).size())
+      return false;
+    Operation *last = nullptr;
+    for (Operation *user : result.getUsers()) {
+      if (!isa<wk::DotOp, wk::ContractOp, wk::OuterContractOp>(user) ||
+          user->getBlock() != admit->getBlock())
+        return false;
+      weft::x86::ContractionStorage dummy{true, true, false, false};
+      auto peek = weft::x86::selectContractionEngine(
+          *user, target, contractionBackend, dummy, arrayValue(user->getResult(0).getType()),
+          shape(user->getOperand(0).getType()), shape(user->getOperand(1).getType()),
+          shape(user->getResult(0).getType()), /*emitDiagnostics=*/false);
+      if (failed(peek) || !weft::x86::isOneDNNBrgemm(*peek))
+        return false;
+      if (!last || last->isBeforeInBlock(user)) last = user;
+    }
+    for (Operation *next = admit->getNextNode(); next != last; next = next->getNextNode()) {
+      if (!next) return false;
+      auto effects = getEffectsRecursively(next);
+      if (!effects || llvm::any_of(*effects, [](const auto &effect) {
+            return !isa<MemoryEffects::Read, MemoryEffects::Allocate>(effect.getEffect());
+          }))
+        return false;
+    }
+    directContractionViews[result] = view;
+    valueOrigins[result] = view.origins;
+    return true;
+  }
+  weft::x86::BrgemmOperand makeBrgemmOperand(Value source, Location loc) {
+    weft::x86::BrgemmOperand out;
+    out.logicalElement = element(source.getType());
+    if (auto it = directContractionViews.find(source); it != directContractionViews.end()) {
+      const Memory &v = it->second;
+      out.view = weft::x86::DirectContractionView{
+          v.base, v.offset, v.guard, v.extents, v.strides, v.limits, out.logicalElement};
+      return out;
+    }
+    Value phys = mapped(source);
+    auto extents = arrayExtents(source, loc);
+    if (isa<MemRefType>(phys.getType())) {
+      out.array = {phys, valid(source, loc), extents};
+      return out;
+    }
+    auto storage = weft::x86::allocateArray(b, loc, scalar(source.getType()), extents);
+    if (auto vecTy = dyn_cast<VectorType>(phys.getType())) {
+      vector::StoreOp::create(b, loc, phys, storage.data, indexConstant(loc, 0));
+      Value vMask = valid(source, loc);
+      Value vBytes = arith::ExtUIOp::create(b, loc, vecTy.clone(b.getI8Type()), vMask);
+      vector::StoreOp::create(b, loc, vBytes, storage.valid, indexConstant(loc, 0));
+    } else {
+      memref::StoreOp::create(b, loc, phys, storage.data, indexConstant(loc, 0));
+      storeArrayMask(loc, valid(source, loc), storage.valid, indexConstant(loc, 0));
+    }
+    out.array = std::move(storage);
+    return out;
+  }
+  LogicalResult emitOneDNNContraction(Operation &op, weft::x86::ContractionEngine engine) {
+    Location loc = op.getLoc();
+    Value result = op.getResult(0);
+    auto geom = weft::x86::describeBrgemmGeometry(
+        op, shape(op.getOperand(0).getType()), shape(op.getOperand(1).getType()),
+        shape(result.getType()));
+    if (!geom.valid)
+      return op.emitError("unsupported oneDNN BRGeMM contraction geometry");
+    auto lhs = makeBrgemmOperand(op.getOperand(0), loc);
+    auto rhs = makeBrgemmOperand(op.getOperand(1), loc);
+    auto output = weft::x86::allocateArray(b, loc, scalar(result.getType()), arrayExtents(result, loc));
+    if (failed(weft::x86::materializeOneDNNBrgemm(
+            module, b, loc, target, engine, geom, lhs, rhs, output)))
+      return failure();
+    bindArray(result, output, loc);
+    return success();
+  }
   LogicalResult indexedSnapshotLookup(wk::LookupOp op, const Memory &view) {
     Location loc = op.getLoc();
     Type domain = op.getResult().getType();
@@ -2899,19 +2987,26 @@ private:
                                            shape(op.getOperand(1).getType()));
   }
   FailureOr<weft::x86::ContractionEngine> selectContractionEngine(Operation &op, bool arrayResult) {
+    auto isArr = [&](Value v) {
+      return directContractionViews.contains(v) || isa<MemRefType>(mapped(v).getType());
+    };
+    auto isVec = [&](Value v) {
+      return !directContractionViews.contains(v) && isa<VectorType>(mapped(v).getType());
+    };
     weft::x86::ContractionStorage storage{
-        isa<MemRefType>(mapped(op.getOperand(0)).getType()),
-        isa<MemRefType>(mapped(op.getOperand(1)).getType()),
-        isa<VectorType>(mapped(op.getOperand(1)).getType()),
-        isa<VectorType>(mapped(op.getOperand(0)).getType())};
-    auto selected = weft::x86::selectContractionEngine(op, target, storage, arrayResult,
-        shape(op.getOperand(0).getType()), shape(op.getOperand(1).getType()), shape(op.getResult(0).getType()));
+        isArr(op.getOperand(0)), isArr(op.getOperand(1)),
+        isVec(op.getOperand(1)), isVec(op.getOperand(0))};
+    auto selected = weft::x86::selectContractionEngine(
+        op, target, contractionBackend, storage, arrayResult,
+        shape(op.getOperand(0).getType()), shape(op.getOperand(1).getType()),
+        shape(op.getResult(0).getType()));
     if (succeeded(selected)) weft::x86::recordContractionEngine(module, op, *selected);
     return selected;
   }
   LogicalResult contraction(Operation &op) {
     auto selected = selectContractionEngine(op, false);
     if (failed(selected)) return failure();
+    if (weft::x86::isOneDNNBrgemm(*selected)) return emitOneDNNContraction(op, *selected);
     if (*selected == weft::x86::ContractionEngine::Vector) return simdContraction(op);
     Location loc = op.getLoc();
     Value result = op.getResult(0);
@@ -3992,6 +4087,8 @@ private:
     return extents;
   }
   SmallVector<Value> arrayExtents(Value value, Location loc) {
+    if (auto direct = directContractionViews.find(value); direct != directContractionViews.end())
+      return direct->second.extents;
     if (auto found = arrayShapes.find(value); found != arrayShapes.end()) return found->second;
     SmallVector<Value> extents;
     for (int64_t extent : shape(value.getType())) {
@@ -4751,8 +4848,27 @@ private:
   LogicalResult arrayContraction(Operation &op) {
     auto selected = selectContractionEngine(op, true);
     if (failed(selected)) return failure();
+    if (weft::x86::isOneDNNBrgemm(*selected)) return emitOneDNNContraction(op, *selected);
     Location loc = op.getLoc(); Value result = op.getResult(0);
     auto outputShape = arrayExtents(result, loc);
+    if (*selected == weft::x86::ContractionEngine::Vector) {
+      auto geom = weft::x86::describeBrgemmGeometry(
+          op, shape(op.getOperand(0).getType()), shape(op.getOperand(1).getType()),
+          shape(result.getType()));
+      if (weft::x86::canMaterializeSIMDArrayContraction(
+              target, geom, element(op.getOperand(0).getType()),
+              element(op.getOperand(1).getType()), element(result.getType()))) {
+        auto lhsOp = makeBrgemmOperand(op.getOperand(0), loc);
+        auto rhsOp = makeBrgemmOperand(op.getOperand(1), loc);
+        auto fastOut = weft::x86::allocateArray(b, loc, scalar(result.getType()), outputShape);
+        if (weft::x86::materializeSIMDArrayContraction(
+                b, loc, target, geom, lhsOp.array, lhsOp.logicalElement,
+                rhsOp.array, rhsOp.logicalElement, fastOut, element(result.getType()))) {
+          bindArray(result, fastOut, loc);
+          return success();
+        }
+      }
+    }
     auto outputAxes = axes(result.getType());
     auto over = op.getAttrOfType<DenseI64ArrayAttr>("over").asArrayRef();
     auto leftAxes = axes(op.getOperand(0).getType());
@@ -4970,7 +5086,9 @@ private:
     bindArray(result, output, loc); return success();
   }
   LogicalResult lower(Operation &op) {
-    if (auto admit = dyn_cast<wk::AdmitOp>(op); admit && selectIndexedSnapshot(admit)) return success();
+    if (auto admit = dyn_cast<wk::AdmitOp>(op);
+        admit && (selectIndexedSnapshot(admit) || selectDirectContractionView(admit)))
+      return success();
     if (failed(lowerOperation(op))) return failure();
     if (!b.getInsertionBlock()) return success();
     for (Value result : op.getResults()) {
@@ -5020,7 +5138,8 @@ private:
       if (found != indexedSnapshots.end()) return indexedSnapshotLookup(lookup, found->second);
     }
     bool array = llvm::any_of(op.getOperandTypes(), [&](Type type) { return arrayValue(type); }) ||
-                 llvm::any_of(op.getResultTypes(), [&](Type type) { return arrayValue(type); });
+                 llvm::any_of(op.getResultTypes(), [&](Type type) { return arrayValue(type); }) ||
+                 llvm::any_of(op.getOperands(), [&](Value v) { return directContractionViews.contains(v); });
     if (array && op.getName().getDialectNamespace() == "weft_kernel" &&
         !isa<wk::HelperOp, wk::HelperReturnOp, wk::LevelOp, wk::HandoffOp, wk::BirthsYieldOp>(op)) return lowerArray(op);
     if (auto function = dyn_cast<wk::HelperOp>(op)) return helper(function);
@@ -5397,15 +5516,17 @@ private:
 class ConvertToX86 : public PassWrapper<ConvertToX86, OperationPass<ModuleOp>> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertToX86)
-  explicit ConvertToX86(weft::X86Target target, std::string tuneCPU)
-      : target(std::move(target)), tuneCPU(std::move(tuneCPU)) {}
+  explicit ConvertToX86(weft::X86Target target, std::string tuneCPU, std::string contractionBackend)
+      : target(std::move(target)), tuneCPU(std::move(tuneCPU)),
+        contractionBackend(std::move(contractionBackend)) {}
   StringRef getArgument() const override { return "weft-convert-to-x86"; }
   void runOnOperation() override {
     ModuleOp source = getOperation();
     foldExactGroupedReductions(source);
     OwningOpRef<ModuleOp> physical = ModuleOp::create(source.getLoc());
     auto kernels = llvm::to_vector(source.getOps<wk::KernelOp>());
-    if (kernels.size() != 1 || failed(Lowering(*physical, target).run(kernels.front()))) {
+    if (kernels.size() != 1 ||
+        failed(Lowering(*physical, target, contractionBackend).run(kernels.front()))) {
       signalPassFailure(); return;
     }
     if (!tuneCPU.empty())
@@ -5416,10 +5537,11 @@ public:
 private:
   weft::X86Target target;
   std::string tuneCPU;
+  std::string contractionBackend;
 };
 } // namespace
 
 std::unique_ptr<mlir::Pass> weft::x86::createCanonicalConversionPass(
-    const X86Target &target, llvm::StringRef tuneCPU) {
-  return std::make_unique<ConvertToX86>(target, tuneCPU.str());
+    const X86Target &target, llvm::StringRef tuneCPU, llvm::StringRef contractionBackend) {
+  return std::make_unique<ConvertToX86>(target, tuneCPU.str(), contractionBackend.str());
 }

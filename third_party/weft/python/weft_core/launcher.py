@@ -25,6 +25,145 @@ def single_instance_abi(abi):
     return result
 
 
+_ONEDNN_BRGEMM_SHIM = r'''
+#include <stdlib.h>
+#include <stdio.h>
+#if defined(__linux__) && defined(__x86_64__)
+#include <asm/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+#include <oneapi/dnnl/dnnl_ukernel.h>
+
+struct __weft_brgemm_entry {
+  int64_t M, N, K, lda, ldb, ldc;
+  int32_t dt_a, dt_b, dt_c, add_c;
+  dnnl_brgemm_t brg;
+  size_t scratch_bytes;
+  uint64_t stamp;
+  int valid;
+};
+
+static inline dnnl_data_type_t __weft_map_dnnl_dt(int32_t code) {
+  switch (code) {
+    case 0: return dnnl_f32;
+    case 1: return dnnl_f16;
+    case 2: return dnnl_bf16;
+    case 3: return dnnl_s8;
+    case 4: return dnnl_u8;
+    case 5: return dnnl_s32;
+    default: abort();
+  }
+}
+
+void __weft_onednn_brgemm_execute(
+    const void *A, const void *B, void *C,
+    int64_t M, int64_t N, int64_t K,
+    int64_t lda, int64_t ldb, int64_t ldc,
+    int32_t dt_a, int32_t dt_b, int32_t dt_c, int32_t add_c) {
+  if (M <= 0 || N <= 0 || K <= 0) return;
+#if defined(__linux__) && defined(__x86_64__)
+  if (dt_a >= 2) {
+    static _Thread_local int amx_ready = 0;
+    if (!amx_ready) {
+      unsigned long permitted = 0;
+      if (syscall(SYS_arch_prctl, ARCH_GET_XCOMP_PERM, &permitted) == 0 &&
+          !(permitted & (1ul << 18))) {
+        (void)syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, 18ul);
+      }
+      amx_ready = 1;
+    }
+  }
+#endif
+  enum { CACHE_SLOTS = 64 };
+  static _Thread_local struct __weft_brgemm_entry cache[CACHE_SLOTS];
+  static _Thread_local uint64_t clock_tick = 0;
+  static _Thread_local void *scratch_ptr = NULL;
+  static _Thread_local size_t scratch_cap = 0;
+
+  uint64_t h = (uint64_t)M * 11400714819323198485ull;
+  h ^= (uint64_t)N * 14029467366897019727ull;
+  h ^= (uint64_t)K * 1609587929392839161ull;
+  h ^= (uint64_t)lda * 9650029242287828579ull;
+  h ^= (uint64_t)ldb * 2800177450012600261ull;
+  h ^= (uint64_t)ldc * 6364136223846793005ull;
+  h ^= (uint64_t)((dt_a & 15) | ((dt_b & 15) << 4) | ((dt_c & 15) << 8) | ((add_c & 1) << 12));
+
+  struct __weft_brgemm_entry *hit = NULL;
+  size_t base = (size_t)((h >> 32) ^ h) & (CACHE_SLOTS - 1);
+  size_t victim = base;
+  uint64_t oldest = UINT64_MAX;
+  for (size_t probe = 0; probe < 8; ++probe) {
+    size_t slot = (base + probe) & (CACHE_SLOTS - 1);
+    struct __weft_brgemm_entry *e = &cache[slot];
+    if (!e->valid) {
+      victim = slot;
+      oldest = 0;
+      break;
+    }
+    if (e->M == M && e->N == N && e->K == K &&
+        e->lda == lda && e->ldb == ldb && e->ldc == ldc &&
+        e->dt_a == dt_a && e->dt_b == dt_b && e->dt_c == dt_c && e->add_c == add_c) {
+      hit = e;
+      break;
+    }
+    if (e->stamp < oldest) {
+      oldest = e->stamp;
+      victim = slot;
+    }
+  }
+
+  if (!hit) {
+    struct __weft_brgemm_entry *e = &cache[victim];
+    if (e->valid && e->brg) {
+      dnnl_brgemm_destroy(e->brg);
+      e->brg = NULL;
+      e->valid = 0;
+    }
+    dnnl_brgemm_t brg = NULL;
+    if (dnnl_brgemm_create(&brg, (dnnl_dim_t)M, (dnnl_dim_t)N, (dnnl_dim_t)K, 1,
+                           (dnnl_dim_t)lda, (dnnl_dim_t)ldb, (dnnl_dim_t)ldc,
+                           __weft_map_dnnl_dt(dt_a), __weft_map_dnnl_dt(dt_b),
+                           __weft_map_dnnl_dt(dt_c)) != dnnl_success || !brg) {
+      fprintf(stderr, "Weft oneDNN BRGeMM create failed (M=%lld N=%lld K=%lld lda=%lld ldb=%lld ldc=%lld dt=%d/%d/%d)\n",
+              (long long)M, (long long)N, (long long)K, (long long)lda, (long long)ldb, (long long)ldc,
+              dt_a, dt_b, dt_c);
+      abort();
+    }
+    if (add_c && dnnl_brgemm_set_add_C(brg, 1) != dnnl_success) abort();
+    if (dnnl_brgemm_finalize(brg) != dnnl_success) abort();
+    if (dnnl_brgemm_generate(brg) != dnnl_success) abort();
+    size_t sz = 0;
+    if (dnnl_brgemm_get_scratchpad_size(brg, &sz) != dnnl_success) abort();
+    e->M = M; e->N = N; e->K = K;
+    e->lda = lda; e->ldb = ldb; e->ldc = ldc;
+    e->dt_a = dt_a; e->dt_b = dt_b; e->dt_c = dt_c; e->add_c = add_c;
+    e->brg = brg;
+    e->scratch_bytes = sz;
+    e->valid = 1;
+    hit = e;
+  }
+  hit->stamp = ++clock_tick;
+
+  if (hit->scratch_bytes > scratch_cap) {
+    size_t next_cap = ((hit->scratch_bytes + 4095) / 4096) * 4096;
+    void *next_buf = NULL;
+    if (posix_memalign(&next_buf, 64, next_cap) != 0 || !next_buf) abort();
+    free(scratch_ptr);
+    scratch_ptr = next_buf;
+    scratch_cap = next_cap;
+  }
+
+  dnnl_dim_t ab_offsets[2] = {0, 0};
+  if (dnnl_brgemm_set_hw_context(hit->brg) != dnnl_success) abort();
+  if (dnnl_brgemm_execute(hit->brg, A, B, ab_offsets, C, scratch_ptr) != dnnl_success) abort();
+  if (dt_a >= 2) {
+    (void)dnnl_brgemm_release_hw_context();
+  }
+}
+'''
+
+
 def launch_source(abi):
     from .dispatch import dispatch_source
     symbol = abi["symbol"]
@@ -77,6 +216,7 @@ def launch_source(abi):
     instance = symbol + "__weft_launch_instance"
     single_dispatch = dispatch_source(single).replace('#include "kernel.h"', '').replace(
         'void weft_kernel_dispatch(', 'void triton_weft_instance_dispatch(')
+    onednn_shim = _ONEDNN_BRGEMM_SHIM if abi.get("uses_onednn_brgemm") else ""
     return f'''#include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -84,6 +224,7 @@ def launch_source(abi):
 #include <limits.h>
 #include <omp.h>
 #include <stdatomic.h>
+{onednn_shim}
 {abi['declaration']}
 {dispatch}
 {single_body}

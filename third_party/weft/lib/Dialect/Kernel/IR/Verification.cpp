@@ -339,9 +339,23 @@ mlir::LogicalResult verifyContractLike(mlir::Operation *operation,
                                        llvm::ArrayRef<int64_t> over,
                                        std::optional<mlir::Type> accType,
                                        mlir::Type result) {
-  if (auto intent = operation->getAttrOfType<mlir::StringAttr>("engine"))
-    if (intent.getValue() != "auto" && intent.getValue() != "matrix" && intent.getValue() != "vector")
-      return operation->emitOpError("engine must be auto, matrix, or vector");
+  if (auto intent = operation->getAttrOfType<mlir::StringAttr>("engine")) {
+    constexpr llvm::StringLiteral allowedEngines[] = {
+        "auto", "matrix", "vector", "onednn-brgemm",
+        "onednn-brgemm-f32", "onednn-brgemm-f16", "onednn-brgemm-bf16",
+        "onednn-brgemm-s8", "onednn-brgemm-u8s8"};
+    if (!llvm::is_contained(allowedEngines, intent.getValue()))
+      return operation->emitOpError(
+          "engine must be auto, matrix, vector, or onednn-brgemm[-f32|-f16|-bf16|-s8|-u8s8]");
+  }
+  if (auto ftz = operation->getAttrOfType<mlir::BoolAttr>("allow_subnormal_ftz");
+      ftz && ftz.getValue()) {
+    if (!mlir::isa<mlir::FloatType>(logicalElement(lhs.getType())) ||
+        !mlir::isa<mlir::FloatType>(logicalElement(rhs.getType())) ||
+        !mlir::isa<mlir::FloatType>(logicalElement(result)))
+      return operation->emitOpError(
+          "allow_subnormal_ftz applies only to floating-point contractions");
+  }
   if (!isLocalValue(lhs.getType()) || !isLocalValue(rhs.getType()) ||
       !isLocalValue(result))
     return operation->emitOpError("contraction operands must be local Values");

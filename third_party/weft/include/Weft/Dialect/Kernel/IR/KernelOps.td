@@ -469,7 +469,8 @@ class WeftKernel_ContractLikeOp<string mnemonic>
   let arguments = (ins AnyType:$lhs, AnyType:$rhs,
                        DenseI64ArrayAttr:$over,
                        OptionalAttr<TypeAttr>:$acc_type,
-                       OptionalAttr<StrAttr>:$engine);
+                       OptionalAttr<StrAttr>:$engine,
+                       OptionalAttr<BoolAttr>:$allow_subnormal_ftz);
   let results = (outs AnyType:$result);
   let hasVerifier = 1;
 }

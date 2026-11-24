@@ -23,6 +23,7 @@ class CPUOptions:
 @dataclass(frozen=True)
 class X86Options(CPUOptions):
     tune_cpu: str = ""
+    contraction_backend: str = "auto"
 
 
 @dataclass(frozen=True)

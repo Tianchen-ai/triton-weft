@@ -195,6 +195,14 @@ class Toolchain:
                 redundant = f"-march={target.march}"
                 cflags = tuple(flag for flag in cflags if flag != redundant)
                 ldflags = tuple(flag for flag in ldflags if flag != redundant)
+                if metadata["kernel_abi"].get("uses_onednn_brgemm"):
+                    onednn_root = (os.environ.get("WEFT_ONEDNN_ROOT")
+                                   or metadata["kernel_abi"].get("onednn_root")
+                                   or "/opt/onednn-3.13.4")
+                    onednn_inc = Path(onednn_root) / "include"
+                    onednn_lib = Path(onednn_root) / "lib"
+                    cflags = (*cflags, f"-I{onednn_inc}")
+                    ldflags = (*ldflags, f"-L{onednn_lib}", "-ldnnl", f"-Wl,-rpath,{onednn_lib}")
             command += [*cflags, str(kernel), str(launcher), "-lm", *ldflags, "-o", str(output)]
             result = subprocess.run(command, capture_output=True, text=True,
                                     env={**os.environ, "TMPDIR": str(root)})

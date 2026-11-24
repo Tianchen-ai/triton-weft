@@ -5,6 +5,7 @@ add_library(WeftX86Target STATIC
   Conversion/ConvertWeftToX86.cpp
   Transforms/Control/Pipeline.cpp
   Transforms/Contraction/ContractionEngines.cpp
+  Transforms/Contraction/OneDNNContractions.cpp
   Transforms/Contraction/DenseOuterProduct.cpp
   Transforms/Contraction/AMXContractions.cpp
   Transforms/Contraction/AMXTransfers.cpp

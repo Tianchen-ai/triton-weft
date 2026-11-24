@@ -1008,6 +1008,10 @@ private:
                               llvm::ArrayRef<int64_t> over)
         -> riscv::ImplementationAttr {
       auto intent = operation->getAttrOfType<mlir::StringAttr>("engine");
+      if (intent && intent.getValue().starts_with("onednn-brgemm")) {
+        operation->emitError("onednn-brgemm contraction engine is only available on x86-64");
+        return {};
+      }
       if (permitIME && (!intent || intent.getValue() != "vector"))
         if (auto fragment = matchingFragment(operation, lhs, rhs, result))
           return riscv_internal::implementation(

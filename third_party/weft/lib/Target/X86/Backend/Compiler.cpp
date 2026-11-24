@@ -39,9 +39,14 @@ void weft::registerX86Passes() {
 
 FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
     const X86Target &target, const llvm::StringMap<int64_t> &bindings, llvm::StringRef tuneCPU,
-    unsigned pipelineDepth) {
+    unsigned pipelineDepth, llvm::StringRef contractionBackend) {
   if (pipelineDepth < 1 || pipelineDepth > 4) {
     source.emitError("pipeline_depth must be one of 1, 2, 3, 4"); return failure();
+  }
+  if (contractionBackend != "auto" && contractionBackend != "native" &&
+      contractionBackend != "onednn-brgemm") {
+    source.emitError("contraction_backend must be auto, native, or onednn-brgemm");
+    return failure();
   }
   if (!tuneCPU.empty() && llvm::X86::parseTuneCPU(tuneCPU, true) == llvm::X86::CK_None) {
     source.emitError("unknown LLVM x86 tuning CPU: ") << tuneCPU;
@@ -59,7 +64,7 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   };
   pm.addPass(createBindSourceParametersPass(bindings));
   pm.addPass(createNormalizeCanonicalControlPass());
-  pm.addPass(x86::createCanonicalConversionPass(target, tuneCPU));
+  pm.addPass(x86::createCanonicalConversionPass(target, tuneCPU, contractionBackend));
   pm.addPass(createX86LowPrecisionPass());
   pm.addPass(createX86MathPass());
   pm.addPass(createCanonicalizerPass());

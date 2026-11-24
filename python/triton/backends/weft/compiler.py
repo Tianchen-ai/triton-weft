@@ -65,6 +65,8 @@ class WeftBackend(BaseBackend):
             raise ValueError("pipeline_depth must be one of 1, 2, 3, 4")
         if self.target.arch == "x86_64" and type(result.tune_cpu) is not str:
             raise ValueError("tune_cpu must be an LLVM x86 CPU name or an empty string")
+        if self.target.arch == "x86_64" and result.contraction_backend not in ("auto", "native", "onednn-brgemm"):
+            raise ValueError("contraction_backend must be 'auto', 'native', or 'onednn-brgemm'")
         if type(result.num_cpu_threads) is not int or result.num_cpu_threads < 0:
             raise ValueError("num_cpu_threads must be a nonnegative integer; 0 uses the OpenMP setting")
         if result.instrumentation_mode:

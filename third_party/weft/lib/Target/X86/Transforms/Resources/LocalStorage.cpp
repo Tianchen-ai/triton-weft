@@ -94,13 +94,14 @@ void legalizePayloadStorage(ModuleOp module, IRRewriter &b) {
   }
 }
 
-std::optional<uint64_t> upperBound(Value value) {
+std::optional<uint64_t> upperBound(
+    Value value, const weft::analysis::IntegerDescription &targetDescription = {}) {
   auto type = value.getType().isIndex() ?
       IntegerType::get(value.getContext(), 64, IntegerType::Unsigned) :
       weft::analysis::integerElementType(value.getType());
   if (!type) return {};
   if (type.isSignless()) type = IntegerType::get(type.getContext(), type.getWidth(), IntegerType::Unsigned);
-  auto range = weft::analysis::integerRange(value, type);
+  auto range = weft::analysis::integerRange(value, type, targetDescription);
   if (!range || range->minimum < 0 || range->maximum > stackBudget) return {};
   return range->maximum.getZExtValue();
 }
@@ -238,6 +239,9 @@ public:
       });
       SmallVector<Candidate> candidates;
       DenseMap<Operation *, unsigned> positions;
+      DominanceInfo assumeDominance(function);
+      SmallVector<LLVM::AssumeOp> assumes;
+      function.walk([&](LLVM::AssumeOp assume) { assumes.push_back(assume); });
       function.walk([&](Operation *op) {
         for (Region &region : op->getRegions())
           for (Block &block : region)
@@ -248,8 +252,41 @@ public:
         auto type = alloc.getType();
         if (type.getRank() != 1 || !type.getLayout().isIdentity() ||
             !type.getElementType().isIntOrFloat()) return;
+        auto assumeDescription = [&](Value v) -> std::optional<weft::analysis::IntegerExpression> {
+          auto stripIndexCast = [](Value x) -> Value {
+            if (auto c = x.getDefiningOp<arith::IndexCastOp>()) return c.getIn();
+            if (auto c = x.getDefiningOp<arith::IndexCastUIOp>()) return c.getIn();
+            return x;
+          };
+          Value baseV = stripIndexCast(v);
+          std::optional<int64_t> maxVal;
+          for (LLVM::AssumeOp assume : assumes) {
+            if (!assumeDominance.properlyDominates(assume.getOperation(), alloc.getOperation()))
+              continue;
+            auto cmp = assume.getCond().getDefiningOp<arith::CmpIOp>();
+            if (!cmp) continue;
+            APInt bound;
+            if (stripIndexCast(cmp.getLhs()) == baseV &&
+                matchPattern(cmp.getRhs(), m_ConstantInt(&bound)) &&
+                !bound.isNegative() && bound.getActiveBits() < 62) {
+              int64_t limit = -1;
+              if (cmp.getPredicate() == arith::CmpIPredicate::ule)
+                limit = bound.getSExtValue();
+              else if (cmp.getPredicate() == arith::CmpIPredicate::ult && bound.isStrictlyPositive())
+                limit = bound.getSExtValue() - 1;
+              if (limit >= 0)
+                maxVal = maxVal ? std::min(*maxVal, limit) : limit;
+            }
+          }
+          if (!maxVal) return std::nullopt;
+          auto u64 = IntegerType::get(v.getContext(), 64, IntegerType::Unsigned);
+          weft::analysis::IntegerExpression expr{u64, weft::analysis::IntegerExpressionKind::Known};
+          expr.known = weft::analysis::IntegerRange(0, *maxVal);
+          return expr;
+        };
         std::optional<uint64_t> count = type.hasStaticShape()
-            ? std::optional<uint64_t>(type.getNumElements()) : upperBound(alloc.getDynamicSizes().front());
+            ? std::optional<uint64_t>(type.getNumElements())
+            : upperBound(alloc.getDynamicSizes().front(), assumeDescription);
         uint64_t elementBytes = llvm::divideCeil(type.getElementTypeBitWidth(), 8u);
         if (!count || *count > stackBudget / elementBytes) return;
         auto uses = weft::x86::privateStorageUses(alloc);
@@ -326,6 +363,33 @@ public:
       function->setAttr("weft.x86.promoted_arrays", b.getI64IntegerAttr(promoted));
       function->setAttr("weft.x86.reused_stack_arrays", b.getI64IntegerAttr(reused));
       function->setAttr("weft.x86.scoped_stack_snapshots", b.getI64IntegerAttr(scoped));
+    }
+
+    // Inline borrowed BRGeMM leaf wrappers now that stack promotion is complete,
+    // avoiding MemRef-argument signature mutation during dynamic buffer deallocation.
+    SmallVector<func::CallOp> leafCalls;
+    SmallVector<func::FuncOp> leafHelpers;
+    for (auto fn : getOperation().getOps<func::FuncOp>())
+      if (fn->hasAttr("weft.x86.brgemm_leaf"))
+        leafHelpers.push_back(fn);
+    if (!leafHelpers.empty()) {
+      getOperation().walk([&](func::CallOp call) {
+        auto callee = getOperation().lookupSymbol<func::FuncOp>(call.getCallee());
+        if (callee && callee->hasAttr("weft.x86.brgemm_leaf"))
+          leafCalls.push_back(call);
+      });
+      for (func::CallOp call : leafCalls) {
+        auto callee = getOperation().lookupSymbol<func::FuncOp>(call.getCallee());
+        b.setInsertionPoint(call);
+        IRMapping map;
+        for (auto [arg, val] : llvm::zip(callee.getBody().front().getArguments(), call.getOperands()))
+          map.map(arg, val);
+        for (Operation &bodyOp : callee.getBody().front().without_terminator())
+          b.clone(bodyOp, map);
+        b.eraseOp(call);
+      }
+      for (func::FuncOp fn : leafHelpers)
+        b.eraseOp(fn);
     }
   }
 };
