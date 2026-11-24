@@ -166,6 +166,23 @@ std::optional<DenseIssueCost> riscv_internal::denseIssueCost(
     }
     if (auto select = dyn_cast<riscv::SelectOp>(operation)) temporary = std::max<int64_t>(1, output);
     if (auto compare = dyn_cast<riscv::CompareOp>(operation)) temporary = std::max<int64_t>(1, output);
+    if (isa<riscv::CastOp, riscv::NarrowOp, riscv::WidenOp>(operation) &&
+        operation->getNumOperands() == 1) {
+      Type srcElem = riscv_internal::logicalElement(operation->getOperand(0).getType());
+      Type dstElem = riscv_internal::logicalElement(operation->getResult(0).getType());
+      bool hasFp8 = isa<Float8E4M3FNType, Float8E5M2Type>(srcElem) ||
+                    isa<Float8E4M3FNType, Float8E5M2Type>(dstElem);
+      bool hasBf16 = srcElem.isBF16() != dstElem.isBF16();
+      if ((hasFp8 || hasBf16) && representation.getLayout().getCarrier() == "rvv") {
+        auto inType = dyn_cast<riscv::ValueType>(operation->getOperand(0).getType());
+        auto inPiece = inType ? pieceOf(inType) : riscv::ValueType();
+        if (!inPiece) return std::nullopt;
+        auto wide = srcElem.isF32() ? inPiece.getLayout() : representation.getLayout();
+        int64_t wGroups = (wide.getLmulEighths() + 7) / 8;
+        temporary = hasFp8 ? (3 * wGroups + 2)
+                           : (srcElem.isBF16() ? wGroups : (3 * wGroups + 1));
+      }
+    }
     if (live > std::numeric_limits<int64_t>::max() - temporary) return std::nullopt;
     cost.vectorGroups = std::max(cost.vectorGroups, std::max(before, live - reusable) + temporary);
     llvm::DenseSet<Value> expired;
