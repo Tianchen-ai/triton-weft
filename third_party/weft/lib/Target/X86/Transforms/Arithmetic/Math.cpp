@@ -216,13 +216,89 @@ public:
     registry.insert<arith::ArithDialect, math::MathDialect, vector::VectorDialect>();
   }
   void runOnOperation() override {
+    SmallVector<math::Exp2Op> exp2Ops;
+    getOperation().walk([&](math::Exp2Op op) {
+      Type element = op.getType();
+      if (auto vector = dyn_cast<VectorType>(element)) element = vector.getElementType();
+      if (element.isF32()) exp2Ops.push_back(op);
+    });
+    IRRewriter b(&getContext());
+    for (auto op : exp2Ops) {
+      b.setInsertionPoint(op);
+      Location loc = op.getLoc();
+      Type fullType = op.getType();
+      auto fullVecTy = dyn_cast<VectorType>(fullType);
+      auto emitPiece = [&](Value x, Type type) -> Value {
+        auto vecTy = dyn_cast<VectorType>(type);
+        Type i32Ty = vecTy ? Type(VectorType::get(vecTy.getShape(), b.getI32Type()))
+                           : Type(b.getI32Type());
+        auto fConst = [&](float value) -> Value {
+          auto scalar = b.getF32FloatAttr(value);
+          TypedAttr attr = scalar;
+          if (vecTy) attr = DenseElementsAttr::get(vecTy, scalar);
+          return arith::ConstantOp::create(b, loc, type, attr);
+        };
+        auto iConst = [&](int32_t value) -> Value {
+          auto scalar = b.getI32IntegerAttr(value);
+          TypedAttr attr = scalar;
+          if (auto iv = dyn_cast<VectorType>(i32Ty)) attr = DenseElementsAttr::get(iv, scalar);
+          return arith::ConstantOp::create(b, loc, i32Ty, attr);
+        };
+        auto fmaStep = [&](Value a, Value m, float c) -> Value {
+          return arith::AddFOp::create(
+              b, loc, arith::MulFOp::create(b, loc, a, m), fConst(c));
+        };
+        Value hi = arith::CmpFOp::create(b, loc, arith::CmpFPredicate::OGT, x, fConst(128.0f));
+        Value xc = arith::SelectOp::create(b, loc, hi, fConst(128.0f), x);
+        Value lo = arith::CmpFOp::create(b, loc, arith::CmpFPredicate::OLT, xc, fConst(-150.0f));
+        xc = arith::SelectOp::create(b, loc, lo, fConst(-150.0f), xc);
+        Value magic = fConst(12582912.0f);
+        Value kf = arith::SubFOp::create(b, loc, arith::AddFOp::create(b, loc, xc, magic), magic);
+        Value f = arith::SubFOp::create(b, loc, xc, kf);
+        Value p = fConst(0.0013333558146428443f);
+        p = fmaStep(p, f, 0.009618129107628477f);
+        p = fmaStep(p, f, 0.05550410866737366f);
+        p = fmaStep(p, f, 0.24022650718688965f);
+        p = fmaStep(p, f, 0.6931471824645996f);
+        p = fmaStep(p, f, 1.0f);
+        Value ki = arith::FPToSIOp::create(b, loc, i32Ty, kf);
+        Value n1 = arith::ShRSIOp::create(b, loc, ki, iConst(1));
+        Value n2 = arith::SubIOp::create(b, loc, ki, n1);
+        Value c127 = iConst(127), c23 = iConst(23);
+        Value e1 = arith::BitcastOp::create(
+            b, loc, type, arith::ShLIOp::create(b, loc, arith::AddIOp::create(b, loc, n1, c127), c23));
+        Value e2 = arith::BitcastOp::create(
+            b, loc, type, arith::ShLIOp::create(b, loc, arith::AddIOp::create(b, loc, n2, c127), c23));
+        Value out = arith::MulFOp::create(b, loc, arith::MulFOp::create(b, loc, p, e1), e2);
+        Value nan = arith::CmpFOp::create(b, loc, arith::CmpFPredicate::UNO, x, x);
+        return arith::SelectOp::create(b, loc, nan, x, out);
+      };
+      Value fullX = op.getOperand();
+      if (fullVecTy && fullVecTy.getRank() == 1 && fullVecTy.getNumElements() > 16) {
+        int64_t total = fullVecTy.getNumElements();
+        Value acc = ub::PoisonOp::create(b, loc, fullVecTy);
+        for (int64_t off = 0; off < total; off += 16) {
+          int64_t width = std::min<int64_t>(16, total - off);
+          auto subTy = VectorType::get({width}, b.getF32Type());
+          Value subX = vector::ExtractStridedSliceOp::create(
+              b, loc, fullX, ArrayRef<int64_t>{off}, ArrayRef<int64_t>{width},
+              ArrayRef<int64_t>{1});
+          Value subOut = emitPiece(subX, subTy);
+          acc = vector::InsertStridedSliceOp::create(
+              b, loc, subOut, acc, ArrayRef<int64_t>{off}, ArrayRef<int64_t>{1});
+        }
+        b.replaceOp(op, acc);
+      } else {
+        b.replaceOp(op, emitPiece(fullX, fullType));
+      }
+    }
+
     SmallVector<math::ExpOp> operations;
     getOperation().walk([&](math::ExpOp op) {
       Type element = op.getType();
       if (auto vector = dyn_cast<VectorType>(element)) element = vector.getElementType();
       if (element.isF32()) operations.push_back(op);
     });
-    IRRewriter b(&getContext());
     for (auto op : operations) {
       b.setInsertionPoint(op);
       Location loc = op.getLoc();

@@ -542,7 +542,16 @@ private:
     return arith::ConstantOp::create(b, loc, type, cast<TypedAttr>(value));
   }
   Value zero(Location loc, Type type) { return constant(loc, type, b.getI64IntegerAttr(0)); }
+  Value andMask(Location loc, Value lhs, Value rhs) {
+    if (matchPattern(lhs, m_One())) return rhs;
+    if (matchPattern(rhs, m_One())) return lhs;
+    return b.createOrFold<arith::AndIOp>(loc, lhs, rhs);
+  }
   Value permute(Location loc, Value value, ArrayRef<int64_t> indices, Type result) {
+    if (scalar(result).isInteger(1)) {
+      if (matchPattern(value, m_One())) return constant(loc, result, b.getBoolAttr(true));
+      if (matchPattern(value, m_Zero())) return constant(loc, result, b.getBoolAttr(false));
+    }
     if (encodedFloat(scalar(value.getType()))) {
       Type bitsType = floatStorage(scalar(value.getType())), resultBits = bitsType;
       if (auto vector = dyn_cast<VectorType>(value.getType())) bitsType = vector.clone(bitsType);
@@ -561,6 +570,10 @@ private:
     Type result = shape(to).empty() ? scalar(value.getType()) :
         Type(VectorType::get({volume(shape(to))}, scalar(value.getType())));
     if (from == to || (!isa<VectorType>(result) && !isa<VectorType>(value.getType()))) return value;
+    if (scalar(result).isInteger(1)) {
+      if (matchPattern(value, m_One())) return constant(loc, result, b.getBoolAttr(true));
+      if (matchPattern(value, m_Zero())) return constant(loc, result, b.getBoolAttr(false));
+    }
     auto inputShape = shape(from), outputShape = shape(to), inputAxes = axes(from), outputAxes = axes(to);
     if (inputShape.empty()) return vector::BroadcastOp::create(b, loc, result, value);
     SmallVector<int64_t> indices;
@@ -798,24 +811,126 @@ private:
     // generalize this to an arbitrary dynamic narrow arithmetic expression.
     Operation *cast = value.getDefiningOp();
     if (cast && isa<wk::CastOp, wk::WidenOp>(cast)) {
-      auto src = dyn_cast<IntegerType>(element(cast->getOperand(0).getType()));
-      auto dst = dyn_cast<IntegerType>(element(value.getType()));
+      auto bitWidthOf = [](Type t) -> unsigned {
+        if (t.isIndex()) return 64;
+        if (auto it = dyn_cast<IntegerType>(t)) return it.getWidth();
+        return 0;
+      };
+      unsigned srcW = bitWidthOf(element(cast->getOperand(0).getType()));
+      unsigned dstW = bitWidthOf(element(value.getType()));
       Value original = cast->getOperand(0);
       for (unsigned i = 0; i < 8; ++i) {
         if (auto range = original.getDefiningOp<wk::IotaOp>()) {
-          if (src && dst && range.getStart() >= 0 &&
-              APInt(64, range.getEnd() - 1).getActiveBits() < std::min(src.getWidth(), dst.getWidth()))
+          if (srcW && dstW && range.getStart() >= 0 &&
+              APInt(64, range.getEnd() - 1).getActiveBits() < std::min(srcW, dstW))
             return 1;
           break;
         }
         auto *conversion = original.getDefiningOp();
         if (!conversion || !isa<wk::CastOp, wk::WidenOp>(conversion)) break;
-        auto inner = dyn_cast<IntegerType>(element(conversion->getOperand(0).getType()));
-        if (!inner || !src || inner.getWidth() > src.getWidth()) break;
+        unsigned innerW = bitWidthOf(element(conversion->getOperand(0).getType()));
+        if (!innerW || !srcW || innerW > srcW) break;
         original = conversion->getOperand(0);
       }
     }
     return {};
+  }
+  bool isRowMajorContiguousOffsets(Value value, ArrayRef<int64_t> domSizes,
+                                   ArrayRef<int64_t> domAxes) {
+    if (domSizes.empty() || domSizes.size() != domAxes.size() ||
+        !element(value.getType()).isInteger(64))
+      return false;
+    for (int64_t s : domSizes)
+      if (s <= 0) return false;
+    auto evalSteps = [&](auto &self, Value cur,
+                         SmallVectorImpl<int64_t> &coeffs,
+                         unsigned depth) -> bool {
+      if (depth > 32) return false;
+      coeffs.assign(domSizes.size(), 0);
+      auto curShape = shape(cur.getType());
+      if (curShape.empty())
+        return element(cur.getType()).isInteger(64);
+      auto curAxes = axes(cur.getType());
+      auto matchAxisIota = [&](wk::IotaOp range) -> bool {
+        if (curShape.size() != 1 || curAxes.size() != 1) return false;
+        auto it = llvm::find(domAxes, curAxes[0]);
+        if (it == domAxes.end()) return false;
+        size_t pos = static_cast<size_t>(it - domAxes.begin());
+        if (range.getStart() < 0 ||
+            (range.getEnd() - range.getStart()) != domSizes[pos])
+          return false;
+        coeffs[pos] = 1;
+        return true;
+      };
+      if (auto iota = cur.getDefiningOp<wk::IotaOp>())
+        return element(cur.getType()).isInteger(64) && matchAxisIota(iota);
+      if (auto c = cur.getDefiningOp<wk::ConstantOp>()) {
+        auto dense = dyn_cast<DenseElementsAttr>(c.getValue());
+        return element(cur.getType()).isInteger(64) &&
+               (isa<IntegerAttr>(c.getValue()) || (dense && dense.isSplat()));
+      }
+      if (auto fresh = cur.getDefiningOp<wk::NewOp>())
+        return fresh.getInitial() && element(cur.getType()).isInteger(64) &&
+               self(self, fresh.getInitial(), coeffs, depth + 1);
+      if (auto bin = cur.getDefiningOp<wk::BinaryOp>()) {
+        if (!element(cur.getType()).isInteger(64)) return false;
+        if (bin.getKind() == "add" || bin.getKind() == "sub") {
+          SmallVector<int64_t, 4> lc, rc;
+          if (!self(self, bin.getLhs(), lc, depth + 1) ||
+              !self(self, bin.getRhs(), rc, depth + 1))
+            return false;
+          for (size_t i = 0; i < coeffs.size(); ++i)
+            coeffs[i] = bin.getKind() == "add" ? (lc[i] + rc[i]) : (lc[i] - rc[i]);
+          return true;
+        }
+        if (bin.getKind() == "mul") {
+          auto constScalar = [&](Value v) -> std::optional<int64_t> {
+            if (!shape(v.getType()).empty() || !element(v.getType()).isInteger(64))
+              return std::nullopt;
+            if (auto kc = v.getDefiningOp<wk::ConstantOp>())
+              if (auto ia = dyn_cast<IntegerAttr>(kc.getValue()))
+                return ia.getValue().getSExtValue();
+            return std::nullopt;
+          };
+          if (auto factor = constScalar(bin.getRhs())) {
+            if (!self(self, bin.getLhs(), coeffs, depth + 1)) return false;
+            for (int64_t &c : coeffs) c *= *factor;
+            return true;
+          }
+          if (auto factor = constScalar(bin.getLhs())) {
+            if (!self(self, bin.getRhs(), coeffs, depth + 1)) return false;
+            for (int64_t &c : coeffs) c *= *factor;
+            return true;
+          }
+        }
+        return false;
+      }
+      Operation *cast = cur.getDefiningOp();
+      if (cast && isa<wk::CastOp, wk::WidenOp>(cast) &&
+          element(cur.getType()).isInteger(64)) {
+        Value orig = cast->getOperand(0);
+        for (unsigned i = 0; i < 8; ++i) {
+          Type ot = element(orig.getType());
+          unsigned w = ot.isIndex() ? 64 : (isa<IntegerType>(ot) ? ot.getIntOrFloatBitWidth() : 0);
+          if (w < 32) break;
+          if (auto range = orig.getDefiningOp<wk::IotaOp>())
+            return matchAxisIota(range);
+          auto *conv = orig.getDefiningOp();
+          if (!conv || !isa<wk::CastOp, wk::WidenOp>(conv)) break;
+          orig = conv->getOperand(0);
+        }
+      }
+      return false;
+    };
+    SmallVector<int64_t, 4> coeffs;
+    if (!evalSteps(evalSteps, value, coeffs, 0))
+      return false;
+    int64_t expected = 1;
+    for (int64_t d = int64_t(domSizes.size()) - 1; d >= 0; --d) {
+      if (coeffs[d] != expected) return false;
+      expected *= domSizes[d];
+    }
+    return true;
   }
   Value addressLane(Location loc, Value value, int64_t lane, unsigned depth = 0) {
     auto type = dyn_cast<VectorType>(value.getType());
@@ -869,18 +984,24 @@ private:
     }
     Value result;
     if (!isa<VectorType>(vectorType)) {
-      auto branch = scf::IfOp::create(b, loc, load ? TypeRange{storageType} : TypeRange{}, mask, true);
-      { OpBuilder::InsertionGuard guard(b);
-        b.setInsertionPointToStart(&branch.getThenRegion().front());
+      if (matchPattern(mask, m_One())) {
         Value address = LLVM::GEPOp::create(b, loc, pointer, elementType, base, ValueRange{offsets});
-        if (load) {
-          Value value = LLVM::LoadOp::create(b, loc, elementType, address, 1);
-          scf::YieldOp::create(b, loc, value);
-        } else LLVM::StoreOp::create(b, loc, data, address, 1);
-        b.setInsertionPointToStart(&branch.getElseRegion().front());
-        if (load) scf::YieldOp::create(b, loc, data);
+        if (load) result = LLVM::LoadOp::create(b, loc, elementType, address, 1);
+        else LLVM::StoreOp::create(b, loc, data, address, 1);
+      } else {
+        auto branch = scf::IfOp::create(b, loc, load ? TypeRange{storageType} : TypeRange{}, mask, true);
+        { OpBuilder::InsertionGuard guard(b);
+          b.setInsertionPointToStart(&branch.getThenRegion().front());
+          Value address = LLVM::GEPOp::create(b, loc, pointer, elementType, base, ValueRange{offsets});
+          if (load) {
+            Value value = LLVM::LoadOp::create(b, loc, elementType, address, 1);
+            scf::YieldOp::create(b, loc, value);
+          } else LLVM::StoreOp::create(b, loc, data, address, 1);
+          b.setInsertionPointToStart(&branch.getElseRegion().front());
+          if (load) scf::YieldOp::create(b, loc, data);
+        }
+        if (load) result = branch.getResult(0);
       }
-      if (load) result = branch.getResult(0);
     } else {
       if (contiguous) {
         // A native row transfer needs one scalar address. Keep scalar address
@@ -910,18 +1031,24 @@ private:
             scf::YieldOp::create(b, loc, masked);
           }
           result = choice.getResult(0);
+        } else if (matchPattern(mask, m_One())) {
+          if (load) result = LLVM::LoadOp::create(b, loc, storageType, address, 1);
+          else LLVM::StoreOp::create(b, loc, data, address, 1);
         } else if (load) result = LLVM::MaskedLoadOp::create(b, loc, storageType, address, mask, data, b.getI32IntegerAttr(1), UnitAttr{});
         else LLVM::MaskedStoreOp::create(b, loc, data, address, mask, b.getI32IntegerAttr(1));
       } else if (load && !elementType.isIndex() && elementType.getIntOrFloatBitWidth() < 32) {
         // AVX2/AVX-512 gather has no byte/halfword form. Make those indexed
         // loads explicit at fixed result positions, instead of asking LLVM to
         // legalize a very wide masked gather with a dynamic vector accumulator.
+        bool allOn = matchPattern(mask, m_One());
+        Value oneI1 = allOn ? constant(loc, b.getI1Type(), b.getBoolAttr(true)) : Value{};
         result = data;
         for (int64_t lane = 0; lane < cast<VectorType>(storageType).getNumElements(); ++lane) {
           auto extract = [&](Value value) -> Value {
             return vector::ExtractOp::create(b, loc, value, ArrayRef<int64_t>{lane});
           };
-          Value selected = access(loc, base, addressLane(loc, offsets, lane), extract(mask), extract(data), elementType, true, false);
+          Value laneMask = allOn ? oneI1 : extract(mask);
+          Value selected = access(loc, base, addressLane(loc, offsets, lane), laneMask, extract(data), elementType, true, false);
           result = vector::InsertOp::create(b, loc, selected, result, ArrayRef<int64_t>{lane});
         }
       } else {
@@ -1141,7 +1268,9 @@ private:
     }
     auto *op = value.getDefiningOp();
     if (op && isa<wk::CastOp, wk::WidenOp>(op) &&
-        isa<IntegerType>(element(value.getType())) && isa<IntegerType>(element(op->getOperand(0).getType())))
+        isa<IntegerType>(element(value.getType())) &&
+        (isa<IntegerType>(element(op->getOperand(0).getType())) ||
+         element(op->getOperand(0).getType()).isIndex()))
       return modularAxisStep(op->getOperand(0), axis, depth + 1);
     if (auto binary = dyn_cast_or_null<wk::BinaryOp>(op)) {
       if (!isa<IntegerType>(element(value.getType()))) return {};
@@ -1199,9 +1328,10 @@ private:
     if (depth > 32) return false;
     if (shape(value.getType()).empty()) return true;
     if (auto iota = value.getDefiningOp<wk::IotaOp>()) {
-      auto type = dyn_cast<IntegerType>(element(value.getType()));
-      return type && iota.getStart() >= 0 && iota.getEnd() > iota.getStart() &&
-          APInt(64, iota.getEnd() - 1).getActiveBits() < type.getWidth();
+      Type elem = element(value.getType());
+      unsigned width = elem.isIndex() ? 64 : (isa<IntegerType>(elem) ? cast<IntegerType>(elem).getWidth() : 0);
+      return width > 0 && iota.getStart() >= 0 && iota.getEnd() > iota.getStart() &&
+          APInt(64, iota.getEnd() - 1).getActiveBits() < width;
     }
     if (value.getDefiningOp<wk::ConstantOp>()) return stride(value) == std::optional<int64_t>(0);
     if (auto fresh = value.getDefiningOp<wk::NewOp>())
@@ -1209,6 +1339,9 @@ private:
     auto type = dyn_cast<IntegerType>(element(value.getType()));
     auto *op = value.getDefiningOp();
     if (op && isa<wk::CastOp, wk::WidenOp>(op) && stride(value) == std::optional<int64_t>(1)) return true;
+    if (op && isa<wk::CastOp>(op) && type && type.getWidth() == 64 &&
+        isa<IndexType>(element(op->getOperand(0).getType())))
+      return pointerWidthArithmetic(op->getOperand(0), depth + 1);
     if (!op || !type || type.getWidth() != 64) return false;
     if (auto select = dyn_cast<wk::SelectOp>(op))
       return select.getTrueValue() == select.getFalseValue() && pointerWidthArithmetic(select.getTrueValue(), depth + 1);
@@ -1220,12 +1353,13 @@ private:
     Value offsets = aligned(op.getOperand(1), domain, loc);
     Value mask = aligned(op.getOperand(2), maskType(domain), loc);
     Value data = aligned(op.getOperand(3), domain, loc);
-    Value logical = arith::AndIOp::create(b, loc, validAs(op.getOperand(1), domain, loc), validAs(op.getOperand(2), domain, loc));
-    mask = arith::AndIOp::create(b, loc, mask, logical);
-    if (!load) mask = arith::AndIOp::create(b, loc, mask, validAs(op.getOperand(3), domain, loc));
+    Value logical = andMask(loc, validAs(op.getOperand(1), domain, loc), validAs(op.getOperand(2), domain, loc));
+    mask = andMask(loc, mask, logical);
+    if (!load) mask = andMask(loc, mask, validAs(op.getOperand(3), domain, loc));
     auto linear = stride(op.getOperand(1));
     auto sizes = shape(domain);
-    bool contiguous = linear && *linear == 1 && sizes.size() == 1;
+    bool contiguous = (linear && *linear == 1 && sizes.size() == 1) ||
+                      isRowMajorContiguousOffsets(op.getOperand(1), sizes, axes(domain));
     auto modular = sizes.empty() ? std::nullopt : modularAxisStep(op.getOperand(1), axes(domain).back());
     int64_t run = sizes.empty() ? 1 : std::min<int64_t>(sizes.back(), target.vectorBits / scalar(domain).getIntOrFloatBitWidth());
     // Narrow arithmetic may wrap before pointer-width extension. Prove actual
@@ -1244,9 +1378,12 @@ private:
     // is not a logical tail domain, unlike a View admit.
     if (load) {
       values.map(op.getResult(0), result);
-      Value supplied = arith::SelectOp::create(b, loc, mask,
-          constant(loc, physicalType(maskType(domain)), b.getBoolAttr(true)), validAs(op.getOperand(3), domain, loc));
-      masks[op.getResult(0)] = arith::AndIOp::create(b, loc, logical, supplied);
+      Value trueMask = constant(loc, physicalType(maskType(domain)), b.getBoolAttr(true));
+      Value supplied = matchPattern(mask, m_One())
+                           ? trueMask
+                           : b.createOrFold<arith::SelectOp>(loc, mask, trueMask,
+                                                             validAs(op.getOperand(3), domain, loc));
+      masks[op.getResult(0)] = andMask(loc, logical, supplied);
     }
     return success();
   }
@@ -1257,8 +1394,48 @@ private:
   }
   Value indexConstant(Location loc, int64_t value) { return arith::ConstantIndexOp::create(b, loc, value); }
   Value remaining(Location loc, Value extent, Value offset) {
-    Value within = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ule, offset, extent);
-    return arith::SelectOp::create(b, loc, within, arith::SubIOp::create(b, loc, extent, offset), indexConstant(loc, 0));
+    Value within = b.createOrFold<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, offset, extent);
+    return b.createOrFold<arith::SelectOp>(loc, within, b.createOrFold<arith::SubIOp>(loc, extent, offset), indexConstant(loc, 0));
+  }
+  bool provenInBoundsTile(Value offset, int64_t bound, Value limit) {
+    if (bound <= 0) return false;
+    APInt offC, limC;
+    if (matchPattern(offset, m_ConstantInt(&offC)) && matchPattern(limit, m_ConstantInt(&limC)))
+      return offC.getZExtValue() + uint64_t(bound) <= limC.getZExtValue();
+    auto checkForIv = [&](Value iv, int64_t scale) -> bool {
+      auto arg = dyn_cast<BlockArgument>(iv);
+      if (!arg) return false;
+      auto loop = dyn_cast_or_null<scf::ForOp>(arg.getOwner()->getParentOp());
+      if (!loop || iv != loop.getInductionVar()) return false;
+      APInt lbC, stepC;
+      if (!matchPattern(loop.getLowerBound(), m_ConstantInt(&lbC)) || !lbC.isNonNegative() ||
+          !matchPattern(loop.getStep(), m_ConstantInt(&stepC)) || stepC.sle(0))
+        return false;
+      APInt ubC, limC2;
+      if (matchPattern(loop.getUpperBound(), m_ConstantInt(&ubC)) &&
+          matchPattern(limit, m_ConstantInt(&limC2))) {
+        if (ubC.sle(lbC)) return true;
+        uint64_t lb = lbC.getZExtValue(), ub = ubC.getZExtValue(), step = stepC.getZExtValue();
+        uint64_t maxIv = lb + ((ub - 1 - lb) / step) * step;
+        return maxIv * uint64_t(scale) + uint64_t(bound) <= limC2.getZExtValue();
+      }
+      if (scale == 1 && lbC.isZero() && stepC.sge(bound) &&
+          stepC.getSExtValue() % bound == 0 && loop.getUpperBound() == limit &&
+          llvm::isPowerOf2_64(bound) && knownPowerOfTwoMultiple(limit, bound))
+        return true;
+      return false;
+    };
+    if (checkForIv(offset, 1)) return true;
+    if (auto mul = offset.getDefiningOp<arith::MulIOp>()) {
+      APInt scaleC;
+      if (matchPattern(mul.getRhs(), m_ConstantInt(&scaleC)) && scaleC.sgt(0) &&
+          checkForIv(mul.getLhs(), scaleC.getSExtValue()))
+        return true;
+      if (matchPattern(mul.getLhs(), m_ConstantInt(&scaleC)) && scaleC.sgt(0) &&
+          checkForIv(mul.getRhs(), scaleC.getSExtValue()))
+        return true;
+    }
+    return false;
   }
   LogicalResult slice(wk::SliceOp op) {
     Memory result = memories.at(op.getBase());
@@ -1307,12 +1484,16 @@ private:
       offsets.push_back(offset == -1 ? mapped(op.getDynamicBounds()[cursor++]) : indexConstant(op.getLoc(), offset));
     for (auto [axis, bound] : llvm::enumerate(op.getExtents())) {
       Value extent = bound == -1 ? mapped(op.getDynamicBounds()[cursor++]) : indexConstant(op.getLoc(), bound);
-      result.limits[axis] = arith::MinUIOp::create(b, op.getLoc(), extent, remaining(op.getLoc(), result.limits[axis], offsets[axis]));
+      result.limits[axis] = provenInBoundsTile(offsets[axis], bound, result.limits[axis])
+                                ? extent
+                                : b.createOrFold<arith::MinUIOp>(
+                                      op.getLoc(), extent,
+                                      remaining(op.getLoc(), result.limits[axis], offsets[axis]));
       // The source extent is an explicit operand, not a replacement ABI size.
       // Keep it separate from the remaining allocation bound used by loads.
       result.extents[axis] = extent;
-      result.offset = arith::AddIOp::create(b, op.getLoc(), result.offset,
-          arith::MulIOp::create(b, op.getLoc(), offsets[axis], result.strides[axis]));
+      result.offset = b.createOrFold<arith::AddIOp>(op.getLoc(), result.offset,
+          b.createOrFold<arith::MulIOp>(op.getLoc(), offsets[axis], result.strides[axis]));
     }
     memories[op.getResult()] = std::move(result);
     return success();
@@ -2030,7 +2211,7 @@ private:
           projection.push_back(lane / volume(ArrayRef(sizes).drop_front(position + 1)) % sizes[position] / group);
         inside = permute(loc, inside, projection, mask);
       }
-      active = b.createOrFold<arith::AndIOp>(loc, active, inside);
+      active = andMask(loc, active, inside);
     }
     // Prove the maximal unit-stride suffix from the actual storage relation.
     // Outer axes may have gaps without losing the contiguous inner packets.
@@ -2924,32 +3105,37 @@ private:
       Value integer = arith::IndexCastUIOp::create(b, loc, b.getI64Type(), value);
       return splat(integer, addressType);
     };
-    Value active = arith::AndIOp::create(b, loc, valid(op.getIndices(), loc), splat(view.guard, predicateType));
+    Value active = andMask(loc, valid(op.getIndices(), loc), splat(view.guard, predicateType));
     Value remaining = castValue(loc, mapped(op.getIndices()), op.getIndices().getType(), addressDomain);
     // A complete dense table has no holes in its logical snapshot. in_bounds
     // is the author's index precondition; only a partial View needs per-axis
     // validity reconstruction. GEP is not inbounds and the transfer is masked,
     // so inactive offsets need not be changed to zero (which destroys their
     // proven contiguous relation).
-    bool linearStorage = true, complete = true;
+    bool linearStorage = true, complete = true, allConstantExtents = true;
     int64_t expectedStride = 1;
     for (int64_t axis = view.extents.size() - 1; axis >= 0; --axis) {
       APInt stride, extent, limit;
       bool constantExtent = matchPattern(view.extents[axis], m_ConstantInt(&extent));
+      allConstantExtents &= constantExtent;
       linearStorage &= matchPattern(view.strides[axis], m_ConstantInt(&stride)) &&
           stride.getSExtValue() == expectedStride;
       complete &= view.extents[axis] == view.limits[axis] ||
           (constantExtent && matchPattern(view.limits[axis], m_ConstantInt(&limit)) && extent == limit);
-      if (!constantExtent || extent.isNegative() || extent.getActiveBits() >= 63 ||
-          (extent.getZExtValue() && uint64_t(expectedStride) > INT64_MAX / extent.getZExtValue())) {
-        linearStorage = false;
-        break;
+      if (axis > 0) {
+        if (!constantExtent || extent.isNegative() || extent.getActiveBits() >= 63 ||
+            (extent.getZExtValue() && uint64_t(expectedStride) > INT64_MAX / extent.getZExtValue())) {
+          linearStorage = false;
+          break;
+        }
+        expectedStride *= extent.getZExtValue();
       }
-      expectedStride *= extent.getZExtValue();
     }
     Value offset = asAddress(view.offset);
-    if (linearStorage && complete) {
-      offset = arith::AddIOp::create(b, loc, offset, remaining);
+    if (linearStorage && complete && (allConstantExtents || op.getBounds() == "in_bounds")) {
+      offset = matchPattern(view.offset, m_Zero())
+                   ? remaining
+                   : b.createOrFold<arith::AddIOp>(loc, offset, remaining);
     } else for (int64_t axis = view.extents.size() - 1; axis >= 0; --axis) {
       Value coordinate = remaining;
       if (axis) {
@@ -2957,19 +3143,23 @@ private:
         // divide-by-zero before the actual transfer mask is applied.
         Value extent = asAddress(view.extents[axis]);
         Value nonempty = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, extent, zero(loc, addressType));
-        active = arith::AndIOp::create(b, loc, active, nonempty);
+        active = andMask(loc, active, nonempty);
         Value divisor = arith::SelectOp::create(b, loc, nonempty, extent,
             constant(loc, addressType, b.getI64IntegerAttr(1)));
         coordinate = arith::RemUIOp::create(b, loc, remaining, divisor);
         remaining = arith::DivUIOp::create(b, loc, remaining, divisor);
       }
-      active = arith::AndIOp::create(b, loc, active,
+      active = andMask(loc, active,
           arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ult, coordinate, asAddress(view.limits[axis])));
       offset = arith::AddIOp::create(b, loc, offset,
           arith::MulIOp::create(b, loc, coordinate, asAddress(view.strides[axis])));
     }
-    auto branch = scf::IfOp::create(b, loc, TypeRange{physicalType(domain)}, view.storageMapped, true);
-    {
+    Value fetched;
+    if (matchPattern(view.storageMapped, m_Zero())) {
+      fetched = lookupTransfer(loc, view.base, offset, active,
+          zero(loc, physicalType(domain)), domain, op.getIndices(), linearStorage && complete);
+    } else {
+      auto branch = scf::IfOp::create(b, loc, TypeRange{physicalType(domain)}, view.storageMapped, true);
       OpBuilder::InsertionGuard guard(b);
       b.setInsertionPointToStart(&branch.getThenRegion().front());
       scf::YieldOp::create(b, loc, storageAccess(loc, view, offset, active,
@@ -2977,8 +3167,9 @@ private:
       b.setInsertionPointToStart(&branch.getElseRegion().front());
       scf::YieldOp::create(b, loc, lookupTransfer(loc, view.base, offset, active,
           zero(loc, physicalType(domain)), domain, op.getIndices(), linearStorage && complete));
+      fetched = branch.getResult(0);
     }
-    values.map(op.getResult(), branch.getResult(0));
+    values.map(op.getResult(), fetched);
     masks[op.getResult()] = active;
     return success();
   }
@@ -3665,6 +3856,28 @@ private:
             weft::analysis::hasUnsignedBound(index, dimensions[axis]);
       } else
         return unsupported(op, "unsupported x86 local Value projection: ") << selector;
+    }
+    APInt constLane;
+    if (!update && dimensions.size() == 1 && outputShape.empty() &&
+        !packedType(source.getType()) && !domainLimits[0] && coordinates[0] &&
+        matchPattern(coordinates[0], m_ConstantInt(&constLane)) &&
+        constLane.ult(dimensions[0])) {
+      int64_t pos = constLane.getZExtValue();
+      Value srcPhys = mapped(source);
+      Value selected = isa<VectorType>(srcPhys.getType())
+                           ? Value(vector::ExtractOp::create(b, loc, srcPhys, ArrayRef<int64_t>{pos}))
+                           : srcPhys;
+      Value srcValid = valid(source, loc);
+      Value elemValid = isa<VectorType>(srcValid.getType())
+                            ? (matchPattern(srcValid, m_One())
+                                   ? constant(loc, b.getI1Type(), b.getBoolAttr(true))
+                                   : Value(vector::ExtractOp::create(b, loc, srcValid, ArrayRef<int64_t>{pos})))
+                            : srcValid;
+      Value outValid = indexMasks[0] ? andMask(loc, elemValid, indexMasks[0]) : elemValid;
+      values.map(op.getResult(0), selected);
+      masks[op.getResult(0)] = outValid;
+      valueOrigins[op.getResult(0)] = outputOrigins;
+      return success();
     }
     Value output = update ? mapped(source) : zero(loc, outputType);
     Type outputMaskType = physicalMask(op.getResult(0).getType());
@@ -5125,7 +5338,7 @@ private:
         if (!numeric(operand.getType())) continue;
         auto inputAxes = axes(operand.getType()), outputAxes = axes(result.getType());
         if (!llvm::all_of(inputAxes, [&](int64_t axis) { return llvm::is_contained(outputAxes, axis); })) continue;
-        mask = arith::AndIOp::create(b, op.getLoc(), mask, validAs(operand, result.getType(), op.getLoc()));
+        mask = andMask(op.getLoc(), mask, validAs(operand, result.getType(), op.getLoc()));
       }
       masks[result] = mask;
     }

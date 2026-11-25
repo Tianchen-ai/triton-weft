@@ -4,6 +4,7 @@ import copy
 
 GRID_DECLARATION = """typedef int (*triton_check_thread)(const void *, char *, size_t);
 int weft_kernel_take_status(char *error, size_t error_size);
+void weft_kernel_release_hw_context(void);
 int triton_weft_grid(void (*entry)(void), void *const *arguments,
                     size_t grid0, size_t grid1, size_t grid2, int threads,
                     const void *scope, triton_check_thread check, char *error, size_t error_size);"""
@@ -31,6 +32,7 @@ int weft_kernel_take_status(char *error, size_t error_size) {
   if (error && error_size) error[0] = 0;
   return 0;
 }
+void weft_kernel_release_hw_context(void) {}
 '''
 
 
@@ -47,6 +49,16 @@ _ONEDNN_BRGEMM_SHIM = r'''
 
 static _Thread_local int __weft_tls_status = 0;
 static _Thread_local char __weft_tls_error[512];
+static _Thread_local const void *__weft_active_hw_brg = NULL;
+static _Thread_local int __weft_amx_hw_active = 0;
+
+void weft_kernel_release_hw_context(void) {
+  if (__weft_amx_hw_active) {
+    (void)dnnl_brgemm_release_hw_context();
+    __weft_amx_hw_active = 0;
+  }
+  __weft_active_hw_brg = NULL;
+}
 
 static inline void __weft_reset_tls_status(void) {
   __weft_tls_status = 0;
@@ -230,6 +242,9 @@ void __weft_onednn_brgemm_execute(
     }
     struct __weft_brgemm_entry *e = &cache[victim];
     if (e->valid && e->brg) {
+      if (__weft_active_hw_brg == (const void *)e->brg) {
+        weft_kernel_release_hw_context();
+      }
       dnnl_brgemm_destroy(e->brg);
     }
     e->M = M; e->N = N; e->K = K;
@@ -255,17 +270,22 @@ void __weft_onednn_brgemm_execute(
   }
 
   dnnl_dim_t ab_offsets[2] = {0, 0};
-  dnnl_status_t st = dnnl_brgemm_set_hw_context(hit->brg);
-  if (st != dnnl_success) {
-    __weft_record_error(__weft_status_from_dnnl(st, 4),
-                        "Weft oneDNN BRGeMM set_hw_context failed (dnnl_status=%d)", (int)st);
-    return;
+  dnnl_status_t st = dnnl_success;
+  if (__weft_active_hw_brg != (const void *)hit->brg) {
+    st = dnnl_brgemm_set_hw_context(hit->brg);
+    if (st != dnnl_success) {
+      __weft_record_error(__weft_status_from_dnnl(st, 4),
+                          "Weft oneDNN BRGeMM set_hw_context failed (dnnl_status=%d)", (int)st);
+      return;
+    }
+    __weft_active_hw_brg = (const void *)hit->brg;
+    if (dt_a >= 2) {
+      __weft_amx_hw_active = 1;
+    }
   }
   st = dnnl_brgemm_execute(hit->brg, A, B, ab_offsets, C, scratch_ptr);
-  if (dt_a >= 2) {
-    (void)dnnl_brgemm_release_hw_context();
-  }
   if (st != dnnl_success) {
+    weft_kernel_release_hw_context();
     __weft_record_error(__weft_status_from_dnnl(st, 6),
                         "Weft oneDNN BRGeMM execute failed (dnnl_status=%d, M=%lld N=%lld K=%lld)",
                         (int)st, (long long)M, (long long)N, (long long)K);
@@ -395,6 +415,7 @@ static void launch_range(void *opaque, size_t begin, size_t end) {{
       if (++pid1 == job->grid1) {{ pid1 = 0; ++pid2; }}
     }}
   }}
+  weft_kernel_release_hw_context();
 }}
 int triton_weft_grid(void (*entry)(void), void *const *arguments,
                     size_t grid0, size_t grid1, size_t grid2, int threads,
@@ -413,6 +434,7 @@ int triton_weft_grid(void (*entry)(void), void *const *arguments,
     (void)weft_kernel_take_status(NULL, 0);
     if (count == 1) {{
       {instance}(entry, &decoded, grid0, grid1, grid2, 0, 0, 0);
+      weft_kernel_release_hw_context();
       return weft_kernel_take_status(error, error_size);
     }}
     launch_range(&job, 0, count);
