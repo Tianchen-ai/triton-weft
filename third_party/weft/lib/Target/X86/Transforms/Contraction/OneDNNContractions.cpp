@@ -249,6 +249,55 @@ Value operandIsComplete(OpBuilder &b, Location loc, const BrgemmOperand &op) {
   return loop.getResult(0);
 }
 
+bool isAssumedPositive(OpBuilder &b, Value v) {
+  APInt c;
+  if (matchPattern(v, m_ConstantInt(&c))) return c.isStrictlyPositive();
+  Block *blk = b.getInsertionBlock();
+  if (!blk) return false;
+  auto stripCast = [](Value x) -> Value {
+    if (auto op = x.getDefiningOp<arith::IndexCastOp>()) return op.getIn();
+    if (auto op = x.getDefiningOp<arith::IndexCastUIOp>()) return op.getIn();
+    return x;
+  };
+  Value baseV = stripCast(v);
+  auto checkBlock = [&](Block *block, Block::iterator endIt) -> bool {
+    for (auto it = block->begin(); it != endIt; ++it) {
+      auto assume = dyn_cast<LLVM::AssumeOp>(&*it);
+      if (!assume) continue;
+      auto cmp = assume.getCond().getDefiningOp<arith::CmpIOp>();
+      if (!cmp) continue;
+      auto pred = cmp.getPredicate();
+      APInt rhsC, lhsC;
+      if (stripCast(cmp.getLhs()) == baseV && matchPattern(cmp.getRhs(), m_ConstantInt(&rhsC))) {
+        if ((pred == arith::CmpIPredicate::sgt || pred == arith::CmpIPredicate::ugt) &&
+            !rhsC.isNegative())
+          return true;
+        if ((pred == arith::CmpIPredicate::sge || pred == arith::CmpIPredicate::uge) &&
+            rhsC.isStrictlyPositive())
+          return true;
+      }
+      if (stripCast(cmp.getRhs()) == baseV && matchPattern(cmp.getLhs(), m_ConstantInt(&lhsC))) {
+        if ((pred == arith::CmpIPredicate::slt || pred == arith::CmpIPredicate::ult) &&
+            !lhsC.isNegative())
+          return true;
+        if ((pred == arith::CmpIPredicate::sle || pred == arith::CmpIPredicate::ule) &&
+            lhsC.isStrictlyPositive())
+          return true;
+      }
+    }
+    return false;
+  };
+  if (checkBlock(blk, b.getInsertionPoint())) return true;
+  if (auto fn = blk->getParentOp()->getParentOfType<func::FuncOp>()) {
+    Block *entry = &fn.getBody().front();
+    if (entry != blk && checkBlock(entry, entry->end())) return true;
+  } else if (auto fn = dyn_cast<func::FuncOp>(blk->getParentOp())) {
+    Block *entry = &fn.getBody().front();
+    if (entry != blk && checkBlock(entry, entry->end())) return true;
+  }
+  return false;
+}
+
 } // namespace
 
 LogicalResult materializeOneDNNBrgemm(
@@ -313,12 +362,14 @@ LogicalResult materializeOneDNNBrgemm(
 
   Value zeroIdx = idx(b, loc, 0);
   Value oneIdx = idx(b, loc, 1);
+  auto posCheck = [&](Value dim) -> Value {
+    if (isAssumedPositive(b, dim)) return boolc(b, loc, true);
+    return arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ugt, dim, zeroIdx);
+  };
   Value nonEmpty = arith::AndIOp::create(
       b, loc,
-      arith::AndIOp::create(b, loc,
-          arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ugt, M, zeroIdx),
-          arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ugt, N, zeroIdx)),
-      arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ugt, K, zeroIdx));
+      arith::AndIOp::create(b, loc, posCheck(M), posCheck(N)),
+      posCheck(K));
   Value fastPath = arith::AndIOp::create(
       b, loc, nonEmpty,
       arith::AndIOp::create(b, loc, operandIsComplete(b, loc, lhs),

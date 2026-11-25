@@ -15,6 +15,36 @@
 
 using namespace mlir;
 namespace {
+// Recognize row-major coordinate round-trips: (x / D) * D + (x % D) == x.
+bool sameIndexOrConst(Value a, Value b) {
+  if (a == b) return true;
+  APInt ca, cb;
+  return matchPattern(a, m_ConstantInt(&ca)) &&
+         matchPattern(b, m_ConstantInt(&cb)) && ca == cb;
+}
+
+bool isIdentityLinearIndex(Value index, Value iv) {
+  if (index == iv) return true;
+  auto add = index.getDefiningOp<arith::AddIOp>();
+  if (!add) return false;
+  auto matchPair = [&](Value prodV, Value remV) -> bool {
+    auto mul = prodV.getDefiningOp<arith::MulIOp>();
+    auto rem = remV.getDefiningOp<arith::RemUIOp>();
+    if (!mul || !rem) return false;
+    auto matchMul = [&](Value divV, Value strideV) -> bool {
+      auto div = divV.getDefiningOp<arith::DivUIOp>();
+      return div && div.getLhs() == rem.getLhs() &&
+             sameIndexOrConst(div.getRhs(), rem.getRhs()) &&
+             sameIndexOrConst(strideV, rem.getRhs()) &&
+             isIdentityLinearIndex(rem.getLhs(), iv);
+    };
+    return matchMul(mul.getLhs(), mul.getRhs()) ||
+           matchMul(mul.getRhs(), mul.getLhs());
+  };
+  return matchPair(add.getLhs(), add.getRhs()) ||
+         matchPair(add.getRhs(), add.getLhs());
+}
+
 unsigned recordSchedule(func::FuncOp function, OpBuilder &b, DictionaryAttr entry) {
   SmallVector<Attribute> records;
   if (auto old = function->getAttrOfType<ArrayAttr>("weft.x86.array_schedule"))
@@ -114,7 +144,7 @@ public:
           if (auto load = dyn_cast<memref::LoadOp>(op)) {
             Value index = mapping.lookupOrDefault(load.getIndices()[0]), value;
             if (!isa<VectorType>(index.getType())) value = memref::LoadOp::create(b, loc, load.getMemRef(), index);
-            else if (load.getIndices()[0] == loop.getInductionVar() && !load.getType().isInteger(1))
+            else if (isIdentityLinearIndex(load.getIndices()[0], loop.getInductionVar()) && !load.getType().isInteger(1))
               value = vector::LoadOp::create(b, loc, vectorType(load.getType()), load.getMemRef(), packet.getInductionVar());
             else {
               Value fill = arith::ConstantOp::create(b, loc, vectorType(load.getType()), b.getZeroAttr(vectorType(load.getType())));

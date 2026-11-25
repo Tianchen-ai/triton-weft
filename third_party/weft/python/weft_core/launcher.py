@@ -133,6 +133,22 @@ void __weft_onednn_brgemm_execute(
     __weft_record_error(1, "Weft oneDNN BRGeMM received null operand pointer");
     return;
   }
+  /* L1/L2 K-blocking for large f32 BRGeMM contractions keeps C hot in L1 and
+   * the active A/B slabs resident in L1/L2 across all K blocks. */
+  if (dt_a == 0 && dt_b == 0 && dt_c == 0 && K > 512) {
+    const int64_t k_blk = 512;
+    const float *af = (const float *)A;
+    const float *bf = (const float *)B;
+    for (int64_t k0 = 0; k0 < K; k0 += k_blk) {
+      int64_t kc = K - k0 < k_blk ? K - k0 : k_blk;
+      __weft_onednn_brgemm_execute(
+          af + k0, bf + k0 * ldb, C,
+          M, N, kc, lda, ldb, ldc,
+          dt_a, dt_b, dt_c, k0 == 0 ? add_c : 1);
+      if (__weft_tls_status != 0) return;
+    }
+    return;
+  }
   dnnl_data_type_t dnnl_a, dnnl_b, dnnl_c;
   if (__weft_map_dnnl_dt(dt_a, &dnnl_a) != 0 ||
       __weft_map_dnnl_dt(dt_b, &dnnl_b) != 0 ||

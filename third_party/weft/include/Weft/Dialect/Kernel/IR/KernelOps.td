@@ -225,8 +225,9 @@ def WeftKernel_IotaOp : WeftKernel_Op<"iota", [Pure]> {
   let hasVerifier = 1;
 }
 
-// Source preconditions do not change the numerical value or memory effects.
-def WeftKernel_AssumeOp : WeftKernel_Op<"assume", [MemoryEffects<[]>]> {
+// Source preconditions do not change numerical values, but must not declare
+// empty memory effects or MLIR CSE/DCE will erase the zero-result op as dead.
+def WeftKernel_AssumeOp : WeftKernel_Op<"assume"> {
   let arguments = (ins I1:$condition);
 }
 

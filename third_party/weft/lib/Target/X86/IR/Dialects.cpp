@@ -31,6 +31,14 @@ struct TransferEffects : MemoryEffectOpInterface::ExternalModel<TransferEffects<
   }
 };
 
+// Keep llvm.intr.assume live through CSE/canonicalize while exposing a
+// non-memory control effect so buffer-deallocation ownership analysis accepts it.
+struct AssumeEffects : MemoryEffectOpInterface::ExternalModel<AssumeEffects, LLVM::AssumeOp> {
+  void getEffects(Operation *, SmallVectorImpl<MemoryEffects::EffectInstance> &effects) const {
+    effects.emplace_back(MemoryEffects::Write::get(), wk::FunctionControlResource::get());
+  }
+};
+
 }
 
 void weft::registerX86Dialects(DialectRegistry &registry) {
@@ -46,6 +54,7 @@ void weft::registerX86Dialects(DialectRegistry &registry) {
     LLVM::masked_gather::attachInterface<TransferEffects<LLVM::masked_gather, true>>(*context);
     LLVM::MaskedStoreOp::attachInterface<TransferEffects<LLVM::MaskedStoreOp, false>>(*context);
     LLVM::masked_scatter::attachInterface<TransferEffects<LLVM::masked_scatter, false>>(*context);
+    LLVM::AssumeOp::attachInterface<AssumeEffects>(*context);
   });
 }
 

@@ -270,9 +270,14 @@ public:
                 matchPattern(cmp.getRhs(), m_ConstantInt(&bound)) &&
                 !bound.isNegative() && bound.getActiveBits() < 62) {
               int64_t limit = -1;
-              if (cmp.getPredicate() == arith::CmpIPredicate::ule)
+              auto pred = cmp.getPredicate();
+              bool nonNegIndex = isa<IndexType>(baseV.getType());
+              if (pred == arith::CmpIPredicate::ule ||
+                  (nonNegIndex && pred == arith::CmpIPredicate::sle))
                 limit = bound.getSExtValue();
-              else if (cmp.getPredicate() == arith::CmpIPredicate::ult && bound.isStrictlyPositive())
+              else if ((pred == arith::CmpIPredicate::ult ||
+                        (nonNegIndex && pred == arith::CmpIPredicate::slt)) &&
+                       bound.isStrictlyPositive())
                 limit = bound.getSExtValue() - 1;
               if (limit >= 0)
                 maxVal = maxVal ? std::min(*maxVal, limit) : limit;

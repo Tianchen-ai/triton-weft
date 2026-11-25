@@ -2444,10 +2444,69 @@ private:
       return success();
     }
     if (axis + 1 == int64_t(dimensions.size())) {
+      int64_t rows = volume(dimensions) / extent;
+      // Parallel in-lane pairwise butterfly reduction for 16x16 f32 tiles:
+      // reduces all 16 rows simultaneously without 16 serial scalar inserts
+      // or per-row signed-zero branches.
+      if (rows == 16 && extent == 16 && elem.isF32() && target.vectorBits >= 512 &&
+          (kind == vector::CombiningKind::ADD || kind == vector::CombiningKind::MAXNUMF)) {
+        Location loc = op.getLoc();
+        auto rowTy = VectorType::get({16}, elem);
+        auto halfTy = VectorType::get({8}, elem);
+        auto quadTy = VectorType::get({4}, elem);
+        auto maskPart = VectorType::get({16}, b.getI1Type());
+        SmallVector<Value, 16> rVals(16), live(16);
+        for (int64_t row = 0; row < 16; ++row) {
+          SmallVector<int64_t, 16> indices(16);
+          std::iota(indices.begin(), indices.end(), row * 16);
+          rVals[row] = permute(loc, input, indices, rowTy);
+          Value active = permute(loc, validity, indices, maskPart);
+          live[row] = vector::ReductionOp::create(b, loc, vector::CombiningKind::OR, active);
+        }
+        static constexpr int64_t kEv[16] = {
+            0, 2, 16, 18, 4, 6, 20, 22, 8, 10, 24, 26, 12, 14, 28, 30};
+        static constexpr int64_t kOd[16] = {
+            1, 3, 17, 19, 5, 7, 21, 23, 9, 11, 25, 27, 13, 15, 29, 31};
+        static constexpr int64_t kLo8[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+        static constexpr int64_t kHi8[8] = {8, 9, 10, 11, 12, 13, 14, 15};
+        static constexpr int64_t kLo4[4] = {0, 1, 2, 3};
+        static constexpr int64_t kHi4[4] = {4, 5, 6, 7};
+        static constexpr int64_t kJoin8[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+        static constexpr int64_t kJoin16[16] = {
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+        auto combineVec = [&](Value lhs, Value rhs) -> Value {
+          if (kind == vector::CombiningKind::ADD)
+            return arith::AddFOp::create(b, loc, lhs, rhs);
+          return arith::MaxNumFOp::create(b, loc, lhs, rhs);
+        };
+        auto pairInLane = [&](Value a, Value c) -> Value {
+          Value ev = vector::ShuffleOp::create(b, loc, a, c, kEv);
+          Value od = vector::ShuffleOp::create(b, loc, a, c, kOd);
+          return combineVec(ev, od);
+        };
+        SmallVector<Value, 8> s(8);
+        for (int i = 0; i < 8; ++i) s[i] = pairInLane(rVals[2 * i], rVals[2 * i + 1]);
+        SmallVector<Value, 4> c(4), x(4);
+        for (int i = 0; i < 4; ++i) {
+          c[i] = pairInLane(s[2 * i], s[2 * i + 1]);
+          Value y = combineVec(vector::ShuffleOp::create(b, loc, c[i], c[i], kLo8),
+                               vector::ShuffleOp::create(b, loc, c[i], c[i], kHi8));
+          x[i] = combineVec(vector::ShuffleOp::create(b, loc, y, y, kLo4),
+                            vector::ShuffleOp::create(b, loc, y, y, kHi4));
+        }
+        Value lo8 = vector::ShuffleOp::create(b, loc, x[0], x[1], kJoin8);
+        Value hi8 = vector::ShuffleOp::create(b, loc, x[2], x[3], kJoin8);
+        Value resVec = vector::ShuffleOp::create(b, loc, lo8, hi8, kJoin16);
+        (void)halfTy; (void)quadTy;
+        values.map(op.getResult(), resVec);
+        masks[op.getResult()] = vector::FromElementsOp::create(
+            b, loc, physicalType(maskType(op.getResult().getType())), live);
+        return success();
+      }
       SmallVector<Value> sums, live;
       auto partType = VectorType::get({extent}, elem);
       auto maskPart = VectorType::get({extent}, b.getI1Type());
-      for (int64_t row = 0; row < volume(dimensions) / extent; ++row) {
+      for (int64_t row = 0; row < rows; ++row) {
         SmallVector<int64_t> indices(extent);
         std::iota(indices.begin(), indices.end(), row * extent);
         Value part = permute(op.getLoc(), input, indices, partType);
@@ -3132,10 +3191,27 @@ private:
       }
     }
     Value offset = asAddress(view.offset);
+    bool useNarrowI32Gather = false;
     if (linearStorage && complete && (allConstantExtents || op.getBounds() == "in_bounds")) {
-      offset = matchPattern(view.offset, m_Zero())
-                   ? remaining
-                   : b.createOrFold<arith::AddIOp>(loc, offset, remaining);
+      if (matchPattern(view.offset, m_Zero())) {
+        APInt ext0;
+        auto rawIdx = mapped(op.getIndices());
+        auto rawIdxVec = dyn_cast<VectorType>(rawIdx.getType());
+        auto ids = axes(op.getIndices().getType());
+        bool hasUnitStep = !ids.empty() && modularAxisStep(op.getIndices(), ids.back()) == std::optional<int64_t>(1);
+        if (!hasUnitStep && op.getBounds() == "in_bounds" && view.extents.size() == 1 &&
+            matchPattern(view.extents[0], m_ConstantInt(&ext0)) &&
+            !ext0.isNegative() && ext0.getZExtValue() <= uint64_t(INT32_MAX) &&
+            rawIdxVec && rawIdxVec.getElementType().isInteger(32) &&
+            matchPattern(view.storageMapped, m_Zero())) {
+          offset = rawIdx;
+          useNarrowI32Gather = true;
+        } else {
+          offset = remaining;
+        }
+      } else {
+        offset = b.createOrFold<arith::AddIOp>(loc, offset, remaining);
+      }
     } else for (int64_t axis = view.extents.size() - 1; axis >= 0; --axis) {
       Value coordinate = remaining;
       if (axis) {
@@ -3155,7 +3231,10 @@ private:
           arith::MulIOp::create(b, loc, coordinate, asAddress(view.strides[axis])));
     }
     Value fetched;
-    if (matchPattern(view.storageMapped, m_Zero())) {
+    if (useNarrowI32Gather) {
+      fetched = access(loc, view.base, offset, active,
+          zero(loc, physicalType(domain)), domain, true, false);
+    } else if (matchPattern(view.storageMapped, m_Zero())) {
       fetched = lookupTransfer(loc, view.base, offset, active,
           zero(loc, physicalType(domain)), domain, op.getIndices(), linearStorage && complete);
     } else {
@@ -3296,6 +3375,7 @@ private:
     masks[result] = active;
     return success();
   }
+  llvm::DenseSet<Operation *> fusedOps;
   LogicalResult simdContraction(Operation &op) {
     if (isa<wk::OuterContractOp>(op) && element(op.getResult(0).getType()).isF32()) {
       SmallVector<Value> inputs, predicates;
@@ -3307,9 +3387,37 @@ private:
         inputs.push_back(mapped(v));
         predicates.push_back(valid(v, op.getLoc()));
       }
-      if (auto tile = weft::x86::emitDenseOuterProduct(b, op, target, inputs, predicates)) {
-        values.map(op.getResult(0), tile->first);
-        masks[op.getResult(0)] = tile->second;
+      // Fuse immediate in-place accumulation `acc + outer_contract(lhs, rhs)`
+      // so the accumulator stays in the contraction's ZMM registers instead of
+      // spilling across the inner K loop.
+      wk::BinaryOp fusedAdd;
+      Value initAcc, initAccMask;
+      if (op.getResult(0).hasOneUse()) {
+        Operation *user = *op.getResult(0).getUsers().begin();
+        if (user == op.getNextNode()) {
+          if (auto bin = dyn_cast<wk::BinaryOp>(user);
+              bin && bin.getKind() == "add" &&
+              bin.getResult().getType() == op.getResult(0).getType()) {
+            Value other = bin.getLhs() == op.getResult(0) ? bin.getRhs() : bin.getLhs();
+            if (other != op.getResult(0) && values.contains(other) &&
+                isa<VectorType>(mapped(other).getType())) {
+              fusedAdd = bin;
+              initAcc = mapped(other);
+              initAccMask = valid(other, bin.getLoc());
+            }
+          }
+        }
+      }
+      if (auto tile = weft::x86::emitDenseOuterProduct(
+              b, op, target, inputs, predicates, initAcc, initAccMask)) {
+        if (fusedAdd) {
+          values.map(fusedAdd.getResult(), tile->first);
+          masks[fusedAdd.getResult()] = tile->second;
+          fusedOps.insert(fusedAdd.getOperation());
+        } else {
+          values.map(op.getResult(0), tile->first);
+          masks[op.getResult(0)] = tile->second;
+        }
         return success();
       }
     }
@@ -5456,7 +5564,10 @@ private:
     if (isa<wk::PointerStoreOp>(op)) return memory(op, false);
     if (auto update = dyn_cast<wk::PointerAtomicOp>(op)) return atomic(update);
     if (auto update = dyn_cast<wk::AtomicRMWOp>(op)) return atomic(update);
-    if (auto bin = dyn_cast<wk::BinaryOp>(op)) return binary(bin);
+    if (auto bin = dyn_cast<wk::BinaryOp>(op)) {
+      if (fusedOps.contains(&op)) return success();
+      return binary(bin);
+    }
     if (auto reduction = dyn_cast<wk::ReduceOp>(op)) return reduce(reduction);
     if (auto reduction = dyn_cast<wk::ReduceRegionOp>(op)) return regionReduction(reduction);
     if (auto prefix = dyn_cast<wk::ScanOp>(op)) return scan(prefix);

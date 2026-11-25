@@ -14,7 +14,8 @@ using namespace mlir;
 namespace wk = weft::kernel;
 
 std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
-    OpBuilder &b, Operation &op, const X86Target &target, ValueRange inputs, ValueRange masks) {
+    OpBuilder &b, Operation &op, const X86Target &target, ValueRange inputs, ValueRange masks,
+    Value initAcc, Value initAccMask) {
   if (!isa<wk::OuterContractOp>(op) || !wk::logicalElement(op.getResult(0).getType()).isF32()) return {};
   auto left = op.getOperand(0).getType(), right = op.getOperand(1).getType();
   auto la = wk::logicalAxes(left), ra = wk::logicalAxes(right);
@@ -44,8 +45,38 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
   auto index = [&](int64_t v) { return arith::ConstantIndexOp::create(b, loc, v).getResult(); };
   auto zero = [&](Type t) { return arith::ConstantOp::create(b, loc, t, b.getZeroAttr(t)).getResult(); };
   Value start = index(0);
-  auto snapshot = [&](Value v) {
+  auto snapshot = [&](Value v, bool widenToF32 = false) {
     auto type = cast<VectorType>(v.getType());
+    bool doWiden = widenToF32 && !type.getElementType().isF32() &&
+                   type.getNumElements() >= lanes &&
+                   type.getNumElements() % lanes == 0;
+    auto emitStore = [&](Value z0) {
+      if (!doWiden) {
+        Value buffer = memref::AllocOp::create(
+            b, loc, MemRefType::get({type.getNumElements()}, type.getElementType()));
+        vector::StoreOp::create(b, loc, v, buffer, z0);
+        return buffer;
+      }
+      Value rawBuf = memref::AllocOp::create(
+          b, loc, MemRefType::get({type.getNumElements()}, type.getElementType()));
+      vector::StoreOp::create(b, loc, v, rawBuf, z0);
+      Value f32Buf = memref::AllocOp::create(
+          b, loc, MemRefType::get({type.getNumElements()}, b.getF32Type()));
+      auto rawChunkTy = VectorType::get({lanes}, type.getElementType());
+      auto f32ChunkTy = VectorType::get({lanes}, b.getF32Type());
+      auto wLoop = scf::ForOp::create(
+          b, loc, z0, arith::ConstantIndexOp::create(b, loc, type.getNumElements()),
+          arith::ConstantIndexOp::create(b, loc, lanes));
+      {
+        OpBuilder::InsertionGuard wg(b);
+        b.setInsertionPointToStart(wLoop.getBody());
+        Value iv = wLoop.getInductionVar();
+        Value chunk = vector::LoadOp::create(b, loc, rawChunkTy, rawBuf, iv);
+        Value wide = arith::ExtFOp::create(b, loc, f32ChunkTy, chunk);
+        vector::StoreOp::create(b, loc, wide, f32Buf, iv);
+      }
+      return f32Buf;
+    };
     OpBuilder::InsertionGuard sg(b);
     if (Block *defBb = v.getParentBlock();
         defBb && defBb != op.getBlock() &&
@@ -54,16 +85,10 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
         b.setInsertionPointAfter(defOp);
       else
         b.setInsertionPointToStart(defBb);
-      Value z0 = arith::ConstantIndexOp::create(b, loc, 0);
-      Value buffer = memref::AllocOp::create(
-          b, loc, MemRefType::get({type.getNumElements()}, type.getElementType()));
-      vector::StoreOp::create(b, loc, v, buffer, z0);
-      return buffer;
+      return emitStore(arith::ConstantIndexOp::create(b, loc, 0));
     }
     // The existing private-storage pass assigns and reuses bounded stack slots.
-    Value buffer = memref::AllocOp::create(b, loc, MemRefType::get({type.getNumElements()}, type.getElementType()));
-    vector::StoreOp::create(b, loc, v, buffer, start);
-    return buffer;
+    return emitStore(start);
   };
   auto maskSnapshot = [&](Value mask) -> Value {
     if (matchPattern(mask, m_One())) return {};
@@ -159,7 +184,7 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
           }
         }
       };
-      if (depth * cols <= 2048) {
+      if (depth <= lanes) {
         for (int64_t kb0 = 0; kb0 < depth; kb0 += lanes)
           emitTransposeBlock(index(kb0));
       } else {
@@ -201,15 +226,24 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
     }
     return dstBuf;
   };
-  Value a = snapshot(inputs[0]), weights = transposeRightSnapshot(inputs[1]);
+  Value a = snapshot(inputs[0], /*widenToF32=*/true), weights = transposeRightSnapshot(inputs[1]);
   auto rowType = VectorType::get({cols}, b.getF32Type());
   auto maskType = rowType.clone(b.getI1Type());
   Value noValues = zero(rowType), noLanes = zero(maskType);
   Value allLanes = arith::ConstantOp::create(b, loc, maskType, DenseElementsAttr::get(maskType, true));
+  auto extractInitRow = [&](int64_t row) -> Value {
+    if (!initAcc) return noValues;
+    SmallVector<int64_t> idx(cols);
+    std::iota(idx.begin(), idx.end(), row * cols);
+    return vector::ShuffleOp::create(b, loc, initAcc, initAcc, idx);
+  };
   auto accumulate = [&](int64_t first, int64_t count, Value av, Value bv) {
     bool masked = av || bv;
     int64_t kUnroll = (!masked && depth % 4 == 0) ? 4 : 1;
-    SmallVector<Value> initial(count, noValues);
+    SmallVector<Value> initial;
+    initial.reserve(masked ? count * 2 : count);
+    for (int64_t m = 0; m < count; ++m)
+      initial.push_back(masked ? noValues : extractInitRow(first + m));
     if (masked) initial.append(count, noLanes);
     auto loop = scf::ForOp::create(b, loc, start, index(depth), index(kUnroll), initial);
     OpBuilder::InsertionGuard guard(b);
@@ -291,7 +325,12 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
     }
     complete = complete ? b.createOrFold<arith::AndIOp>(loc, complete, all) : all;
   }
-  if (!complete) return multiply({}, {});
+  if (!complete) {
+    auto res = multiply({}, {});
+    if (initAcc && initAccMask)
+      res.second = arith::AndIOp::create(b, loc, res.second, initAccMask);
+    return res;
+  }
   // Check each input once. Interior tiles need just the FP32 accumulators;
   // mixed tiles retain pairwise masking, including nonfinite inactive lanes.
   // Write both branches into bounded stack storage so the scf.if merge does
@@ -309,11 +348,16 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
     for (int64_t m = 0; m < count; ++m)
       vector::StoreOp::create(b, loc, loop.getResult(m), outBuf, index((first + m) * cols));
   }
-  Value allTrueFull = arith::ConstantOp::create(
-      b, loc, fullMaskShape, DenseElementsAttr::get(fullMaskShape, true));
+  Value allTrueFull = initAccMask
+                          ? initAccMask
+                          : arith::ConstantOp::create(
+                                b, loc, fullMaskShape,
+                                DenseElementsAttr::get(fullMaskShape, true))
+                                .getResult();
   scf::YieldOp::create(b, loc, ValueRange{allTrueFull});
   b.setInsertionPointToStart(choice.elseBlock());
   Value av = maskSnapshot(masks[0]), bv = transposeMaskSnapshot(masks[1]);
+  Value initBuf = initAcc ? snapshot(initAcc) : Value{};
   auto rLoop = scf::ForOp::create(b, loc, start, index(rows), index(1));
   {
     OpBuilder::InsertionGuard rg(b);
@@ -348,12 +392,18 @@ std::optional<std::pair<Value, Value>> weft::x86::emitDenseOuterProduct(
       scf::YieldOp::create(b, loc, ValueRange{nextSum, nextValid});
     }
     Value rBaseC = arith::MulIOp::create(b, loc, rIv, index(cols));
-    vector::StoreOp::create(b, loc, kLoop.getResult(0), outBuf, rBaseC);
+    Value finalRow = kLoop.getResult(0);
+    if (initBuf) {
+      Value prevRow = vector::LoadOp::create(b, loc, rowType, initBuf, rBaseC);
+      finalRow = arith::AddFOp::create(b, loc, prevRow, finalRow);
+    }
+    vector::StoreOp::create(b, loc, finalRow, outBuf, rBaseC);
     Value validBytes = arith::ExtUIOp::create(b, loc, rowType.clone(b.getI8Type()), kLoop.getResult(1));
     vector::StoreOp::create(b, loc, validBytes, maskBuf, rBaseC);
   }
   Value tailMaskBytes = vector::LoadOp::create(b, loc, shape.clone(b.getI8Type()), maskBuf, start);
   Value tailMask = arith::TruncIOp::create(b, loc, fullMaskShape, tailMaskBytes);
+  if (initAccMask) tailMask = arith::AndIOp::create(b, loc, tailMask, initAccMask);
   scf::YieldOp::create(b, loc, ValueRange{tailMask});
   b.setInsertionPointAfter(choice);
   Value outVals = vector::LoadOp::create(b, loc, shape, outBuf, start);
