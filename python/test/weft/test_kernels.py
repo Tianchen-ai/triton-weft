@@ -103,6 +103,18 @@ def test_brgemm_instance_keeps_float_argument_on_first_call(tmp_path):
         np.testing.assert_array_equal(output, size * scale + 1.0)
 
 
+@pytest.mark.skipif(platform.machine() != "x86_64", reason="exercises x86 contraction operands")
+def test_reshaped_contraction_snapshot_reads_strided_inputs():
+    from triton.kernels.weft.dense.contraction import renamed_projection
+
+    rng = np.random.default_rng(29)
+    left = rng.integers(-8, 9, (32, 258)).astype(np.float32)[:, 1::2]
+    right = rng.integers(-8, 9, (65, 129)).astype(np.float32)[::2]
+    output = np.full((32, 33), np.nan, dtype=np.float32)
+    renamed_projection[(1,)](left, right, output, num_cpu_threads=1)
+    np.testing.assert_array_equal(output, left @ right.T)
+
+
 @pytest.mark.parametrize("dtype", ["i8", "bf16"])
 @pytest.mark.skipif(platform.machine() != "x86_64", reason="The tested matrix implementation uses Intel AMX")
 def test_aligned_matrix_complete_output(dtype):

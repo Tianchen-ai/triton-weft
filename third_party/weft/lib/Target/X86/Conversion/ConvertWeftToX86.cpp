@@ -4939,6 +4939,16 @@ private:
     auto inputAxes = axes(op.getInput().getType());
     auto permutation = weft::analysis::axisPermutation(inputAxes, op.getOrder());
     if (!permutation) return op.emitError("x86 reshape requires a complete axis permutation");
+    Operation *next = op->getNextNode();
+    if (llvm::equal(inputAxes, op.getOrder()) && !packedType(op.getInput().getType()) &&
+        !directContractionViews.contains(op.getInput()) && isa<MemRefType>(mapped(op.getInput()).getType()) &&
+        op.getResult().hasOneUse() &&
+        next == *op.getResult().getUsers().begin() && isa<wk::ContractOp, wk::OuterContractOp>(next)) {
+      // An adjacent contraction reads the snapshot before any intervening
+      // write. The reshape keeps both its data and validity in linear order.
+      bindArray(op.getResult(), {mapped(op.getInput()), valid(op.getInput(), loc), outputShape}, loc);
+      return success();
+    }
     auto output = weft::x86::allocateArray(b, loc, scalar(op.getResult().getType()), outputShape);
     if (failed(weft::x86::forArray(b, loc, outputShape, [&](Value linear, ValueRange) {
       SmallVector<Value> coordinates(inputShape.size()); Value remaining = linear;
