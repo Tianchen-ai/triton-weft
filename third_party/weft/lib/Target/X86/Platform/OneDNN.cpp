@@ -104,7 +104,8 @@ OneDNNBrgemmInfo runOneDNNProbe() {
   const char *envRoot = std::getenv("WEFT_ONEDNN_ROOT");
   std::string root = (envRoot && *envRoot) ? std::string(envRoot) : std::string(WEFT_ONEDNN_ROOT_DIR);
   if (root.empty()) {
-    root = "/opt/onednn-3.13.4";
+    info.reason = "set WEFT_ONEDNN_ROOT to a oneDNN ukernel installation";
+    return info;
   }
   info.root = root;
   llvm::SmallString<256> headerPath(root);
@@ -123,7 +124,7 @@ OneDNNBrgemmInfo runOneDNNProbe() {
       break;
     }
   }
-  if (libPath.empty() && std::strlen(WEFT_ONEDNN_LIBRARY_PATH) > 0 &&
+  if (libPath.empty() && !(envRoot && *envRoot) && std::strlen(WEFT_ONEDNN_LIBRARY_PATH) > 0 &&
       llvm::sys::fs::exists(WEFT_ONEDNN_LIBRARY_PATH)) {
     libPath = WEFT_ONEDNN_LIBRARY_PATH;
   }

@@ -3,6 +3,8 @@
 产品构建 `triton` 发行包，包含语言、原生编译器、CPU 运行时、内核库与 C/C++ SDK。
 Weft 1.0.0 扩展自 Triton 3.8.0，发行包版本为 `3.8.0+weft.1.0.0`。
 
+x86 上需要 BRGeMM 时，在配置 Weft 前将 `WEFT_ONEDNN_ROOT` 指向启用了 experimental ukernels 和 SEQ CPU runtime 的 oneDNN 3.13+ 安装目录。也可向 CMake 传 `-DWEFT_ONEDNN_ROOT=<prefix>`。头文件位于 `include`，共享开发库位于 `lib` 或 `lib64`。部署目录变化时可在运行前用同一环境变量指定新位置。
+
 ## 安装正式发布的 wheel
 
 [Weft 1.0 下载页](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0)

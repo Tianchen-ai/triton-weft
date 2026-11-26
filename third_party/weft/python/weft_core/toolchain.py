@@ -197,10 +197,14 @@ class Toolchain:
                 ldflags = tuple(flag for flag in ldflags if flag != redundant)
                 if metadata["kernel_abi"].get("uses_onednn_brgemm"):
                     onednn_root = (os.environ.get("WEFT_ONEDNN_ROOT")
-                                   or metadata["kernel_abi"].get("onednn_root")
-                                   or "/opt/onednn-3.13.4")
+                                   or metadata["kernel_abi"].get("onednn_root"))
+                    if not onednn_root:
+                        raise ValueError("oneDNN kernel requires WEFT_ONEDNN_ROOT or an ABI installation prefix")
                     onednn_inc = Path(onednn_root) / "include"
-                    onednn_lib = Path(onednn_root) / "lib"
+                    libdirs = [Path(onednn_root) / subdir for subdir in ("lib", "lib64")]
+                    onednn_lib = next((path for path in libdirs if (path / "libdnnl.so").is_file()), None)
+                    if onednn_lib is None:
+                        raise FileNotFoundError(f"libdnnl.so missing under {onednn_root}/{{lib,lib64}}")
                     cflags = (*cflags, f"-I{onednn_inc}")
                     ldflags = (*ldflags, f"-L{onednn_lib}", "-ldnnl", f"-Wl,-rpath,{onednn_lib}")
             command += [*cflags, str(kernel), str(launcher), "-lm", *ldflags, "-o", str(output)]

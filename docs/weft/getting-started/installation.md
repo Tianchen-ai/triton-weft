@@ -4,6 +4,8 @@ The product builds the `triton` distribution: language, native compiler,
 CPU runtime, kernel library and C/C++ SDK. Weft 1.0.0 extends Triton 3.8.0;
 its distribution version is `3.8.0+weft.1.0.0`.
 
+For optional x86 BRGeMM, set `WEFT_ONEDNN_ROOT` to a oneDNN 3.13+ installation built with experimental ukernels and the SEQ CPU runtime before configuring Weft. CMake also accepts `-DWEFT_ONEDNN_ROOT=<prefix>`. The installation provides the ukernel headers under `include` and the shared development library under `lib` or `lib64`. Set the same environment variable at run time if the installation moves.
+
 ## Install a released wheel
 
 [Weft 1.0 downloads](https://github.com/Tianchen-ai/triton-weft/releases/tag/v1.0.0)
