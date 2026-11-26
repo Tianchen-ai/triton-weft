@@ -186,6 +186,100 @@ void emitBrgemmHelperCall(
                  i32c(b, loc, dtA), i32c(b, loc, dtB), i32c(b, loc, dtC), i32c(b, loc, addC)});
 }
 
+// A row along K already contains complete VNNI words. Transpose a square
+// of such words in registers before writing consecutive columns for BRGEMM.
+void packTransposedWords(OpBuilder &b, Location loc,
+                         const DirectContractionView &src, Value nStride,
+                         Value dest, Type element, int64_t pack, int64_t lanes,
+                         Value kBlocks, Value nCols) {
+  OpBuilder::InsertionGuard guard(b);
+  Value zero = idx(b, loc, 0), step = idx(b, loc, lanes),
+        group = idx(b, loc, pack);
+  auto kg = scf::ForOp::create(b, loc, zero, kBlocks, step);
+  b.setInsertionPointToStart(kg.getBody());
+  Value k = arith::MulIOp::create(b, loc, kg.getInductionVar(), group);
+  auto ng = scf::ForOp::create(b, loc, zero, nCols, step);
+  b.setInsertionPointToStart(ng.getBody());
+  auto words = VectorType::get({lanes}, b.getI32Type());
+  auto elements = VectorType::get({lanes * pack}, element);
+  SmallVector<Value> rows;
+  for (int64_t row = 0; row < lanes; ++row) {
+    Value n =
+        arith::AddIOp::create(b, loc, ng.getInductionVar(), idx(b, loc, row));
+    Value offset = arith::AddIOp::create(b, loc, src.offset, k);
+    offset = arith::AddIOp::create(b, loc, offset,
+                                   arith::MulIOp::create(b, loc, n, nStride));
+    Value p = LLVM::GEPOp::create(b, loc, src.base.getType(), element, src.base,
+                                  ValueRange{toI64(b, loc, offset)});
+    rows.push_back(LLVM::LoadOp::create(b, loc, words, p, 1));
+  }
+  for (int64_t width = 1; width < lanes; width *= 2) {
+    SmallVector<int64_t> low, high;
+    for (int64_t lane = 0; lane < lanes; ++lane) {
+      int64_t block = lane / (2 * width) * (2 * width);
+      int64_t input = (lane & width) ? lanes : 0;
+      low.push_back(input + block + lane % width);
+      high.push_back(low.back() + width);
+    }
+    for (int64_t i = 0; i < lanes; i += 2 * width)
+      for (int64_t j = i; j < i + width; ++j) {
+        Value a = rows[j], c = rows[j + width];
+        rows[j] = vector::ShuffleOp::create(b, loc, a, c, low);
+        rows[j + width] = vector::ShuffleOp::create(b, loc, a, c, high);
+      }
+  }
+  for (int64_t j = 0; j < lanes; ++j) {
+    Value row =
+        arith::AddIOp::create(b, loc, kg.getInductionVar(), idx(b, loc, j));
+    Value start =
+        arith::AddIOp::create(b, loc, arith::MulIOp::create(b, loc, row, nCols),
+                              ng.getInductionVar());
+    Value offset = arith::MulIOp::create(b, loc, start, group);
+    Value payload = vector::BitCastOp::create(b, loc, elements, rows[j]);
+    vector::StoreOp::create(b, loc, payload, dest, ValueRange{offset});
+  }
+}
+
+// Interleave rows of an ordinary [K,N] view into packed words along N.
+void packContiguousRows(OpBuilder &b, Location loc,
+                        const DirectContractionView &src, Value kStride,
+                        Value dest, Type element, int64_t pack, int64_t lanes,
+                        Value kBlocks, Value nCols) {
+  OpBuilder::InsertionGuard guard(b);
+  Value zero = idx(b, loc, 0), group = idx(b, loc, pack);
+  auto kg = scf::ForOp::create(b, loc, zero, kBlocks, idx(b, loc, 1));
+  b.setInsertionPointToStart(kg.getBody());
+  Value k = arith::MulIOp::create(b, loc, kg.getInductionVar(), group);
+  auto ng = scf::ForOp::create(b, loc, zero, nCols, idx(b, loc, lanes));
+  b.setInsertionPointToStart(ng.getBody());
+  auto packet = VectorType::get({lanes}, element);
+  Value n = ng.getInductionVar();
+  SmallVector<Value> parts;
+  for (int64_t j = 0; j < pack; ++j) {
+    Value row = arith::AddIOp::create(b, loc, k, idx(b, loc, j));
+    Value off = arith::AddIOp::create(b, loc, src.offset, n);
+    off = arith::AddIOp::create(b, loc, off,
+                                arith::MulIOp::create(b, loc, row, kStride));
+    Value ptr = LLVM::GEPOp::create(b, loc, src.base.getType(), element,
+                                    src.base, ValueRange{toI64(b, loc, off)});
+    parts.push_back(LLVM::LoadOp::create(b, loc, packet, ptr, 1));
+  }
+  for (int64_t width = 1; width < pack; width *= 2) {
+    SmallVector<int64_t> interleave;
+    for (int64_t col = 0; col < lanes; ++col)
+      for (int64_t side : {0, 1})
+        for (int64_t j = 0; j < width; ++j)
+          interleave.push_back((col + side * lanes) * width + j);
+    for (int64_t i = 0; i < pack; i += 2 * width)
+      parts[i] = vector::ShuffleOp::create(b, loc, parts[i], parts[i + width],
+                                           interleave);
+  }
+  Value row = arith::MulIOp::create(b, loc, kg.getInductionVar(), nCols);
+  Value start = arith::MulIOp::create(
+      b, loc, arith::AddIOp::create(b, loc, row, n), group);
+  vector::StoreOp::create(b, loc, parts.front(), dest, ValueRange{start});
+}
+
 Value loadOperandElement(OpBuilder &b, Location loc, const BrgemmOperand &op,
                          ValueRange coords) {
   if (op.view) {
@@ -456,41 +550,84 @@ LogicalResult materializeOneDNNBrgemm(
           b, loc, MemRefType::get({ShapedType::kDynamic}, targetBType), countB);
       allocB->setAttr("alignment", b.getI64IntegerAttr(64));
 
-      Value zeroElem = arith::ConstantOp::create(b, loc, targetBType, b.getZeroAttr(targetBType));
-      auto zLoop = scf::ForOp::create(b, loc, zeroIdx, countB, oneIdx);
-      {
-        OpBuilder::InsertionGuard zg(b);
-        b.setInsertionPointToStart(zLoop.getBody());
-        memref::StoreOp::create(b, loc, zeroElem, allocB, zLoop.getInductionVar());
+      OpBuilder::InsertionGuard packGuard(b);
+      int64_t lanes = std::min<int64_t>(16, target.vectorBits / 32);
+      if (rhs.view && !geom.vectorRight && !geom.packed3D && lanes >= 4 &&
+          llvm::isPowerOf2_64(lanes)) {
+        const auto &v = *rhs.view;
+        Value sk = v.strides[geom.rightReductionFirst ? 0 : 1];
+        Value sn = v.strides[geom.rightReductionFirst ? 1 : 0];
+        auto eq = [&](Value lhs, Value rhs) -> Value {
+          return arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, lhs,
+                                       rhs);
+        };
+        Value full =
+            eq(arith::RemUIOp::create(b, loc, kBlocks, idx(b, loc, lanes)),
+               zeroIdx);
+        full = arith::AndIOp::create(b, loc, full, eq(N, ldb));
+        full = arith::AndIOp::create(b, loc, full, eq(sk, oneIdx));
+        auto tiled = scf::IfOp::create(b, loc, TypeRange{}, full, true);
+        b.setInsertionPointToStart(tiled.thenBlock());
+        packTransposedWords(b, loc, v, sn, allocB, targetBType, packKBlock,
+                            lanes, kBlocks, N);
+        b.setInsertionPointToStart(tiled.elseBlock());
+        Value rowMajor =
+            arith::AndIOp::create(b, loc, eq(sn, oneIdx), eq(N, ldb));
+        auto rows = scf::IfOp::create(b, loc, TypeRange{}, rowMajor, true);
+        b.setInsertionPointToStart(rows.thenBlock());
+        packContiguousRows(b, loc, v, sk, allocB, targetBType, packKBlock,
+                           lanes, kBlocks, N);
+        b.setInsertionPointToStart(rows.elseBlock());
       }
-      auto kLoop = scf::ForOp::create(b, loc, zeroIdx, K, oneIdx);
+
+      // Pack one complete VNNI word per column. Consecutive stores can be
+      // interleaved from K rows or copied as words when K is contiguous.
+      Value zeroElem = arith::ConstantOp::create(b, loc, targetBType,
+                                                 b.getZeroAttr(targetBType));
+      auto koLoop = scf::ForOp::create(b, loc, zeroIdx, kBlocks, oneIdx);
       {
         OpBuilder::InsertionGuard kg(b);
-        b.setInsertionPointToStart(kLoop.getBody());
-        Value k = kLoop.getInductionVar();
-        Value ko = arith::DivUIOp::create(b, loc, k, kbVal);
-        Value ki = arith::RemUIOp::create(b, loc, k, kbVal);
+        b.setInsertionPointToStart(koLoop.getBody());
+        Value ko = koLoop.getInductionVar();
+        Value kBase = arith::MulIOp::create(b, loc, ko, kbVal);
+        Value row = arith::MulIOp::create(b, loc, ko, ldb);
         auto nLoop = scf::ForOp::create(b, loc, zeroIdx, N, oneIdx);
-        b.setInsertionPointToStart(nLoop.getBody());
-        Value n = nLoop.getInductionVar();
-        SmallVector<Value> coords;
-        if (geom.vectorRight) coords = {k};
-        else if (geom.packed3D) {
-          Value srcKb = idx(b, loc, geom.kBlock);
-          coords = {arith::DivUIOp::create(b, loc, k, srcKb), n,
-                    arith::RemUIOp::create(b, loc, k, srcKb)};
-        } else if (geom.rightReductionFirst) coords = {k, n};
-        else coords = {n, k};
-        Value val = loadOperandElement(b, loc, rhs, coords);
-        val = widenElement(b, loc, val, rhs.logicalElement, targetBType);
-        Value dst = arith::AddIOp::create(
-            b, loc,
-            arith::MulIOp::create(
-                b, loc,
-                arith::AddIOp::create(b, loc, arith::MulIOp::create(b, loc, ko, ldb), n),
-                kbVal),
-            ki);
-        memref::StoreOp::create(b, loc, val, allocB, dst);
+        {
+          OpBuilder::InsertionGuard ng(b);
+          b.setInsertionPointToStart(nLoop.getBody());
+          Value n = nLoop.getInductionVar();
+          Value dst = arith::MulIOp::create(
+              b, loc, arith::AddIOp::create(b, loc, row, n), kbVal);
+          for (int64_t lane = 0; lane < packKBlock; ++lane) {
+            Value ki = idx(b, loc, lane);
+            Value k = arith::AddIOp::create(b, loc, kBase, ki);
+            SmallVector<Value> coords;
+            if (geom.vectorRight)
+              coords = {k};
+            else if (geom.packed3D) {
+              Value srcKb = idx(b, loc, geom.kBlock);
+              coords = {arith::DivUIOp::create(b, loc, k, srcKb), n,
+                        arith::RemUIOp::create(b, loc, k, srcKb)};
+            } else if (geom.rightReductionFirst)
+              coords = {k, n};
+            else
+              coords = {n, k};
+            Value val = loadOperandElement(b, loc, rhs, coords);
+            val = widenElement(b, loc, val, rhs.logicalElement, targetBType);
+            Value addr = arith::AddIOp::create(b, loc, dst, ki);
+            memref::StoreOp::create(b, loc, val, allocB, addr);
+          }
+        }
+        // Only the padded columns have no source. Full-width panels need no
+        // memset before packing.
+        Value padBegin = arith::MulIOp::create(
+            b, loc, arith::AddIOp::create(b, loc, row, N), kbVal);
+        Value padEnd = arith::MulIOp::create(
+            b, loc, arith::AddIOp::create(b, loc, row, ldb), kbVal);
+        auto pad = scf::ForOp::create(b, loc, padBegin, padEnd, oneIdx);
+        b.setInsertionPointToStart(pad.getBody());
+        memref::StoreOp::create(b, loc, zeroElem, allocB,
+                                pad.getInductionVar());
       }
       return {allocB, ldb};
     };
@@ -577,6 +714,16 @@ LogicalResult materializeOneDNNBrgemm(
         auto [localA, localLda] = materializeLocalA();
         dispatchWithA(false, localA, zeroIdx, localLda);
       }
+    } else if (!lhs.view && !geom.leftReductionFirst &&
+               physicalScalar(b.getContext(), lhs.logicalElement) ==
+                   zeroCopyAType &&
+               cast<MemRefType>(lhs.array.data.getType())
+                       .getElementType()
+                       .getIntOrFloatBitWidth() ==
+                   targetAType.getIntOrFloatBitWidth()) {
+      // Complete row-major array storage is already the BRGEMM A layout.
+      // BF16 values and their physical i16 payload use the same bits.
+      dispatchWithA(false, lhs.array.data, zeroIdx, K);
     } else {
       auto [localA, localLda] = materializeLocalA();
       dispatchWithA(false, localA, zeroIdx, localLda);

@@ -40,6 +40,28 @@ def test_matrix_complete_output(shape, dtype):
     assert "weft_kernel" in compiled.asm["weftir"]
 
 
+@pytest.mark.skipif(platform.machine() != "x86_64", reason="requires the x86 oneDNN BRGEMM backend")
+def test_brgemm_packs_adjacent_signed_bytes_in_k_order():
+    from triton import cpu
+    from triton.kernels.weft.dense.x86 import integer_matmul
+    from weft_core.compiler import x86_target_capabilities
+
+    target = cpu.target()
+    caps = x86_target_capabilities(target.march, target.abi, target.vlen_bits)
+    if not caps["onednn_brgemm"]["s8"]:
+        pytest.skip("oneDNN signed-byte BRGEMM is unavailable")
+    m, n, k = 32, 64, 128
+    rng = np.random.default_rng(103)
+    left = rng.integers(-128, 128, (m, k), dtype=np.int8)
+    right = rng.integers(-128, 128, (n, k), dtype=np.int8)
+    output = np.empty((m, n), dtype=np.int32)
+    kernel = integer_matmul.full_reduction[(1,)](
+        left, right, output, M=m, N=n, K=k, BM=m, BN=n,
+        contraction_backend="onednn-brgemm", num_cpu_threads=1)
+    assert "__weft_onednn_brgemm_execute" in kernel.asm["llir"]
+    np.testing.assert_array_equal(output, left.astype(np.int32) @ right.astype(np.int32).T)
+
+
 @pytest.mark.parametrize("dtype", ["i8", "bf16"])
 @pytest.mark.skipif(platform.machine() != "x86_64", reason="The tested matrix implementation uses Intel AMX")
 def test_aligned_matrix_complete_output(dtype):
