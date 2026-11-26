@@ -62,6 +62,47 @@ def test_brgemm_packs_adjacent_signed_bytes_in_k_order():
     np.testing.assert_array_equal(output, left.astype(np.int32) @ right.astype(np.int32).T)
 
 
+@pytest.mark.skipif(platform.machine() != "x86_64", reason="requires the x86 oneDNN BRGEMM backend")
+def test_brgemm_instance_keeps_float_argument_on_first_call(tmp_path):
+    import ctypes
+    import shutil
+    from triton import cpu
+    from triton.kernels.weft.dense.contraction import dense_projection_bias
+    from weft_core.compiler import x86_target_capabilities
+
+    target = cpu.target()
+    if not x86_target_capabilities(target.march, target.abi, target.vlen_bits)["onednn_brgemm"]["f32"]:
+        pytest.skip("oneDNN FP32 BRGEMM is unavailable")
+    size = 32
+    x = np.ones((size, size), dtype=np.float32)
+    bias = np.ones(size, dtype=np.float32)
+    output = np.empty_like(x)
+    scale = 0.5
+    kernel = dense_projection_bias[(1,)](x, x, bias, output, scale, contraction_backend="onednn-brgemm",
+                                         num_cpu_threads=1)
+    assert "__weft_onednn_brgemm_execute" in kernel.asm["llir"]
+    directory = tmp_path / "projection"
+    kernel.export(directory)
+    arrays = (x, x, bias, output)
+    strides = [stride // a.itemsize for a in arrays for stride in a.strides]
+    abi = kernel.metadata.single_instance_abi
+    extents = [size] * len(abi["shape_parameters"])
+    geometry = extents + strides
+    # Each separately loaded image resolves its own dynamic TLS on the first call.
+    images = []
+    for i in range(32):
+        image = directory / f"projection_{i}.so"
+        shutil.copyfile(directory / "kernel.so", image)
+        library = ctypes.CDLL(str(image))
+        images.append(library)
+        instance = getattr(library, abi["symbol"])
+        instance.argtypes = [ctypes.c_void_p] * len(arrays) + [ctypes.c_float] + [ctypes.c_size_t] * len(geometry)
+        instance.restype = None
+        output.fill(np.nan)
+        instance(*(a.ctypes.data for a in arrays), scale, *geometry)
+        np.testing.assert_array_equal(output, size * scale + 1.0)
+
+
 @pytest.mark.parametrize("dtype", ["i8", "bf16"])
 @pytest.mark.skipif(platform.machine() != "x86_64", reason="The tested matrix implementation uses Intel AMX")
 def test_aligned_matrix_complete_output(dtype):

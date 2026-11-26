@@ -60,7 +60,10 @@ void weft_kernel_release_hw_context(void) {
   __weft_active_hw_brg = NULL;
 }
 
-static inline void __weft_reset_tls_status(void) {
+/* Keep scalar kernel arguments live across an ordinary C call. On the
+ * first access to a dlopened task's TLS, the resolver can use high vector
+ * registers that an inlined TLS lookup would leave holding arguments. */
+static __attribute__((noinline)) void __weft_reset_tls_status(void) {
   __weft_tls_status = 0;
   __weft_tls_error[0] = 0;
 }
