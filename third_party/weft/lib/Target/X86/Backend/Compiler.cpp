@@ -1,10 +1,12 @@
-#include "Weft/Target/X86/X86Compiler.h"
-#include "Weft/Dialect/Kernel/Transforms/SourceSpecialization.h"
 #include "Conversion/Passes.h"
 #include "Transforms/Contraction/AMXContractions.h"
+#include "Weft/Dialect/Kernel/Transforms/SourceSpecialization.h"
+#include "Weft/Target/X86/X86Compiler.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/Passes.h"
 #include "mlir/IR/Builders.h"
@@ -200,6 +202,8 @@ FailureOr<OwningOpRef<ModuleOp>> weft::lowerX86Module(ModuleOp source,
   module->walk([&](memref::AllocOp) { arrays = true; });
   if (arrays) {
     PassManager ownership(source.getContext());
+    ownership.addNestedPass<func::FuncOp>(
+        bufferization::createBufferLoopHoistingPass());
     bufferization::BufferDeallocationPipelineOptions options;
     options.privateFunctionDynamicOwnership = true;
     bufferization::buildBufferDeallocationPipeline(ownership, options);

@@ -4537,17 +4537,61 @@ private:
   llvm::DenseMap<Operation *, Value> brgemmAccumulators, privateArrayScales;
   llvm::SmallPtrSet<Operation *, 4> brgemmAdds;
   DenseMap<Value, std::pair<int64_t, Value>> bfloatGuards;
-  FailureOr<SmallVector<Value>> scalarOperation(Operation &op, ValueRange operands, ValueRange validity) {
+  llvm::SmallPtrSet<Operation *, 16> fusedPointwise;
+  bool packetPointwise(Operation &op) {
+    if (!isa<wk::UnaryOp, wk::BinaryOp, wk::SelectOp, wk::CompareOp,
+             wk::CastOp>(op) ||
+        op.getNumResults() != 1 || !arrayValue(op.getResult(0).getType()))
+      return false;
+    auto result = op.getResult(0);
+    auto dims = shape(result.getType()), ids = axes(result.getType());
+    if (dims.size() != 2 ||
+        !llvm::all_of(dims, [](int64_t n) { return n > 0; }) ||
+        !element(result.getType()).isIntOrFloat())
+      return false;
+    for (Value v : op.getOperands()) {
+      if (!element(v.getType()).isIntOrFloat() || packedType(v.getType()))
+        return false;
+      auto inputAxes = axes(v.getType());
+      // A varying, non-minor input axis needs strided loads, not a splat.
+      if (llvm::is_contained(inputAxes, ids.back()) &&
+          inputAxes.back() != ids.back())
+        return false;
+      for (auto [id, n] : llvm::zip(inputAxes, shape(v.getType()))) {
+        auto it = llvm::find(ids, id);
+        if (it == ids.end() || dims[it - ids.begin()] != n)
+          return false;
+      }
+    }
+    return true;
+  }
+  FailureOr<SmallVector<Value>> scalarOperation(Operation &op,
+                                                ValueRange operands,
+                                                ValueRange validity,
+                                                int64_t lanes = 1) {
+    auto laneType = [&](Type t) -> Type {
+      if (lanes == 1)
+        return element(t);
+      return wk::ValueType::get(
+          b.getContext(), element(t), b.getDenseI64ArrayAttr({lanes}),
+          b.getDenseI64ArrayAttr({axes(op.getResult(0).getType()).back()}));
+    };
     auto outerValues = values; auto outerMasks = masks;
     auto restore = llvm::scope_exit([&] { values = std::move(outerValues); masks = std::move(outerMasks); });
     Block scratch;
     OperationState state(op.getLoc(), op.getName()); state.addAttributes(op.getAttrs());
     for (auto [i, operand] : llvm::enumerate(op.getOperands())) {
-      auto argument = scratch.addArgument(element(operand.getType()), op.getLoc());
+      auto argument =
+          scratch.addArgument(laneType(operand.getType()), op.getLoc());
       values.map(argument, operands[i]); masks[argument] = validity[i]; state.addOperands(argument);
     }
-    for (Type type : op.getResultTypes()) state.addTypes(element(type));
+    for (Type type : op.getResultTypes())
+      state.addTypes(laneType(type));
     auto clone = Operation::create(state); scratch.push_back(clone);
+    auto clearOrigins = llvm::scope_exit([&] {
+      for (Value result : clone->getResults())
+        valueOrigins.erase(result);
+    });
     if (failed(lower(*clone))) return failure();
     SmallVector<Value> result;
     for (Value value : clone->getResults()) { result.push_back(mapped(value)); result.push_back(valid(value, op.getLoc())); }
@@ -4557,6 +4601,25 @@ private:
     Location loc = op.getLoc();
     Value domain = op.getNumResults() ? op.getResult(0) : op.getOperand(3);
     auto extents = arrayExtents(domain, loc); auto ids = axes(domain.getType());
+    bool packets = packetPointwise(op);
+    if (packets && domain.hasOneUse() && !privateArrayScales.count(&op)) {
+      Operation *next = *domain.getUsers().begin();
+      if (next->getBlock() == op.getBlock() && packetPointwise(*next) &&
+          shape(next->getResult(0).getType()) == shape(domain.getType()) &&
+          axes(next->getResult(0).getType()) == ids) {
+        bool safe = true;
+        for (auto *mid = op.getNextNode(); mid != next;
+             mid = mid->getNextNode())
+          if (!mid || !isMemoryEffectFree(mid)) {
+            safe = false;
+            break;
+          }
+        if (safe) {
+          fusedPointwise.insert(&op);
+          return success();
+        }
+      }
+    }
     SmallVector<weft::x86::ArrayStorage> outputs;
     if (Value carry = privateArrayScales.lookup(&op)) {
       outputs.push_back({mapped(carry), valid(carry, loc), extents});
@@ -4565,10 +4628,139 @@ private:
         outputs.push_back(weft::x86::allocateArray(
             b, loc, scalar(result.getType()), extents));
     }
+    if (packets) {
+      DenseMap<Value, std::pair<Value, Value>> leaves;
+      unsigned bits = element(domain.getType()).getIntOrFloatBitWidth();
+      auto collect = [&](auto &self, Operation &node) -> void {
+        for (Value v : node.getOperands()) {
+          if (fusedPointwise.contains(v.getDefiningOp())) {
+            self(self, *v.getDefiningOp());
+            continue;
+          }
+          if (leaves.count(v))
+            continue;
+          auto addressable = [&](Value storage) -> Value {
+            auto vec = dyn_cast<VectorType>(storage.getType());
+            if (!vec)
+              return storage;
+            if (vec.getElementType().isInteger(1)) {
+              // Scalar memref elements are byte-addressed. Preserve one byte
+              // per predicate when packet stores meet scalar broadcast loads.
+              vec = vec.clone(b.getI8Type());
+              storage = arith::ExtUIOp::create(b, loc, vec, storage);
+            }
+            auto type =
+                MemRefType::get({vec.getNumElements()}, vec.getElementType());
+            auto *scope = b.getInsertionBlock()->getParentOp();
+            auto function = dyn_cast<func::FuncOp>(scope);
+            if (!function)
+              function = scope->getParentOfType<func::FuncOp>();
+            OpBuilder prologue(&function.getBody().front(),
+                               function.getBody().front().begin());
+            auto buf = memref::AllocaOp::create(prologue, loc, type);
+            vector::StoreOp::create(b, loc, storage, buf,
+                                    indexConstant(loc, 0));
+            return buf;
+          };
+          leaves[v] = {addressable(mapped(v)), addressable(valid(v, loc))};
+          bits = std::max(bits, element(v.getType()).getIntOrFloatBitWidth());
+        }
+      };
+      collect(collect, op);
+      auto compute = [&](Value linear, ValueRange coordinates,
+                         int64_t lanes) -> LogicalResult {
+        SmallVector<Value> first;
+        for (Value coordinate : coordinates)
+          first.push_back(lanes == 1
+                              ? coordinate
+                              : Value(vector::ExtractOp::create(
+                                    b, loc, coordinate, ArrayRef<int64_t>{0})));
+        auto emit = [&](auto &self,
+                        Operation &node) -> FailureOr<SmallVector<Value>> {
+          SmallVector<Value> data, masks;
+          for (Value v : node.getOperands()) {
+            if (fusedPointwise.contains(v.getDefiningOp())) {
+              auto nested = self(self, *v.getDefiningOp());
+              if (failed(nested))
+                return failure();
+              data.push_back((*nested)[0]);
+              masks.push_back((*nested)[1]);
+              continue;
+            }
+            auto inputAxes = axes(v.getType());
+            auto get = [&](Value storage) -> Value {
+              Value x = storage;
+              if (auto type = dyn_cast<MemRefType>(storage.getType())) {
+                Value index =
+                    inputAxes == ids
+                        ? linear
+                        : arrayOperandIndex(v, ids, first, loc, extents);
+                if (lanes > 1 && !inputAxes.empty() &&
+                    inputAxes.back() == ids.back())
+                  return vector::LoadOp::create(
+                      b, loc, VectorType::get({lanes}, type.getElementType()),
+                      storage, index);
+                x = memref::LoadOp::create(b, loc, storage, index);
+              }
+              if (lanes == 1)
+                return x;
+              return vector::BroadcastOp::create(
+                  b, loc, VectorType::get({lanes}, x.getType()), x);
+            };
+            auto [payload, validity] = leaves.lookup(v);
+            Value datum = get(payload);
+            if (element(v.getType()).isInteger(1) &&
+                getElementTypeOrSelf(datum.getType()).isInteger(8))
+              datum = arith::TruncIOp::create(
+                  b, loc,
+                  lanes == 1 ? Type(b.getI1Type())
+                             : Type(VectorType::get({lanes}, b.getI1Type())),
+                  datum);
+            data.push_back(datum);
+            Value m = get(validity);
+            if (getElementTypeOrSelf(m.getType()).isInteger(8))
+              m = arith::TruncIOp::create(
+                  b, loc,
+                  lanes == 1 ? Type(b.getI1Type())
+                             : Type(VectorType::get({lanes}, b.getI1Type())),
+                  m);
+            masks.push_back(m);
+          }
+          return scalarOperation(node, data, masks, lanes);
+        };
+        auto result = emit(emit, op);
+        if (failed(result))
+          return failure();
+        if (lanes == 1) {
+          memref::StoreOp::create(b, loc, (*result)[0], outputs[0].data,
+                                  linear);
+          storeArrayMask(loc, (*result)[1], outputs[0].valid, linear);
+        } else {
+          vector::StoreOp::create(b, loc, (*result)[0], outputs[0].data,
+                                  linear);
+          auto bytes = arith::ExtUIOp::create(
+              b, loc, VectorType::get({lanes}, b.getI8Type()), (*result)[1]);
+          vector::StoreOp::create(b, loc, bytes, outputs[0].valid, linear);
+        }
+        return success();
+      };
+      if (failed(weft::x86::forArrayPackets(
+              b, loc, extents, target.vectorBits / std::max(8u, bits),
+              compute)))
+        return failure();
+      bindArray(domain, outputs.front(), loc);
+      return success();
+    }
     if (failed(weft::x86::forArray(b, loc, extents, [&](Value linear, ValueRange coordinates) {
       SmallVector<Value> operands, validity;
       for (Value operand : op.getOperands()) {
-        Value index = arrayOperandIndex(operand, ids, coordinates, loc, extents);
+        auto dims = shape(operand.getType());
+        bool same = axes(operand.getType()) == ids &&
+                    dims == shape(domain.getType()) &&
+                    llvm::all_of(dims, [](int64_t dim) { return dim > 0; });
+        Value index =
+            same ? linear
+                 : arrayOperandIndex(operand, ids, coordinates, loc, extents);
         operands.push_back(arrayLane(loc, mapped(operand), index));
         validity.push_back(arrayMask(loc, valid(operand, loc), index));
       }
@@ -5503,7 +5695,9 @@ private:
       valueOrigins[result] = std::move(resultOrigins);
     }
     for (Value result : op.getResults()) {
-      if (!numeric(result.getType()) || masks.contains(result)) continue;
+      if (fusedPointwise.contains(&op) || !numeric(result.getType()) ||
+          masks.contains(result))
+        continue;
       Value mask = constant(op.getLoc(), physicalType(maskType(result.getType())), b.getBoolAttr(true));
       for (Value operand : op.getOperands()) {
         if (!numeric(operand.getType())) continue;

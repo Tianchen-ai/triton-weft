@@ -1,5 +1,5 @@
-#include "Weft/Target/X86/X86Compiler.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
+#include "Weft/Target/X86/X86Compiler.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -9,13 +9,14 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
-#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 
 using namespace mlir;
 namespace wk = weft::kernel;
@@ -46,6 +47,7 @@ void weft::registerX86Dialects(DialectRegistry &registry) {
                   scf::SCFDialect, cf::ControlFlowDialect, vector::VectorDialect,
                   math::MathDialect, LLVM::LLVMDialect, memref::MemRefDialect,
                   bufferization::BufferizationDialect, ub::UBDialect>();
+  memref::registerAllocationOpInterfaceExternalModels(registry);
   scf::registerBufferDeallocationOpInterfaceExternalModels(registry);
   cf::registerBufferDeallocationOpInterfaceExternalModels(registry);
   arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
