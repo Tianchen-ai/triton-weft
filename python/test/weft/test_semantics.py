@@ -560,7 +560,8 @@ def test_canonical_field_store_through_record_subview(tmp_path, row, offset):
 
 
 @pytest.mark.parametrize("allow", [False, True])
-def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow):
+@pytest.mark.parametrize("engine", ["auto", "onednn-brgemm-f32"])
+def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow, engine):
     import triton
     from triton.backends.weft.driver import WeftDriver
     from weft_core.compiler import x86_target_capabilities
@@ -595,7 +596,7 @@ def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow):
           %i="weft_kernel.cast"(%step):(index)->si64
           %factor="weft_kernel.cast"(%i):(si64)->f32
           %scaled="weft_kernel.binary"(%x,%factor) <{{kind="mul"}}>:({at},f32)->{at}
-          %p="weft_kernel.contract"(%scaled,%y) <{{acc_type=f32,over=array<i64:2>,engine="onednn-brgemm-f32"}}>:({at},{bt})->{ct}
+          %p="weft_kernel.contract"(%scaled,%y) <{{acc_type=f32,over=array<i64:2>,engine="{engine}"}}>:({at},{bt})->{ct}
           %sum="weft_kernel.binary"(%acc,%p) <{{kind="add"}}> {flags}:({ct},{ct})->{ct}
           scf.yield %sum:{ct}
         }}
@@ -604,7 +605,8 @@ def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow):
         "weft_kernel.return"():()->()
       }}):()->()
     }}''')
-    kernel = triton.compile(str(source), target=target, options={"num_cpu_threads": 1})
+    kernel = triton.compile(str(source), target=target,
+                            options={"num_cpu_threads": 1, "contraction_backend": "onednn-brgemm"})
     import re
     calls = re.findall(r"call void @__weft_onednn_brgemm_execute\([^\n]+", kernel.asm["llir"])
     assert calls and any(re.search(r"i32(?: [a-z]+)* 1\)", c) for c in calls) == allow

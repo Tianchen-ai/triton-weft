@@ -3066,6 +3066,14 @@ private:
     indexedSnapshots[result] = memories.at(admit.getRegion());
     return true;
   }
+  bool mayUseBrgemm(Operation &op) {
+    weft::x86::ContractionStorage storage{true, true, false, false};
+    auto choice = weft::x86::selectContractionEngine(
+        op, target, contractionBackend, storage, arrayValue(op.getResult(0).getType()),
+        shape(op.getOperand(0).getType()), shape(op.getOperand(1).getType()),
+        shape(op.getResult(0).getType()), /*emitDiagnostics=*/false);
+    return succeeded(choice) && weft::x86::isOneDNNBrgemm(*choice);
+  }
   bool selectDirectContractionView(wk::AdmitOp admit) {
     Value result = admit.getResult();
     if (result.use_empty() || packedType(result.getType())) return false;
@@ -3081,12 +3089,7 @@ private:
       if (!isa<wk::DotOp, wk::ContractOp, wk::OuterContractOp>(user) ||
           user->getBlock() != admit->getBlock())
         return false;
-      weft::x86::ContractionStorage dummy{true, true, false, false};
-      auto peek = weft::x86::selectContractionEngine(
-          *user, target, contractionBackend, dummy, arrayValue(user->getResult(0).getType()),
-          shape(user->getOperand(0).getType()), shape(user->getOperand(1).getType()),
-          shape(user->getResult(0).getType()), /*emitDiagnostics=*/false);
-      if (failed(peek) || !weft::x86::isOneDNNBrgemm(*peek))
+      if (!mayUseBrgemm(*user))
         return false;
       if (!last || last->isBeforeInBlock(user)) last = user;
     }
@@ -4103,9 +4106,8 @@ private:
       auto flags = add->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
       Value product = add.getLhs() == carry ? add.getRhs() : add.getLhs();
       auto *dot = product.getDefiningOp();
-      auto engine = dot ? dot->getAttrOfType<StringAttr>("engine") : StringAttr{};
       if (!dot || !isa<wk::ContractOp, wk::DotOp, wk::OuterContractOp>(dot) ||
-          !engine || !engine.getValue().starts_with("onednn-brgemm") ||
+          !mayUseBrgemm(*dot) ||
           !product.hasOneUse() || dot->getBlock() != loop.getBody() ||
           product.getType() != carry.getType() || add.getResult().getType() != carry.getType() ||
           !element(carry.getType()).isF32() || !llvm::all_of(shape(carry.getType()), [](int64_t n) { return n > 0; }) ||
