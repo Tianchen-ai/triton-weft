@@ -4098,23 +4098,41 @@ private:
     if (!arrayValue(initial.getType()) || packedType(initial.getType()) ||
         !carry.hasOneUse()) return fields;
     Operation *use = *carry.getUsers().begin();
+    Value accumulator = carry;
+    wk::BinaryOp scale;
+    if (auto binary = dyn_cast<wk::BinaryOp>(use);
+        binary && binary.getKind() == "mul" &&
+        binary->getBlock() == loop.getBody() &&
+        binary.getResult().getType() == carry.getType() &&
+        binary->hasOneUse()) {
+      scale = binary;
+      accumulator = scale.getResult();
+      use = *accumulator.getUsers().begin();
+    }
     if (use->getBlock() != loop.getBody() || use->getNumResults() != 1 ||
         !use->hasOneUse() || loop.getBody()->getTerminator()->getOperand(position) != use->getResult(0))
       return fields;
     auto update = dyn_cast<wk::UpdateOp>(use);
     if (auto add = dyn_cast<wk::BinaryOp>(use)) {
       auto flags = add->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
-      Value product = add.getLhs() == carry ? add.getRhs() : add.getLhs();
+      Value product = add.getLhs() == accumulator ? add.getRhs() : add.getLhs();
       auto *dot = product.getDefiningOp();
       if (!dot || !isa<wk::ContractOp, wk::DotOp, wk::OuterContractOp>(dot) ||
-          !mayUseBrgemm(*dot) ||
+          (scale && !scale->isBeforeInBlock(dot)) || !mayUseBrgemm(*dot) ||
           !product.hasOneUse() || dot->getBlock() != loop.getBody() ||
-          product.getType() != carry.getType() || add.getResult().getType() != carry.getType() ||
-          !element(carry.getType()).isF32() || !llvm::all_of(shape(carry.getType()), [](int64_t n) { return n > 0; }) ||
-          add.getKind() != "add" || !flags || !arith::bitEnumContainsAll(flags.getValue(),
-              arith::FastMathFlags::contract | arith::FastMathFlags::reassoc))
+          product.getType() != carry.getType() ||
+          add.getResult().getType() != carry.getType() ||
+          !element(carry.getType()).isF32() ||
+          !llvm::all_of(shape(carry.getType()),
+                        [](int64_t n) { return n > 0; }) ||
+          add.getKind() != "add" || !flags ||
+          !arith::bitEnumContainsAll(flags.getValue(),
+                                     arith::FastMathFlags::contract |
+                                         arith::FastMathFlags::reassoc))
         return fields;
-      brgemmAccumulators[dot] = carry;
+      brgemmAccumulators[dot] = accumulator;
+      if (scale)
+        privateArrayScales[scale] = carry;
     } else if (!update || update.getInput() != carry) {
       return fields;
     }
@@ -4516,7 +4534,7 @@ private:
   }
   DenseMap<Value, Operation *> arrayBirths;
   llvm::SmallPtrSet<Operation *, 8> privateArrayUpdates;
-  llvm::DenseMap<Operation *, Value> brgemmAccumulators;
+  llvm::DenseMap<Operation *, Value> brgemmAccumulators, privateArrayScales;
   llvm::SmallPtrSet<Operation *, 4> brgemmAdds;
   DenseMap<Value, std::pair<int64_t, Value>> bfloatGuards;
   FailureOr<SmallVector<Value>> scalarOperation(Operation &op, ValueRange operands, ValueRange validity) {
@@ -4540,7 +4558,13 @@ private:
     Value domain = op.getNumResults() ? op.getResult(0) : op.getOperand(3);
     auto extents = arrayExtents(domain, loc); auto ids = axes(domain.getType());
     SmallVector<weft::x86::ArrayStorage> outputs;
-    for (Value result : op.getResults()) outputs.push_back(weft::x86::allocateArray(b, loc, scalar(result.getType()), extents));
+    if (Value carry = privateArrayScales.lookup(&op)) {
+      outputs.push_back({mapped(carry), valid(carry, loc), extents});
+    } else {
+      for (Value result : op.getResults())
+        outputs.push_back(weft::x86::allocateArray(
+            b, loc, scalar(result.getType()), extents));
+    }
     if (failed(weft::x86::forArray(b, loc, extents, [&](Value linear, ValueRange coordinates) {
       SmallVector<Value> operands, validity;
       for (Value operand : op.getOperands()) {

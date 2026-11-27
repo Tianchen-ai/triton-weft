@@ -561,7 +561,8 @@ def test_canonical_field_store_through_record_subview(tmp_path, row, offset):
 
 @pytest.mark.parametrize("allow", [False, True])
 @pytest.mark.parametrize("engine", ["auto", "onednn-brgemm-f32"])
-def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow, engine):
+@pytest.mark.parametrize("scale_carry", [False, True])
+def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow, engine, scale_carry):
     import triton
     from triton.backends.weft.driver import WeftDriver
     from weft_core.compiler import x86_target_capabilities
@@ -578,6 +579,9 @@ def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow, eng
     bv, bt = types("[2,3]")
     cv, ct = types("[1,3]")
     flags = "{fastmath = #arith.fastmath<reassoc,contract>}" if allow else ""
+    scale = (f'%initial="weft_kernel.binary"(%acc,%factor) <{{kind="mul"}}>:({ct},f32)->{ct}'
+             if scale_carry else "")
+    acc = "%initial" if scale_carry else "%acc"
     source = tmp_path / "accumulate.weftir"
     source.write_text(f'''module {{
       "weft_kernel.kernel"() <{{arg_access=["read","read","read","write"],
@@ -596,8 +600,9 @@ def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow, eng
           %i="weft_kernel.cast"(%step):(index)->si64
           %factor="weft_kernel.cast"(%i):(si64)->f32
           %scaled="weft_kernel.binary"(%x,%factor) <{{kind="mul"}}>:({at},f32)->{at}
+          {scale}
           %p="weft_kernel.contract"(%scaled,%y) <{{acc_type=f32,over=array<i64:2>,engine="{engine}"}}>:({at},{bt})->{ct}
-          %sum="weft_kernel.binary"(%acc,%p) <{{kind="add"}}> {flags}:({ct},{ct})->{ct}
+          %sum="weft_kernel.binary"({acc},%p) <{{kind="add"}}> {flags}:({ct},{ct})->{ct}
           scf.yield %sum:{ct}
         }}
         %diff="weft_kernel.binary"(%r,%init) <{{kind="sub"}}>:({ct},{ct})->{ct}
@@ -615,5 +620,5 @@ def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow, eng
     init = np.full_like(a, 7)
     result = np.empty_like(a)
     kernel[(1,)](a, b, init, result)
-    np.testing.assert_array_equal(result, 3 * a)
+    np.testing.assert_array_equal(result, init + 4 * a if scale_carry else 3 * a)
     np.testing.assert_array_equal(init, 7)
