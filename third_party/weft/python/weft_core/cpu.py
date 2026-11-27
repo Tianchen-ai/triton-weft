@@ -18,6 +18,7 @@ _PROFILES = {
     "k1": CPUTarget("weft", "riscv64", _RVV + "_zba", "lp64d", 256, "spacemit-ime1"),
     "k3-x100": CPUTarget("weft", "riscv64", _RVV + "_zba", "lp64d", 256),
     "k3-a100": CPUTarget("weft", "riscv64", _RVV + "_zba", "lp64d", 1024, "spacemit-ime2"),
+    "rvv-v100": CPUTarget("weft", "riscv64", _RVV + "_zba_zbb_zbc_zbs_zfbfmin_zvfbfmin_zvfbfwma", "lp64d", 256),
     "x86-avx2": CPUTarget("weft", "x86_64", "x86-64-v3", "sysv", 0),
     "x86-avx512": CPUTarget("weft", "x86_64", "x86-64-v4", "sysv", 0),
     "x86-amx": CPUTarget("weft", "x86_64", "x86-64-v4+amx-tile+amx-int8+amx-bf16", "sysv", 0),

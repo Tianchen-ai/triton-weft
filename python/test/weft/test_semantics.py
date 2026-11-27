@@ -48,6 +48,19 @@ def test_cpu_selection_keeps_available_affinity_local(monkeypatch):
     monkeypatch.setattr(cpu, "devices", lambda: pytest.fail("an available selection needs no whole-machine probe"))
     cpu.bind_cpus([1])
     assert selected == {1}
+
+
+def test_riscv_v100_profile_registered():
+    from weft_core import cpu
+    profiles = cpu.profiles()
+    assert "rvv-v100" in profiles
+    v100 = cpu.target("rvv-v100")
+    assert v100.arch == "riscv64"
+    assert v100.abi == "lp64d"
+    assert v100.vlen_bits == 256
+    assert "zvfbfmin" in v100.march.split("_")
+
+
 from semantic_programs import (semantics_composition, static_births,
     invalid_body_capture, invalid_sibling_capture, invalid_stage_update,
     dense_index_conversion)
