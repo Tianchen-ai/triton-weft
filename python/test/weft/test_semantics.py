@@ -557,3 +557,61 @@ def test_canonical_field_store_through_record_subview(tmp_path, row, offset):
     expected[row, 1, 2 + offset:10 + offset] = source_bytes.view(np.uint8)
     kernel[(1,)](source_bytes, tl.View(storage, encoding=formats.Q8_0, shape=(3, 2, 32)))
     np.testing.assert_array_equal(storage, expected)
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_brgemm_loop_accumulator_preserves_initial_snapshot(tmp_path, allow):
+    import triton
+    from triton.backends.weft.driver import WeftDriver
+    from weft_core.compiler import x86_target_capabilities
+
+    target = WeftDriver().get_current_target()
+    if target.arch != "x86_64" or not x86_target_capabilities(
+            target.march, target.abi, target.vlen_bits)["onednn_brgemm"]["f32"]:
+        pytest.skip("requires oneDNN f32 BRGEMM")
+    def types(axes):
+        enc = '!weft_kernel.encoding<"f32","dense","dense.f32",[]>'
+        return (f'!weft_kernel.view<{enc},[80,80],{axes}>',
+                f'!weft_kernel.value<f32,[80,80],{axes}>')
+    av, at = types("[1,2]")
+    bv, bt = types("[2,3]")
+    cv, ct = types("[1,3]")
+    flags = "{fastmath = #arith.fastmath<reassoc,contract>}" if allow else ""
+    source = tmp_path / "accumulate.weftir"
+    source.write_text(f'''module {{
+      "weft_kernel.kernel"() <{{arg_access=["read","read","read","write"],
+        arg_alias_sets=array<i64:0,1,2,3>, arg_names=["A","B","C","out"],
+        shape_symbols=[], source="accumulate", sym_name="accumulate"}}> ({{
+      ^bb0(%a:{av},%b:{bv},%c:{cv},%out:{cv}):
+        %root="weft_kernel.root_domain"():()->!weft_kernel.domain<"root",0,-1,0,"root","exact">
+        %x="weft_kernel.admit"(%a):({av})->{at}
+        %y="weft_kernel.admit"(%b):({bv})->{bt}
+        %init="weft_kernel.admit"(%c):({cv})->{ct}
+        %zero=arith.constant 0:index
+        %one=arith.constant 1:index
+        %two=arith.constant 2:index
+        %r=scf.for %iv=%zero to %two step %one iter_args(%acc=%init)->({ct}) {{
+          %step="weft_kernel.binary"(%iv,%one) <{{kind="add"}}>:(index,index)->index
+          %i="weft_kernel.cast"(%step):(index)->si64
+          %factor="weft_kernel.cast"(%i):(si64)->f32
+          %scaled="weft_kernel.binary"(%x,%factor) <{{kind="mul"}}>:({at},f32)->{at}
+          %p="weft_kernel.contract"(%scaled,%y) <{{acc_type=f32,over=array<i64:2>,engine="onednn-brgemm-f32"}}>:({at},{bt})->{ct}
+          %sum="weft_kernel.binary"(%acc,%p) <{{kind="add"}}> {flags}:({ct},{ct})->{ct}
+          scf.yield %sum:{ct}
+        }}
+        %diff="weft_kernel.binary"(%r,%init) <{{kind="sub"}}>:({ct},{ct})->{ct}
+        "weft_kernel.commit"(%diff,%out):({ct},{cv})->()
+        "weft_kernel.return"():()->()
+      }}):()->()
+    }}''')
+    kernel = triton.compile(str(source), target=target, options={"num_cpu_threads": 1})
+    import re
+    calls = re.findall(r"call void @__weft_onednn_brgemm_execute\([^\n]+", kernel.asm["llir"])
+    assert calls and any(re.search(r"i32(?: [a-z]+)* 1\)", c) for c in calls) == allow
+    a = np.full((80, 80), 2, np.float32)
+    b = np.eye(80, dtype=np.float32)
+    init = np.full_like(a, 7)
+    result = np.empty_like(a)
+    kernel[(1,)](a, b, init, result)
+    np.testing.assert_array_equal(result, 3 * a)
+    np.testing.assert_array_equal(init, 7)

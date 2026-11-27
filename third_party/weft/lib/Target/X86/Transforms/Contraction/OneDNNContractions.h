@@ -29,7 +29,7 @@ mlir::LogicalResult materializeOneDNNBrgemm(
     mlir::ModuleOp module, mlir::OpBuilder &b, mlir::Location loc,
     const X86Target &target, ContractionEngine engine,
     const BrgemmGeometry &geom, const BrgemmOperand &lhs,
-    const BrgemmOperand &rhs, const ArrayStorage &output);
+    const BrgemmOperand &rhs, const ArrayStorage &output, bool accumulate);
 
 // Fast native SIMD outer-product / inner-product lowering for dynamic or
 // static 2D/3D array contractions when ContractionEngine::Vector is selected.

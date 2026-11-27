@@ -398,7 +398,7 @@ LogicalResult materializeOneDNNBrgemm(
     ModuleOp module, OpBuilder &b, Location loc,
     const X86Target &target, ContractionEngine engine,
     const BrgemmGeometry &geom, const BrgemmOperand &lhs,
-    const BrgemmOperand &rhs, const ArrayStorage &output) {
+    const BrgemmOperand &rhs, const ArrayStorage &output, bool accumulate) {
   auto lhsExtents = lhs.view ? ArrayRef<Value>(lhs.view->extents) : ArrayRef<Value>(lhs.array.extents);
   auto rhsExtents = rhs.view ? ArrayRef<Value>(rhs.view->extents) : ArrayRef<Value>(rhs.array.extents);
 
@@ -677,20 +677,20 @@ LogicalResult materializeOneDNNBrgemm(
           emitBrgemmHelperCall(module, b, loc, target, ptrA, baseA, offA, bytesA,
                                true, rv.base, rv.offset, bytesB,
                                output.data, zeroIdx, bytesC,
-                               M, N, K, ldaVal, bLdb, N, dtA, dtB, dtC, 0);
+                               M, N, K, ldaVal, bLdb, N, dtA, dtB, dtC, accumulate);
           b.setInsertionPointToStart(&bBranch.getElseRegion().front());
           auto [localB, localLdb] = materializeLocalB();
           emitBrgemmHelperCall(module, b, loc, target, ptrA, baseA, offA, bytesA,
                                false, localB, zeroIdx, bytesB,
                                output.data, zeroIdx, bytesC,
-                               M, N, K, ldaVal, localLdb, N, dtA, dtB, dtC, 0);
+                               M, N, K, ldaVal, localLdb, N, dtA, dtB, dtC, accumulate);
         }
       } else {
         auto [localB, localLdb] = materializeLocalB();
         emitBrgemmHelperCall(module, b, loc, target, ptrA, baseA, offA, bytesA,
                              false, localB, zeroIdx, bytesB,
                              output.data, zeroIdx, bytesC,
-                             M, N, K, ldaVal, localLdb, N, dtA, dtB, dtC, 0);
+                             M, N, K, ldaVal, localLdb, N, dtA, dtB, dtC, accumulate);
       }
     };
 
@@ -730,8 +730,8 @@ LogicalResult materializeOneDNNBrgemm(
     }
 
     Value totalOut = arith::MulIOp::create(b, loc, M, N);
-    auto vLoop = scf::ForOp::create(b, loc, zeroIdx, totalOut, oneIdx);
-    {
+    if (!accumulate) {
+      auto vLoop = scf::ForOp::create(b, loc, zeroIdx, totalOut, oneIdx);
       OpBuilder::InsertionGuard vg(b);
       b.setInsertionPointToStart(vLoop.getBody());
       memref::StoreOp::create(b, loc, i8c(b, loc, 1), output.valid, vLoop.getInductionVar());
@@ -789,8 +789,15 @@ LogicalResult materializeOneDNNBrgemm(
                        arith::OrIOp::create(b, loc, red.getRegionIterArgs()[1], act)});
       }
       Value outIdx = arith::AddIOp::create(b, loc, arith::MulIOp::create(b, loc, m, N), n);
-      memref::StoreOp::create(b, loc, red.getResult(0), output.data, outIdx);
+      Value sum = red.getResult(0);
       Value vByte = arith::ExtUIOp::create(b, loc, b.getI8Type(), red.getResult(1));
+      if (accumulate) {
+        Value prior = memref::LoadOp::create(b, loc, output.data, outIdx);
+        sum = arith::AddFOp::create(b, loc, prior, sum);
+        Value active = memref::LoadOp::create(b, loc, output.valid, outIdx);
+        vByte = arith::AndIOp::create(b, loc, active, vByte);
+      }
+      memref::StoreOp::create(b, loc, sum, output.data, outIdx);
       memref::StoreOp::create(b, loc, vByte, output.valid, outIdx);
     }
   }

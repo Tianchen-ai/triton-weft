@@ -3140,11 +3140,19 @@ private:
       return op.emitError("unsupported oneDNN BRGeMM contraction geometry");
     auto lhs = makeBrgemmOperand(op.getOperand(0), loc);
     auto rhs = makeBrgemmOperand(op.getOperand(1), loc);
-    auto output = weft::x86::allocateArray(b, loc, scalar(result.getType()), arrayExtents(result, loc));
+    auto carry = brgemmAccumulators.lookup(&op);
+    auto extents = arrayExtents(result, loc);
+    auto output = carry ? weft::x86::ArrayStorage{mapped(carry), valid(carry, loc), extents}
+                        : weft::x86::allocateArray(b, loc, scalar(result.getType()), extents);
     if (failed(weft::x86::materializeOneDNNBrgemm(
-            module, b, loc, target, engine, geom, lhs, rhs, output)))
+            module, b, loc, target, engine, geom, lhs, rhs, output, bool(carry))))
       return failure();
     bindArray(result, output, loc);
+    if (carry) {
+      Operation *add = *result.getUsers().begin();
+      bindArray(add->getResult(0), output, loc);
+      brgemmAdds.insert(add);
+    }
     return success();
   }
   LogicalResult indexedSnapshotLookup(wk::LookupOp op, const Memory &view) {
@@ -4086,11 +4094,28 @@ private:
     Value carry = loop.getRegionIterArgs()[position];
     if (!arrayValue(initial.getType()) || packedType(initial.getType()) ||
         !carry.hasOneUse()) return fields;
-    auto update = dyn_cast<wk::UpdateOp>(*carry.getUsers().begin());
-    if (!update || update.getInput() != carry || update->getBlock() != loop.getBody() ||
-        !update->hasOneUse() ||
-        loop.getBody()->getTerminator()->getOperand(position) != update.getResult())
+    Operation *use = *carry.getUsers().begin();
+    if (use->getBlock() != loop.getBody() || use->getNumResults() != 1 ||
+        !use->hasOneUse() || loop.getBody()->getTerminator()->getOperand(position) != use->getResult(0))
       return fields;
+    auto update = dyn_cast<wk::UpdateOp>(use);
+    if (auto add = dyn_cast<wk::BinaryOp>(use)) {
+      auto flags = add->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
+      Value product = add.getLhs() == carry ? add.getRhs() : add.getLhs();
+      auto *dot = product.getDefiningOp();
+      auto engine = dot ? dot->getAttrOfType<StringAttr>("engine") : StringAttr{};
+      if (!dot || !isa<wk::ContractOp, wk::DotOp, wk::OuterContractOp>(dot) ||
+          !engine || !engine.getValue().starts_with("onednn-brgemm") ||
+          !product.hasOneUse() || dot->getBlock() != loop.getBody() ||
+          product.getType() != carry.getType() || add.getResult().getType() != carry.getType() ||
+          !element(carry.getType()).isF32() || !llvm::all_of(shape(carry.getType()), [](int64_t n) { return n > 0; }) ||
+          add.getKind() != "add" || !flags || !arith::bitEnumContainsAll(flags.getValue(),
+              arith::FastMathFlags::contract | arith::FastMathFlags::reassoc))
+        return fields;
+      brgemmAccumulators[dot] = carry;
+    } else if (!update || update.getInput() != carry) {
+      return fields;
+    }
     if (!initial.getDefiningOp<wk::EmptyOp>() || !initial.hasOneUse() ||
         initial.getParentBlock() != loop->getBlock()) {
       // The copy is outside the loop and also handles zero iterations. Only a
@@ -4102,7 +4127,7 @@ private:
       fields[0] = local.data;
       fields[1] = local.valid;
     }
-    privateArrayUpdates.insert(update);
+    if (update) privateArrayUpdates.insert(update);
     return fields;
   }
   FailureOr<SmallVector<Type>> flattenTypes(TypeRange types, Operation *owner) {
@@ -4489,6 +4514,8 @@ private:
   }
   DenseMap<Value, Operation *> arrayBirths;
   llvm::SmallPtrSet<Operation *, 8> privateArrayUpdates;
+  llvm::DenseMap<Operation *, Value> brgemmAccumulators;
+  llvm::SmallPtrSet<Operation *, 4> brgemmAdds;
   DenseMap<Value, std::pair<int64_t, Value>> bfloatGuards;
   FailureOr<SmallVector<Value>> scalarOperation(Operation &op, ValueRange operands, ValueRange validity) {
     auto outerValues = values; auto outerMasks = masks;
@@ -5463,6 +5490,7 @@ private:
     return success();
   }
   LogicalResult lowerOperation(Operation &op) {
+    if (brgemmAdds.contains(&op)) return success();
     auto loc = op.getLoc();
     if (auto lookup = dyn_cast<wk::LookupOp>(op)) {
       auto found = indexedSnapshots.find(lookup.getTable());
