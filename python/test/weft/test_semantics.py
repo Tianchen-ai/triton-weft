@@ -455,6 +455,9 @@ def test_strided_outer_product_preserves_narrow_values(tmp_path, precision, tran
     if target.arch != "x86_64":
         pytest.skip("x86 dense contraction lowering")
     m, k, n = 17 if transpose_rhs else 3, 65, 16
+    if masked_tail and not transpose_rhs:
+        # Array-sized result with a partially valid register-sized RHS.
+        m = 257
     def view(dtype, shape, axes):
         return f'!weft_kernel.view<!weft_kernel.encoding<"{dtype}", "dense", "dense.{dtype}", []>, {shape}, {axes}>'
     def value(dtype, shape, axes):

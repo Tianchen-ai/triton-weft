@@ -39,8 +39,7 @@ bool canMaterializeSIMDArrayContraction(
     mlir::Type lhsElem, mlir::Type rhsElem, mlir::Type resElem);
 bool materializeSIMDArrayContraction(
     mlir::OpBuilder &b, mlir::Location loc, const X86Target &target,
-    const BrgemmGeometry &geom, const ArrayStorage &lhs, mlir::Type lhsElem,
-    const ArrayStorage &rhs, mlir::Type rhsElem,
+    const BrgemmGeometry &geom, const BrgemmOperand &lhs, const BrgemmOperand &rhs,
     const ArrayStorage &output, mlir::Type resElem);
 
 } // namespace weft::x86

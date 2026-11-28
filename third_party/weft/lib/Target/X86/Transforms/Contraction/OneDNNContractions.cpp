@@ -346,6 +346,17 @@ Value operandIsComplete(OpBuilder &b, Location loc, const BrgemmOperand &op) {
   return loop.getResult(0);
 }
 
+void materializeFallbackMasks(OpBuilder &b, Location loc, const BrgemmOperand &lhs,
+                              const BrgemmOperand &rhs) {
+  for (const BrgemmOperand *operand : {&lhs, &rhs}) {
+    if (!operand->laneValidity)
+      continue;
+    auto type = cast<VectorType>(operand->laneValidity.getType()).clone(b.getI8Type());
+    Value bytes = arith::ExtUIOp::create(b, loc, type, operand->laneValidity);
+    vector::StoreOp::create(b, loc, bytes, operand->array.valid, idx(b, loc, 0));
+  }
+}
+
 bool isAssumedPositive(OpBuilder &b, Value v) {
   APInt c;
   if (matchPattern(v, m_ConstantInt(&c))) return c.isStrictlyPositive();
@@ -742,14 +753,7 @@ LogicalResult materializeOneDNNBrgemm(
 
     // Materialize byte-addressable lane masks only for the scalar fallback.
     b.setInsertionPointToStart(&branch.getElseRegion().front());
-    for (auto *operand : {&lhs, &rhs}) {
-      if (!operand->laneValidity)
-        continue;
-      auto type = cast<VectorType>(operand->laneValidity.getType())
-                      .clone(b.getI8Type());
-      Value bytes = arith::ExtUIOp::create(b, loc, type, operand->laneValidity);
-      vector::StoreOp::create(b, loc, bytes, operand->array.valid, zeroIdx);
-    }
+    materializeFallbackMasks(b, loc, lhs, rhs);
     auto mLoop = scf::ForOp::create(b, loc, zeroIdx, M, oneIdx);
     {
       OpBuilder::InsertionGuard mg(b);
@@ -837,9 +841,10 @@ bool canMaterializeSIMDArrayContraction(
 
 bool materializeSIMDArrayContraction(
     OpBuilder &b, Location loc, const X86Target &target,
-    const BrgemmGeometry &geom, const ArrayStorage &lhs, Type lhsElem,
-    const ArrayStorage &rhs, Type rhsElem,
+    const BrgemmGeometry &geom, const BrgemmOperand &lhsOp, const BrgemmOperand &rhsOp,
     const ArrayStorage &output, Type resElem) {
+  const auto &lhs = lhsOp.array, &rhs = rhsOp.array;
+  Type lhsElem = lhsOp.logicalElement, rhsElem = rhsOp.logicalElement;
   if (!canMaterializeSIMDArrayContraction(target, geom, lhsElem, rhsElem, resElem))
     return false;
   Type outScalar = physicalScalar(b.getContext(), resElem);
@@ -854,8 +859,6 @@ bool materializeSIMDArrayContraction(
   Value N = geom.vectorRight ? oneIdx
                              : (geom.packed3D ? rhs.extents[1] : rhs.extents[geom.rightReductionFirst ? 1 : 0]);
 
-  BrgemmOperand lhsOp{std::nullopt, lhs, lhsElem};
-  BrgemmOperand rhsOp{std::nullopt, rhs, rhsElem};
   Value complete = arith::AndIOp::create(
       b, loc,
       arith::AndIOp::create(
@@ -1092,6 +1095,7 @@ bool materializeSIMDArrayContraction(
 
     // Masked / empty fallback
     b.setInsertionPointToStart(&branch.getElseRegion().front());
+    materializeFallbackMasks(b, loc, lhsOp, rhsOp);
     auto mLoop = scf::ForOp::create(b, loc, zeroIdx, M, oneIdx);
     {
       OpBuilder::InsertionGuard mg(b);

@@ -5436,8 +5436,7 @@ private:
         auto rhsOp = makeBrgemmOperand(op.getOperand(1), loc);
         auto fastOut = weft::x86::allocateArray(b, loc, scalar(result.getType()), outputShape);
         if (weft::x86::materializeSIMDArrayContraction(
-                b, loc, target, geom, lhsOp.array, lhsOp.logicalElement,
-                rhsOp.array, rhsOp.logicalElement, fastOut, element(result.getType()))) {
+                b, loc, target, geom, lhsOp, rhsOp, fastOut, element(result.getType()))) {
           bindArray(result, fastOut, loc);
           return success();
         }
