@@ -9,12 +9,30 @@ import subprocess
 import tempfile
 
 
+def _resolve_tool(name):
+    wrappers = {"ccache", "distcc", "sccache"}
+    if os.sep not in name and (os.altsep is None or os.altsep not in name):
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry:
+                continue
+            candidate = shutil.which(name, path=entry)
+            if candidate is None:
+                continue
+            resolved = Path(candidate).resolve(strict=True)
+            if resolved.name not in wrappers:
+                return str(resolved)
+    found = shutil.which(name)
+    if found is None:
+        return None
+    resolved = Path(found).resolve(strict=True)
+    return str(found if resolved.name in wrappers else resolved)
+
+
 def native_gcc_runtime(abi):
     """Describe the installed C runtime inputs; Clang remains the compiler."""
-    gcc = shutil.which("gcc")
+    gcc = _resolve_tool("gcc")
     if gcc is None:
         return ()  # Clang can also discover runtime-only installations.
-    gcc = str(Path(gcc).resolve(strict=True))
     triple = subprocess.run([gcc, "-dumpmachine"], check=True, capture_output=True, text=True).stdout.strip()
     if not triple.startswith("riscv64"):
         raise ValueError(f"native GCC runtime provider targets {triple}, expected riscv64; configure toolchain explicitly")
@@ -95,10 +113,10 @@ class Toolchain:
                 values["runtime_files"] = {**bundled_libraries, **values.get("runtime_files", {})}
             else:
                 raise RuntimeError("native toolchain is not configured; set toolchain.cc or WEFT_CORE_CC")
-        cc = shutil.which(values["cc"])
+        cc = _resolve_tool(values["cc"])
         if cc is None:
             raise FileNotFoundError(f"compiler is not executable: {values['cc']}")
-        values["cc"] = str(Path(cc).resolve())
+        values["cc"] = cc
         values.setdefault("target", "x86_64-linux-gnu" if x86 else "riscv64-linux-gnu")
         values.setdefault("sysroot", "")
         if not values["target"].startswith(target.arch + "-"):

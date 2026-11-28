@@ -48,6 +48,42 @@ def test_cpu_selection_keeps_available_affinity_local(monkeypatch):
     monkeypatch.setattr(cpu, "devices", lambda: pytest.fail("an available selection needs no whole-machine probe"))
     cpu.bind_cpus([1])
     assert selected == {1}
+
+
+def test_riscv_v100_profile_registered():
+    from weft_core import cpu
+    profiles = cpu.profiles()
+    assert "rvv-v100" in profiles
+    v100 = cpu.target("rvv-v100")
+    assert v100.arch == "riscv64"
+    assert v100.abi == "lp64d"
+    assert v100.vlen_bits == 256
+    assert "zvfbfmin" in v100.march.split("_")
+
+
+def test_toolchain_resolves_past_ccache_wrapper(tmp_path, monkeypatch):
+    import os
+    from weft_core import toolchain
+    wrapper_dir = tmp_path / "wrappers"
+    real_dir = tmp_path / "bin"
+    wrapper_dir.mkdir()
+    real_dir.mkdir()
+    ccache_bin = wrapper_dir / "ccache"
+    ccache_bin.write_text("#!/bin/sh\n")
+    ccache_bin.chmod(0o755)
+    (wrapper_dir / "gcc").symlink_to(ccache_bin)
+    real_gcc = real_dir / "gcc"
+    real_gcc.write_text("#!/bin/sh\n")
+    real_gcc.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{wrapper_dir}{os.pathsep}{real_dir}")
+    assert toolchain._resolve_tool("gcc") == str(real_gcc.resolve())
+    only_wrapper_dir = tmp_path / "only_wrapper"
+    only_wrapper_dir.mkdir()
+    (only_wrapper_dir / "clang").symlink_to(ccache_bin)
+    monkeypatch.setenv("PATH", str(only_wrapper_dir))
+    assert toolchain._resolve_tool("clang") == str(only_wrapper_dir / "clang")
+
+
 from semantic_programs import (semantics_composition, static_births,
     invalid_body_capture, invalid_sibling_capture, invalid_stage_update,
     dense_index_conversion)
