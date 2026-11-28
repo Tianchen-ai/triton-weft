@@ -3123,9 +3123,7 @@ private:
     auto storage = weft::x86::allocateArray(b, loc, scalar(source.getType()), extents);
     if (auto vecTy = dyn_cast<VectorType>(phys.getType())) {
       vector::StoreOp::create(b, loc, phys, storage.data, indexConstant(loc, 0));
-      Value vMask = valid(source, loc);
-      Value vBytes = arith::ExtUIOp::create(b, loc, vecTy.clone(b.getI8Type()), vMask);
-      vector::StoreOp::create(b, loc, vBytes, storage.valid, indexConstant(loc, 0));
+      out.laneValidity = valid(source, loc);
     } else {
       memref::StoreOp::create(b, loc, phys, storage.data, indexConstant(loc, 0));
       storeArrayMask(loc, valid(source, loc), storage.valid, indexConstant(loc, 0));

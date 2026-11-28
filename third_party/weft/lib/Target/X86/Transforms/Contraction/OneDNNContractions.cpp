@@ -320,6 +320,9 @@ Value loadOperandValid(OpBuilder &b, Location loc, const BrgemmOperand &op,
 }
 
 Value operandIsComplete(OpBuilder &b, Location loc, const BrgemmOperand &op) {
+  if (op.laneValidity)
+    return vector::ReductionOp::create(b, loc, vector::CombiningKind::AND,
+                                       op.laneValidity);
   if (op.view) {
     const auto &v = *op.view;
     Value ok = v.guard;
@@ -737,8 +740,16 @@ LogicalResult materializeOneDNNBrgemm(
       memref::StoreOp::create(b, loc, i8c(b, loc, 1), output.valid, vLoop.getInductionVar());
     }
 
-    // Masked / empty fallback branch preserving exact Canonical pairwise validity.
+    // Materialize byte-addressable lane masks only for the scalar fallback.
     b.setInsertionPointToStart(&branch.getElseRegion().front());
+    for (auto *operand : {&lhs, &rhs}) {
+      if (!operand->laneValidity)
+        continue;
+      auto type = cast<VectorType>(operand->laneValidity.getType())
+                      .clone(b.getI8Type());
+      Value bytes = arith::ExtUIOp::create(b, loc, type, operand->laneValidity);
+      vector::StoreOp::create(b, loc, bytes, operand->array.valid, zeroIdx);
+    }
     auto mLoop = scf::ForOp::create(b, loc, zeroIdx, M, oneIdx);
     {
       OpBuilder::InsertionGuard mg(b);

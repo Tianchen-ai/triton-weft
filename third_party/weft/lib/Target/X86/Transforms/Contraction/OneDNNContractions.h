@@ -23,6 +23,7 @@ struct BrgemmOperand {
   std::optional<DirectContractionView> view;
   ArrayStorage array;
   mlir::Type logicalElement;
+  mlir::Value laneValidity{};
 };
 
 mlir::LogicalResult materializeOneDNNBrgemm(

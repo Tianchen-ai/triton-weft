@@ -112,11 +112,12 @@ mlir::LogicalResult UnaryOp::verify() {
   if (getInput().getType() != getResult().getType() ||
       !isNumeric(getInput().getType()))
     return emitOpError("unary operation preserves its logical type");
-  if (getKind() != "neg" && getKind() != "abs" && getKind() != "exp" && getKind() != "exp2" &&
-      getKind() != "sqrt" && getKind() != "rsqrt" && getKind() != "log")
+  if (getKind() != "floor" && getKind() != "neg" && getKind() != "abs" &&
+      getKind() != "exp" && getKind() != "exp2" && getKind() != "sqrt" &&
+      getKind() != "rsqrt" && getKind() != "log")
     return emitOpError("unknown unary numeric operation");
-  if ((getKind() == "exp" || getKind() == "exp2" || getKind() == "sqrt" ||
-       getKind() == "rsqrt" || getKind() == "log") &&
+  if ((getKind() == "floor" || getKind() == "exp" || getKind() == "exp2" ||
+       getKind() == "sqrt" || getKind() == "rsqrt" || getKind() == "log") &&
       !mlir::isa<mlir::FloatType>(logicalElement(getInput().getType())))
     return emitOpError() << getKind() << " requires floating-point elements";
   return mlir::success();
